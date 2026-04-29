@@ -207,6 +207,7 @@ class TelegramChannel(BaseChannel):
         BotCommand("new", "Новый разговор"),
         BotCommand("clear_memory", "Очистить память (архив в HISTORY.md)"),
         BotCommand("stop", "Остановить текущую задачу"),
+        BotCommand("id", "Показать ваши ID"),
         BotCommand("link", "Связать аккаунт между каналами"),
         BotCommand("help", "Список команд"),
         BotCommand("restart", "Перезапуск бота"),
@@ -313,6 +314,8 @@ class TelegramChannel(BaseChannel):
         self._app.add_handler(CommandHandler("new", self._forward_command))
         self._app.add_handler(CommandHandler("clear_memory", self._forward_command))
         self._app.add_handler(CommandHandler("stop", self._forward_command))
+        self._app.add_handler(CommandHandler("id", self._forward_command))
+        self._app.add_handler(CommandHandler("link", self._forward_command))
         self._app.add_handler(CommandHandler("restart", self._forward_command))
         self._app.add_handler(CommandHandler("status", self._forward_command))
         self._app.add_handler(CommandHandler("help", self._on_help))
@@ -423,7 +426,7 @@ class TelegramChannel(BaseChannel):
 
         if not (msg.media or []):
             wants_tts = bool(self.config.tts_enabled)
-            if wants_tts and msg.content and msg.content != "[empty message]":
+            if wants_tts and not bool(msg.metadata.get("_skip_tts")) and msg.content and msg.content != "[empty message]":
                 tts_path = await self.synthesize_speech(msg.content)
                 if tts_path:
                     msg.media = [*msg.media, tts_path]
@@ -641,6 +644,7 @@ class TelegramChannel(BaseChannel):
             "/new — новый разговор\n"
             "/clear_memory — очистить память (архив в HISTORY.md)\n"
             "/stop — остановить текущую задачу\n"
+            "/id — показать ваши ID\n"
             "/restart — перезапуск бота\n"
             "/status — статус бота\n"
             "/help — эта справка"
@@ -755,6 +759,10 @@ class TelegramChannel(BaseChannel):
                         # File is already on disk; path is in media[] for tools. Do not also
                         # emit [voice: path] in content — skills often key off that and ask for STT again.
                         return [path_str], [f"[transcription: {transcription}]"]
+                    stt_error = self.consume_last_stt_error()
+                    if stt_error:
+                        logger.warning("Telegram STT error for {}: {}", path_str, stt_error)
+                        return [path_str], [f"[transcription_error: {stt_error}]"]
                 return [path_str], [f"[{media_type}: {path_str}]"]
             return [path_str], [f"[{media_type}: {path_str}]"]
         except Exception as e:

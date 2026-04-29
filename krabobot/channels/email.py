@@ -230,6 +230,12 @@ class EmailChannel(BaseChannel):
 
         try:
             await asyncio.to_thread(self._smtp_send, email_msg)
+            logger.info(
+                "Email sent via SMTP to {} (subject='{}', attachments={})",
+                to_addr,
+                subject,
+                len(msg.media or []),
+            )
         except Exception as e:
             logger.error("Error sending email to {}: {}", to_addr, e)
             raise
@@ -424,7 +430,8 @@ class EmailChannel(BaseChannel):
                     body += "\n\n[Attached images are included below for analysis.]"
                 if all_paths:
                     body += "\n\n[Attached files: " + ", ".join(all_paths) + "]"
-                content = (
+                command = self._extract_slash_command(body)
+                content = command or (
                     f"[EMAIL-CONTEXT] Email received.\n"
                     f"From: {sender}\n"
                     f"Subject: {subject}\n"
@@ -439,6 +446,8 @@ class EmailChannel(BaseChannel):
                     "sender_email": sender,
                     "uid": uid,
                 }
+                if command:
+                    metadata["slash_command"] = command
                 messages.append(
                     {
                         "sender": sender,
@@ -548,6 +557,34 @@ class EmailChannel(BaseChannel):
         if msg.get_content_type() == "text/html":
             return cls._html_to_text(payload).strip()
         return payload.strip()
+
+    @staticmethod
+    def _extract_slash_command(body: str) -> str | None:
+        """Extract first slash command line from top (before quoted reply)."""
+        if not body:
+            return None
+        quote_markers = (
+            "-----original message-----",
+            "on ",
+            "from:",
+            ">",
+        )
+        for raw in body.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            low = line.lower()
+            if (
+                low.startswith("-----original message-----")
+                or low.startswith("от:")
+                or (low.startswith("on ") and "wrote:" in low)
+                or low.startswith("from:")
+                or line.startswith(">")
+            ):
+                break
+            if line.startswith("/"):
+                return line
+        return None
 
     def _extract_attachments(self, parsed: Any, msg_id: str) -> list[str]:
         """Extract all attachments (images, audio, documents), save to media dir, return file paths."""

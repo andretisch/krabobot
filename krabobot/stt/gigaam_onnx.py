@@ -10,7 +10,7 @@ class GigaamOnnxTranscriber:
     """Thread-safe singleton-like loader for ONNX sessions."""
 
     _lock = threading.Lock()
-    _cache: dict[tuple[str, str], tuple[object, object]] = {}
+    _cache: dict[tuple[str, str], tuple[str, object]] = {}
     _prepare_locks: dict[str, threading.Lock] = {}
 
     @classmethod
@@ -44,7 +44,19 @@ class GigaamOnnxTranscriber:
         return str(out_dir)
 
     @classmethod
-    def _load_sessions(cls, onnx_dir: str, model_version: str) -> tuple[object, object]:
+    @staticmethod
+    def _split_model_version(model_version: str) -> tuple[str, str]:
+        mv = (model_version or "v2_ctc").strip().lower()
+        if "_" in mv:
+            version, model_type = mv.split("_", 1)
+        else:
+            version, model_type = "v2", "ctc"
+        if model_type not in {"ctc", "rnnt"}:
+            model_type = "ctc"
+        return version, model_type
+
+    @classmethod
+    def _load_sessions(cls, onnx_dir: str, model_version: str) -> tuple[str, object]:
         key = (onnx_dir, model_version)
         cached = cls._cache.get(key)
         if cached is not None:
@@ -53,19 +65,20 @@ class GigaamOnnxTranscriber:
             cached = cls._cache.get(key)
             if cached is not None:
                 return cached
-            from gigaam.onnx_utils import load_onnx
+            from gigaam.onnx_utils import load_onnx_sessions
 
-            sessions, model_cfg = load_onnx(onnx_dir, model_version)
-            cls._cache[key] = (sessions, model_cfg)
-            return sessions, model_cfg
+            version, model_type = cls._split_model_version(model_version)
+            sessions = load_onnx_sessions(onnx_dir, model_type=model_type, model_version=version)
+            cls._cache[key] = (model_type, sessions)
+            return model_type, sessions
 
     @classmethod
     def transcribe(cls, file_path: str | Path, *, onnx_dir: str, model_version: str) -> str:
-        from gigaam.onnx_utils import infer_onnx
+        from gigaam.onnx_utils import transcribe_sample
 
         audio_path = str(Path(file_path).expanduser().resolve())
         prepared_dir = cls.ensure_onnx_dir(onnx_dir=onnx_dir, model_version=model_version)
-        sessions, model_cfg = cls._load_sessions(prepared_dir, model_version)
-        result = infer_onnx(audio_path, model_cfg, sessions)
+        model_type, sessions = cls._load_sessions(prepared_dir, model_version)
+        result = transcribe_sample(audio_path, model_type=model_type, sessions=sessions)
         return str(result or "").strip()
 

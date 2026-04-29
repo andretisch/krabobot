@@ -444,6 +444,16 @@ class AgentLoop:
             return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
+    @staticmethod
+    def _mark_command_response(result: OutboundMessage | None) -> OutboundMessage | None:
+        """Mark slash-command responses so channels can skip TTS."""
+        if result is None:
+            return None
+        meta = dict(result.metadata or {})
+        meta["_skip_tts"] = True
+        result.metadata = meta
+        return result
+
     async def _run_agent_loop(
         self,
         runtime: AgentRuntime,
@@ -522,7 +532,7 @@ class AgentLoop:
                 ctx = CommandContext(msg=msg, session=None, key=msg.session_key, raw=raw, loop=self, runtime=runtime)
                 result = await self.commands.dispatch_priority(ctx)
                 if result:
-                    await self.bus.publish_outbound(result)
+                    await self.bus.publish_outbound(self._mark_command_response(result))
                 continue
             task = asyncio.create_task(self._dispatch(msg))
             self._active_tasks.setdefault(msg.dispatch_key, []).append(task)
@@ -658,7 +668,7 @@ class AgentLoop:
         raw = msg.content.strip()
         ctx = CommandContext(msg=msg, session=session, key=key, raw=raw, loop=self, runtime=runtime)
         if result := await self.commands.dispatch(ctx):
-            return result
+            return self._mark_command_response(result)
 
         await runtime.memory_consolidator.maybe_consolidate_by_tokens(session)
 
@@ -668,9 +678,18 @@ class AgentLoop:
                 message_tool.start_turn()
 
         history = session.get_history(max_messages=0)
+        linked_accounts = await self._linked_accounts_for_prompt(msg)
+        current_message = msg.content
+        if linked_accounts:
+            links_block = (
+                "[Linked Accounts]\n"
+                f"user_id: {msg.user_id}\n"
+                f"accounts: {', '.join(linked_accounts)}"
+            )
+            current_message = f"{links_block}\n\n{current_message}"
         initial_messages = runtime.context.build_messages(
             history=history,
-            current_message=msg.content,
+            current_message=current_message,
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
         )
@@ -713,6 +732,16 @@ class AgentLoop:
             channel=msg.channel, chat_id=msg.chat_id, content=final_content,
             metadata=meta,
         )
+
+    async def _linked_accounts_for_prompt(self, msg: InboundMessage) -> list[str]:
+        """Load linked account list for runtime context hints."""
+        if not self.multi_user_enabled or not msg.user_id:
+            return []
+        try:
+            return await self.user_resolver.accounts_for_user(msg.user_id)
+        except Exception as exc:
+            logger.warning("Failed to load linked accounts for {}: {}", msg.user_id, exc)
+            return []
 
     @staticmethod
     def _image_placeholder(block: dict[str, Any]) -> dict[str, str]:

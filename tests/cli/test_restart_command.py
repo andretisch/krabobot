@@ -117,7 +117,23 @@ class TestRestartCommand:
         assert response is not None
         assert "/restart" in response.content
         assert "/status" in response.content
-        assert response.metadata == {"render_as": "text"}
+        assert "/id" in response.content
+        assert response.metadata.get("render_as") == "text"
+        assert response.metadata.get("_skip_tts") is True
+
+    @pytest.mark.asyncio
+    async def test_id_command_returns_sender_and_chat_ids(self):
+        loop, _bus = _make_loop()
+        msg = InboundMessage(channel="telegram", sender_id="123|alice", chat_id="-1001", content="/id")
+
+        response = await loop._process_message(msg)
+
+        assert response is not None
+        assert "sender_id: 123|alice" in response.content
+        assert "chat_id: -1001" in response.content
+        assert "channel: telegram" in response.content
+        assert response.metadata.get("render_as") == "text"
+        assert response.metadata.get("_skip_tts") is True
 
     @pytest.mark.asyncio
     async def test_status_reports_runtime_info(self):
@@ -141,7 +157,8 @@ class TestRestartCommand:
         assert "Context: 20k/64k (31%)" in response.content
         assert "Session: 3 messages" in response.content
         assert "Uptime: 2m 5s" in response.content
-        assert response.metadata == {"render_as": "text"}
+        assert response.metadata.get("render_as") == "text"
+        assert response.metadata.get("_skip_tts") is True
 
     @pytest.mark.asyncio
     async def test_run_agent_loop_resets_usage_when_provider_omits_it(self):
@@ -187,4 +204,5 @@ class TestRestartCommand:
         response = await loop.process_direct("/status", session_key="cli:test")
 
         assert response is not None
-        assert response.metadata == {"render_as": "text"}
+        assert response.metadata.get("render_as") == "text"
+        assert response.metadata.get("_skip_tts") is True

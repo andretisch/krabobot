@@ -1,76 +1,111 @@
-# krabobot (Migration Baseline)
+# krabobot
 
-This repository is now a **simplified baseline** intended for continuation in another project.
+`krabobot` is a lightweight personal AI assistant framework focused on:
 
-The original upstream scope was broader (many providers/channels/docs). This branch intentionally reduces complexity to make migration and refactoring easier.
+- simple setup and local control;
+- built-in channels (`telegram`, `vk`, `email`) without third-party channel plugins;
+- OpenAI-compatible providers (including custom proxy backends);
+- multi-user account linking across channels;
+- optional voice pipeline: TTS (`gTTS`) + STT (`gigaam` + `onnxruntime`).
 
-## Why This Version Exists
+---
 
-- Reduce moving parts before extraction to a new codebase.
-- Keep core agent/runtime/channel flow intact.
-- Remove provider-specific complexity that blocks iteration.
-- Document what remains so the next project can continue quickly.
+## Features
 
-## Current State (Important)
+- **CLI modes**: interactive agent, gateway worker, API server.
+- **Channels**: Telegram, VK, Email.
+- **Built-in commands**: `/new`, `/status`, `/help`, `/id`, `/link`.
+- **Multi-user isolation**: per-user workspace, sessions, memory.
+- **Message tools**: file operations, shell, web fetch/search, message send, spawn.
+- **STT/TTS**:
+  - STT from voice/audio with local GigaAM ONNX backend.
+  - TTS voice replies per channel with `ttsEnabled`.
 
-- Provider layer is now focused on `OpenAI-compatible` backend flow.
-- Specialized provider implementations were removed from this codebase.
-- Multi-user/session isolation groundwork is present (user-scoped runtime paths).
-- Configuration and docs were trimmed to reduce noise.
+---
 
-## Removed in This Branch
+## Requirements
 
-The following provider implementations were intentionally removed:
+- Linux/macOS
+- Python `3.11+`
+- `ffmpeg` (recommended; required for best VK voice-note compatibility and speed transforms)
 
-- `krabobot/providers/anthropic_provider.py`
-- `krabobot/providers/azure_openai_provider.py`
-- `krabobot/providers/openai_codex_provider.py`
-- `krabobot/providers/qwen_oauth_provider.py`
+---
 
-If you need any of these in the new project, reintroduce them as standalone modules with clear ownership and tests.
+## Installation
 
-## What Still Works
+### 1. Clone and create virtualenv
 
-- CLI entrypoints (`krabobot agent`, `krabobot gateway`, `krabobot serve`) 
-- Channel routing and command dispatch
-- Core agent loop and tool execution flow
-- OpenAI-compatible provider path via `OpenAICompatProvider`
-- Session/memory persistence and consolidation flow
+```bash
+git clone https://github.com/andretisch/krabobot.git
+cd krabobot
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+```
 
-## Migration Guide for New Project
+### 2. Install package
 
-### 1) Copy Core Runtime First
+Base install:
 
-Recommended minimal set to migrate first:
+```bash
+pip install -e .
+```
 
-- `krabobot/agent/*`
-- `krabobot/bus/*`
-- `krabobot/channels/*` (only channels you actively use)
-- `krabobot/command/*`
-- `krabobot/session/*`
-- `krabobot/providers/base.py`
-- `krabobot/providers/openai_compat_provider.py`
-- `krabobot/providers/registry.py`
-- `krabobot/config/*`
+Development install:
 
-### 2) Keep One Provider Strategy Initially
+```bash
+pip install -e ".[dev,api]"
+```
 
-Start with a single OpenAI-compatible endpoint and validate end-to-end behavior before adding new providers.
+STT install:
 
-### 3) Add Providers as Isolated Plug-ins
+```bash
+pip install -e ".[stt]"
+```
 
-For each new provider in the next project:
+Optional TTS dependency (if not already present in your environment):
 
-- one module per provider
-- one focused test file
-- explicit config schema
-- explicit fallback behavior
+```bash
+pip install gTTS
+```
 
-### 4) Keep Config Lean
+---
 
-Avoid carrying full upstream provider matrix unless needed. Add config sections only when the feature is live.
+## First Run
 
-## Minimal Config Example
+Initialize config and run onboarding:
+
+```bash
+krabobot onboard
+```
+
+Start gateway (channels + agent loop):
+
+```bash
+krabobot gateway
+```
+
+Interactive local mode (without channels):
+
+```bash
+krabobot agent
+```
+
+API mode:
+
+```bash
+krabobot serve
+```
+
+---
+
+## Configuration
+
+Main config path:
+
+`~/.krabobot/config.json`
+
+### Minimal example
 
 ```json
 {
@@ -78,43 +113,200 @@ Avoid carrying full upstream provider matrix unless needed. Add config sections 
     "defaults": {
       "workspace": "~/.krabobot/workspace",
       "model": "openai/gpt-4o-mini",
-      "provider": "auto"
+      "provider": "custom"
     }
   },
   "providers": {
-    "openai": {
-      "apiKey": "<your-key>"
+    "custom": {
+      "apiKey": "YOUR_API_KEY",
+      "apiBase": "https://api.openai.com/v1"
     }
   },
   "channels": {
     "telegram": {
       "enabled": true,
-      "token": "<bot-token>",
-      "allowFrom": ["<your-user-id>"]
+      "token": "YOUR_BOT_TOKEN",
+      "allowFrom": ["123456789"],
+      "ttsEnabled": false,
+      "transcribeVoice": true,
+      "transcribeAudio": false
     }
   }
 }
 ```
 
-## Run
+---
+
+## Providers
+
+`krabobot` uses OpenAI-compatible providers via shared transport.
+
+Common configured sections:
+
+- `custom`
+- `openrouter`
+- `proxyapi`
+- `gptunnel`
+- `ollama`
+
+For providers/proxies that require `max_completion_tokens` instead of `max_tokens`, use:
+
+```json
+{
+  "providers": {
+    "proxyapi": {
+      "useMaxCompletionTokens": true
+    }
+  }
+}
+```
+
+---
+
+## Channels
+
+### Telegram
+
+Required:
+
+- `channels.telegram.enabled = true`
+- `channels.telegram.token`
+- `channels.telegram.allowFrom`
+
+Optional voice:
+
+- `ttsEnabled` - send voice reply in addition to text.
+- `transcribeVoice` - transcribe voice notes to text context.
+- `transcribeAudio` - transcribe generic audio attachments.
+
+### VK
+
+Required:
+
+- `channels.vk.enabled = true`
+- `channels.vk.token`
+- `channels.vk.allowFrom`
+
+Optional voice:
+
+- `ttsEnabled` - TTS voice replies.
+- `transcribeVoice` / `transcribeAudio`.
+
+Notes:
+
+- Voice notes are uploaded as `audio_message`.
+- `ffmpeg` is used to convert voice to OGG/Opus when needed.
+
+### Email
+
+Required:
+
+- IMAP + SMTP credentials in `channels.email`.
+- Explicit consent:
+  - `channels.email.consentGranted = true`
+
+Behavior:
+
+- inbound email is polled via IMAP;
+- outbound replies are sent via SMTP;
+- slash commands in email body (e.g. `/new`, `/link CODE`) are supported.
+
+---
+
+## Multi-user and Account Linking
+
+When multi-user mode is enabled, accounts from different channels can be linked into one internal user.
+
+User commands:
+
+- `/id` - show current `channel`, `sender_id`, `chat_id`, `user_id`.
+- `/link` - generate one-time code.
+- `/link CODE` - link current account to existing user.
+
+CLI helpers:
+
+- `krabobot users link ...`
+- `krabobot users list`
+
+Identity storage:
+
+- `~/.krabobot/workspace/identity/user_links.json`
+
+---
+
+## Voice Pipeline
+
+### TTS (`gTTS`)
+
+- Enabled per channel with `ttsEnabled`.
+- Slash-command responses skip TTS.
+- Telegram/VK send both text and (if enabled) voice attachment.
+
+### STT (`gigaam` + ONNX Runtime)
+
+Recommended environment:
 
 ```bash
+export STT_PROVIDER=gigaam_onnx
+export GIGAAM_MODEL_VERSION=v2_ctc
+# optional:
+export GIGAAM_ONNX_DIR="$HOME/.krabobot/models/gigaam/onnx"
+```
+
+If `GIGAAM_ONNX_DIR` is omitted, default directory is used under `~/.krabobot/models/...`.
+
+---
+
+## Useful Commands
+
+```bash
+krabobot --help
 krabobot onboard
 krabobot gateway
+krabobot agent
+krabobot serve
+krabobot users --help
 ```
 
-or for direct local chat:
+---
+
+## Troubleshooting
+
+- **Email does not send**
+  - check `channels.email.consentGranted = true`;
+  - verify SMTP credentials and host/port/TLS settings.
+
+- **VK voice attachments fail**
+  - verify community token permissions for docs/messages;
+  - ensure `ffmpeg` is installed;
+  - inspect gateway logs for `docs.getMessagesUploadServer` / `docs.save`.
+
+- **Provider rejects `max_tokens`**
+  - enable `useMaxCompletionTokens` for that provider in config.
+
+- **STT returns empty/error**
+  - verify `gigaam` and `onnxruntime` installed;
+  - check model version (`v2_ctc`) and ONNX model directory.
+
+---
+
+## Development
+
+Run tests:
 
 ```bash
-krabobot agent
+pytest
 ```
 
-## Notes for Maintainers
+Run selected tests:
 
-- This README intentionally replaces previous long-form product documentation.
-- Treat this repository as a transition snapshot, not a full-feature upstream mirror.
-- Keep commits migration-oriented: smaller surface, fewer abstractions, stronger tests.
+```bash
+pytest tests/channels/test_email_channel.py
+pytest tests/channels/test_vk_channel_helpers.py
+```
+
+---
 
 ## License
 
-MIT (same as repository).
+MIT.

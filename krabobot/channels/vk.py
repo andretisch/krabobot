@@ -5,7 +5,11 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import os
+import re
+import shutil
+import subprocess
 import tempfile
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -121,7 +125,7 @@ class VKChannel(BaseChannel):
                 "docs.getMessagesUploadServer",
                 {"peer_id": peer_id, "type": "doc"},
             )
-            upload_url = (upload_server or {}).get("upload_url")
+            upload_url = self._extract_upload_url(upload_server)
             if not upload_url:
                 return None
 
@@ -139,10 +143,9 @@ class VKChannel(BaseChannel):
                 "docs.save",
                 {"file": file_token, "title": os.path.basename(file_path)},
             )
-            docs = saved if isinstance(saved, list) else []
-            if not docs:
+            doc = self._extract_saved_doc(saved)
+            if not doc:
                 return None
-            doc = docs[0]
             owner_id = doc.get("owner_id")
             doc_id = doc.get("id")
             access_key = doc.get("access_key")
@@ -152,6 +155,129 @@ class VKChannel(BaseChannel):
         except Exception as e:
             logger.warning("VK doc upload failed ({}): {}", file_path, e)
             return None
+
+    async def _upload_voice_attachment(self, peer_id: int, file_path: str) -> tuple[str | None, str | None]:
+        """Upload file as VK audio_message and return attachment token + error."""
+        if not self.bot:
+            return None, "bot not initialized"
+        try:
+            upload_server = await self.bot.api.request(
+                "docs.getMessagesUploadServer",
+                {"peer_id": peer_id, "type": "audio_message"},
+            )
+            upload_url = self._extract_upload_url(upload_server)
+            if not upload_url:
+                return None, "docs.getMessagesUploadServer(type=audio_message) returned no upload_url"
+
+            speed = 1.25 if os.path.basename(file_path).startswith("vk_tts_") else 1.0
+            voice_path = await self._ensure_voice_ogg(file_path, speed=speed)
+            with open(voice_path, "rb") as f:
+                files = {"file": (os.path.basename(voice_path), f, "audio/ogg")}
+                async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+                    upload_resp = await client.post(upload_url, files=files)
+                    upload_resp.raise_for_status()
+            uploaded = upload_resp.json()
+            file_token = uploaded.get("file") if isinstance(uploaded, dict) else None
+            if not file_token:
+                return None, f"audio_message upload response missing file token: {uploaded}"
+
+            saved = await self.bot.api.request("docs.save", {"file": file_token})
+            doc = self._extract_saved_doc(saved)
+            if not doc:
+                return None, f"docs.save returned empty payload: {saved}"
+            owner_id = doc.get("owner_id")
+            doc_id = doc.get("id")
+            access_key = doc.get("access_key")
+            if owner_id is None or doc_id is None:
+                return None, f"docs.save returned incomplete identifiers: {doc}"
+            return f"doc{owner_id}_{doc_id}" + (f"_{access_key}" if access_key else ""), None
+        except Exception as e:
+            logger.warning("VK voice upload failed ({}): {}", file_path, e)
+            return None, str(e)
+
+    @staticmethod
+    def _extract_saved_doc(saved: Any) -> dict[str, Any] | None:
+        """Normalize docs.save response into a single doc payload."""
+        if isinstance(saved, dict) and "response" in saved:
+            saved = saved.get("response")
+        if isinstance(saved, list) and saved:
+            first = saved[0]
+            if isinstance(first, dict):
+                return first
+        if isinstance(saved, dict):
+            if isinstance(saved.get("doc"), dict):
+                return saved["doc"]
+            if isinstance(saved.get("audio_message"), dict):
+                return saved["audio_message"]
+        return None
+
+    @staticmethod
+    def _extract_upload_url(payload: Any) -> str | None:
+        """Extract upload_url from VK API response shapes."""
+        if isinstance(payload, dict):
+            if isinstance(payload.get("upload_url"), str):
+                return payload["upload_url"]
+            response = payload.get("response")
+            if isinstance(response, dict) and isinstance(response.get("upload_url"), str):
+                return response["upload_url"]
+        return None
+
+    async def _ensure_voice_ogg(self, file_path: str, *, speed: float = 1.0) -> str:
+        """Convert audio file to ogg/opus for VK voice notes, with optional speedup."""
+        in_path = Path(file_path)
+        if in_path.suffix.lower() == ".ogg" and abs(speed - 1.0) < 0.001:
+            return file_path
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            logger.warning("ffmpeg not found, trying to upload non-ogg voice file: {}", file_path)
+            return file_path
+        fd, out_path = tempfile.mkstemp(prefix="vk_voice_", suffix=".ogg")
+        os.close(fd)
+
+        def _convert() -> None:
+            subprocess.run(
+                [
+                    ffmpeg,
+                    "-y",
+                    "-i",
+                    str(in_path),
+                    "-ac",
+                    "1",
+                    "-c:a",
+                    "libopus",
+                    "-b:a",
+                    "32k",
+                    "-filter:a",
+                    f"atempo={max(0.5, min(2.0, float(speed))):.2f}",
+                    out_path,
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+        try:
+            await asyncio.to_thread(_convert)
+            return out_path
+        except Exception as exc:
+            logger.warning("Failed to convert {} to ogg/opus for VK voice: {}", file_path, exc)
+            try:
+                os.unlink(out_path)
+            except Exception:
+                pass
+            return file_path
+
+    @staticmethod
+    def _vk_plain_text(text: str) -> str:
+        """Best-effort markdown cleanup for VK plain-text rendering."""
+        out = text or ""
+        out = re.sub(r"\[([^\]]+)\]\((https?://[^\)]+)\)", r"\1 (\2)", out)
+        out = re.sub(r"```[\s\S]*?```", lambda m: m.group(0).replace("```", ""), out)
+        out = re.sub(r"`([^`]+)`", r"\1", out)
+        out = re.sub(r"(\*\*|__)(.*?)\1", r"\2", out)
+        out = re.sub(r"(\*|_)(.*?)\1", r"\2", out)
+        out = re.sub(r"~~(.*?)~~", r"\1", out)
+        return out.strip()
 
     async def _upload_photo_attachment(self, peer_id: int, file_path: str) -> str | None:
         """Upload file as VK message photo and return attachment token."""
@@ -242,7 +368,11 @@ class VKChannel(BaseChannel):
                 if transcription:
                     content = (f"{content}\n" if content else "") + f"[transcription: {transcription}]"
                 else:
-                    content = (f"{content}\n" if content else "") + f"[voice: {selected_for_stt}]"
+                    stt_error = self.consume_last_stt_error()
+                    if stt_error:
+                        content = (f"{content}\n" if content else "") + f"[transcription_error: {stt_error}]"
+                    else:
+                        content = (f"{content}\n" if content else "") + f"[voice: {selected_for_stt}]"
 
             reply = getattr(message, "reply_message", None)
             reply_text = (getattr(reply, "text", "") or "").strip() if reply else ""
@@ -301,11 +431,12 @@ class VKChannel(BaseChannel):
         peer_id = int(msg.chat_id)
         attachment_tokens: list[str] = []
         failed_media: list[str] = []
+        failed_details: list[str] = []
 
         if not (msg.media or []):
             wants_tts = bool(self.config.tts_enabled)
-            if wants_tts and msg.content and msg.content != "[empty message]":
-                tts_path = await self.synthesize_speech(msg.content)
+            if wants_tts and not bool(msg.metadata.get("_skip_tts")) and msg.content and msg.content != "[empty message]":
+                tts_path = await self.synthesize_speech(self._vk_plain_text(msg.content))
                 if tts_path:
                     msg.media = [*msg.media, tts_path]
 
@@ -317,30 +448,46 @@ class VKChannel(BaseChannel):
                 downloaded = await self._download_media(media_path, ext=guessed_ext)
                 if not downloaded:
                     failed_media.append(os.path.basename(media_path))
+                    failed_details.append(f"{os.path.basename(media_path)}: download failed")
                     continue
                 path = downloaded
             if not os.path.exists(path):
                 logger.warning("VK send: media path does not exist: {}", path)
                 failed_media.append(os.path.basename(path))
+                failed_details.append(f"{os.path.basename(path)}: file does not exist")
                 continue
 
             ext = os.path.splitext(path)[1].lower()
             if ext in image_exts:
                 token = await self._upload_photo_attachment(peer_id, path)
+                if not token:
+                    failed_details.append(f"{os.path.basename(path)}: photos upload failed")
             else:
-                token = await self._upload_doc_attachment(peer_id, path)
+                token = None
+                # Try true voice-note upload first for audio files.
+                if ext in {".ogg", ".mp3", ".wav", ".m4a", ".aac"}:
+                    token, err = await self._upload_voice_attachment(peer_id, path)
+                    if not token and err:
+                        failed_details.append(f"{os.path.basename(path)}: audio_message failed ({err})")
+                if not token:
+                    token = await self._upload_doc_attachment(peer_id, path)
+                    if not token:
+                        failed_details.append(f"{os.path.basename(path)}: docs upload failed")
             if token:
                 attachment_tokens.append(token)
             else:
                 failed_media.append(os.path.basename(path))
 
-        text = msg.content or (" " if attachment_tokens else "")
+        text = self._vk_plain_text(msg.content or (" " if attachment_tokens else ""))
         if failed_media:
             failed_list = ", ".join(dict.fromkeys(failed_media))
+            details = "; ".join(dict.fromkeys(failed_details))
             hint = (
                 f"\n\n[VK] Не удалось прикрепить файл(ы): {failed_list}. "
-                "Проверьте права community token (доступ к docs/files)."
+                "Проверьте права community token (docs/files) и доступ к audio_message."
             )
+            if details:
+                hint += f"\n[VK debug] {details}"
             text = (text or "").strip() + hint
 
         await self.bot.api.messages.send(

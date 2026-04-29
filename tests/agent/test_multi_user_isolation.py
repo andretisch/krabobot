@@ -41,7 +41,7 @@ async def test_link_code_shares_user_between_channels(tmp_path: Path) -> None:
     )
     assert create is not None
     assert "Link code created." in create.content
-    code = create.content.split("/link ", 1)[1].split()[0]
+    code = create.content.split("/link ", 1)[1].split()[0].strip("`")
 
     consume = await loop.process_direct(
         f"/link {code}",

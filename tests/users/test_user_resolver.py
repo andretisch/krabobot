@@ -33,3 +33,17 @@ async def test_invalid_code_records_attempt(tmp_path: Path):
     _ = await resolver.create_link_code(user)
     bad = await resolver.consume_link_code("INVALID", "telegram", "100")
     assert bad.ok is False
+
+
+@pytest.mark.asyncio
+async def test_accounts_for_user_returns_all_linked_accounts(tmp_path: Path):
+    resolver = UserResolver(tmp_path, code_ttl_seconds=600, code_attempt_limit=3)
+    user = await resolver.resolve_or_create("telegram", "42")
+    await resolver.link_account(user, "vk", "123")
+    await resolver.link_account(user, "email", "alice@example.com")
+
+    accounts = await resolver.accounts_for_user(user)
+
+    assert "telegram:42" in accounts
+    assert "vk:123" in accounts
+    assert "email:alice@example.com" in accounts

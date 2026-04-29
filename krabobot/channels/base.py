@@ -38,35 +38,40 @@ class BaseChannel(ABC):
         self.config = config
         self.bus = bus
         self._running = False
+        self._last_stt_error: str | None = None
 
-    async def transcribe_audio(self, file_path: str | Path) -> str:
-        """Transcribe an audio file.
-
-        Preferred backend: local GigaAM ONNX (`STT_PROVIDER=gigaam_onnx`).
-        Legacy fallback: HTTP server via `AUDIO_URL/transcribe`.
-        """
+    async def transcribe_audio_with_error(self, file_path: str | Path) -> tuple[str, str | None]:
+        """Transcribe audio and return ``(text, error)`` for user-facing diagnostics."""
+        self._last_stt_error = None
         path = Path(file_path)
         provider = (os.getenv("STT_PROVIDER", "gigaam_onnx") or "gigaam_onnx").strip().lower()
         if provider in {"gigaam", "gigaam_onnx"}:
             onnx_dir = os.getenv("GIGAAM_ONNX_DIR", "").strip()
             if not onnx_dir:
                 onnx_dir = str((Path.home() / ".krabobot" / "models" / "gigaam" / "onnx").resolve())
-            model_version = (os.getenv("GIGAAM_MODEL_VERSION", "v3_ctc") or "v3_ctc").strip()
+            model_version = (os.getenv("GIGAAM_MODEL_VERSION", "v2_ctc") or "v2_ctc").strip()
             try:
                 from krabobot.stt.gigaam_onnx import GigaamOnnxTranscriber
 
-                return await asyncio.to_thread(
+                text = await asyncio.to_thread(
                     GigaamOnnxTranscriber.transcribe,
                     path,
                     onnx_dir=onnx_dir,
                     model_version=model_version,
                 )
+                if text:
+                    return text, None
+                self._last_stt_error = "gigaam_onnx returned empty transcription"
+                return "", self._last_stt_error
             except Exception as e:
                 logger.warning("{}: GigaAM ONNX transcription failed: {}", self.name, e)
+                self._last_stt_error = f"gigaam_onnx failed: {e}"
+                return "", self._last_stt_error
 
         audio_url = os.getenv("AUDIO_URL", "").strip()
         if not audio_url:
-            return ""
+            self._last_stt_error = "no STT backend configured (set STT_PROVIDER/GIGAAM_ONNX_DIR or AUDIO_URL)"
+            return "", self._last_stt_error
         try:
             with path.open("rb") as f:
                 files = {"file": (path.name, f, "application/octet-stream")}
@@ -76,15 +81,29 @@ class BaseChannel(ABC):
             data = resp.json()
             text = str(data.get("text") or "").strip() if isinstance(data, dict) else ""
             if text:
-                return text
+                return text, None
             logger.warning(
                 "{}: AUDIO_URL transcription returned empty text: {}",
                 self.name,
                 data if isinstance(data, dict) else "non-JSON response",
             )
+            self._last_stt_error = "AUDIO_URL transcribe returned empty text"
+            return "", self._last_stt_error
         except Exception as e:
             logger.warning("{}: AUDIO_URL transcription failed: {}", self.name, e)
-        return ""
+            self._last_stt_error = f"AUDIO_URL transcribe failed: {e}"
+            return "", self._last_stt_error
+
+    async def transcribe_audio(self, file_path: str | Path) -> str:
+        """Backward-compatible wrapper that returns only text."""
+        text, _ = await self.transcribe_audio_with_error(file_path)
+        return text
+
+    def consume_last_stt_error(self) -> str | None:
+        """Read and clear the last STT error message."""
+        err = self._last_stt_error
+        self._last_stt_error = None
+        return err
 
     async def synthesize_speech(
         self, text: str

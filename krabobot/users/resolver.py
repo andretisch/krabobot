@@ -84,6 +84,17 @@ class UserResolver:
             self._save(db)
             logger.info("Linked account {} to user {}", account, user_id)
 
+    async def accounts_for_user(self, user_id: str) -> list[str]:
+        """Return all account keys linked to a user id."""
+        if not user_id:
+            return []
+        async with self._lock:
+            db = self._load()
+            accounts = db.get("accounts", {}) or {}
+            linked = [k for k, v in accounts.items() if str(v) == str(user_id)]
+        linked.sort()
+        return linked
+
     async def create_link_code(self, user_id: str) -> str:
         """Create a one-time code that can link another account to *user_id*."""
         alphabet = string.ascii_uppercase + string.digits

@@ -103,10 +103,30 @@ def build_help_text() -> str:
         "/stop — Stop the current task",
         "/restart — Restart the bot",
         "/status — Show bot status",
+        "/id — Show your IDs",
         "/link — Link account across channels",
         "/help — Show available commands",
     ]
     return "\n".join(lines)
+
+
+async def cmd_id(ctx: CommandContext) -> OutboundMessage:
+    """Return caller identifiers useful for manual linking/debug."""
+    msg = ctx.msg
+    lines = [
+        "Your identifiers:",
+        f"- channel: {msg.channel}",
+        f"- sender_id: {msg.sender_id}",
+        f"- chat_id: {msg.chat_id}",
+    ]
+    if msg.user_id:
+        lines.append(f"- user_id: {msg.user_id}")
+    return OutboundMessage(
+        channel=msg.channel,
+        chat_id=msg.chat_id,
+        content="\n".join(lines),
+        metadata={"render_as": "text"},
+    )
 
 
 async def cmd_link(ctx: CommandContext) -> OutboundMessage:
@@ -163,5 +183,6 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.priority("/status", cmd_status)
     router.exact("/new", cmd_new)
     router.exact("/status", cmd_status)
+    router.exact("/id", cmd_id)
     router.prefix("/link", cmd_link)
     router.exact("/help", cmd_help)
