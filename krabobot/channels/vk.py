@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -279,6 +280,28 @@ class VKChannel(BaseChannel):
         out = re.sub(r"~~(.*?)~~", r"\1", out)
         return out.strip()
 
+    @staticmethod
+    def _vk_commands_keyboard() -> str:
+        """Build VK keyboard with common slash commands."""
+        payload = {
+            "one_time": False,
+            "inline": False,
+            "buttons": [
+                [
+                    {"action": {"type": "text", "label": "/help", "payload": "{}"}, "color": "primary"},
+                    {"action": {"type": "text", "label": "/id", "payload": "{}"}, "color": "secondary"},
+                ],
+                [
+                    {"action": {"type": "text", "label": "/link", "payload": "{}"}, "color": "primary"},
+                    {"action": {"type": "text", "label": "/status", "payload": "{}"}, "color": "secondary"},
+                ],
+                [
+                    {"action": {"type": "text", "label": "/new", "payload": "{}"}, "color": "negative"},
+                ],
+            ],
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
     async def _upload_photo_attachment(self, peer_id: int, file_path: str) -> str | None:
         """Upload file as VK message photo and return attachment token."""
         if not self.bot:
@@ -494,5 +517,6 @@ class VKChannel(BaseChannel):
             peer_id=peer_id,
             message=text,
             attachment=",".join(attachment_tokens) if attachment_tokens else None,
+            keyboard=self._vk_commands_keyboard(),
             random_id=0,
         )

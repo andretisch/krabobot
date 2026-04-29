@@ -1,3 +1,5 @@
+import json
+
 from krabobot.channels.vk import VKChannel
 
 
@@ -46,3 +48,16 @@ def test_vk_plain_text_strips_common_markdown() -> None:
     assert "bold" in txt
     assert "code" in txt
     assert "link (https://example.com)" in txt
+
+
+def test_vk_commands_keyboard_contains_basic_commands() -> None:
+    keyboard = json.loads(VKChannel._vk_commands_keyboard())
+    labels = []
+    for row in keyboard["buttons"]:
+        for button in row:
+            labels.append(button["action"]["label"])
+    assert "/help" in labels
+    assert "/id" in labels
+    assert "/link" in labels
+    assert "/status" in labels
+    assert "/new" in labels
