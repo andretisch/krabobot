@@ -1,0 +1,236 @@
+"""Base channel interface for chat platforms."""
+
+from __future__ import annotations
+
+import asyncio
+from abc import ABC, abstractmethod
+import tempfile
+import os
+from pathlib import Path
+from typing import Any
+
+import httpx
+from loguru import logger
+
+from krabobot.bus.events import InboundMessage, OutboundMessage
+from krabobot.bus.queue import MessageBus
+
+
+class BaseChannel(ABC):
+    """
+    Abstract base class for chat channel implementations.
+
+    Each channel (Telegram, Discord, etc.) should implement this interface
+    to integrate with the krabobot message bus.
+    """
+
+    name: str = "base"
+    display_name: str = "Base"
+
+    def __init__(self, config: Any, bus: MessageBus):
+        """
+        Initialize the channel.
+
+        Args:
+            config: Channel-specific configuration.
+            bus: The message bus for communication.
+        """
+        self.config = config
+        self.bus = bus
+        self._running = False
+
+    async def transcribe_audio(self, file_path: str | Path) -> str:
+        """Transcribe an audio file.
+
+        Preferred backend: local GigaAM ONNX (`STT_PROVIDER=gigaam_onnx`).
+        Legacy fallback: HTTP server via `AUDIO_URL/transcribe`.
+        """
+        path = Path(file_path)
+        provider = (os.getenv("STT_PROVIDER", "gigaam_onnx") or "gigaam_onnx").strip().lower()
+        if provider in {"gigaam", "gigaam_onnx"}:
+            onnx_dir = os.getenv("GIGAAM_ONNX_DIR", "").strip()
+            if not onnx_dir:
+                onnx_dir = str((Path.home() / ".krabobot" / "models" / "gigaam" / "onnx").resolve())
+            model_version = (os.getenv("GIGAAM_MODEL_VERSION", "v3_ctc") or "v3_ctc").strip()
+            try:
+                from krabobot.stt.gigaam_onnx import GigaamOnnxTranscriber
+
+                return await asyncio.to_thread(
+                    GigaamOnnxTranscriber.transcribe,
+                    path,
+                    onnx_dir=onnx_dir,
+                    model_version=model_version,
+                )
+            except Exception as e:
+                logger.warning("{}: GigaAM ONNX transcription failed: {}", self.name, e)
+
+        audio_url = os.getenv("AUDIO_URL", "").strip()
+        if not audio_url:
+            return ""
+        try:
+            with path.open("rb") as f:
+                files = {"file": (path.name, f, "application/octet-stream")}
+                async with httpx.AsyncClient(timeout=120.0) as client:
+                    resp = await client.post(f"{audio_url.rstrip('/')}/transcribe", files=files)
+                    resp.raise_for_status()
+            data = resp.json()
+            text = str(data.get("text") or "").strip() if isinstance(data, dict) else ""
+            if text:
+                return text
+            logger.warning(
+                "{}: AUDIO_URL transcription returned empty text: {}",
+                self.name,
+                data if isinstance(data, dict) else "non-JSON response",
+            )
+        except Exception as e:
+            logger.warning("{}: AUDIO_URL transcription failed: {}", self.name, e)
+        return ""
+
+    async def synthesize_speech(
+        self, text: str
+    ) -> str | None:
+        """Synthesize speech via gTTS and return a local mp3 file path."""
+        clean_text = (text or "").strip()
+        if not clean_text:
+            return None
+        try:
+            from gtts import gTTS
+
+            lang = (os.getenv("TTS_LANG", "ru") or "ru").strip()
+            fd, out_path = tempfile.mkstemp(prefix=f"{self.name}_tts_", suffix=".mp3")
+            os.close(fd)
+            await asyncio.to_thread(gTTS(clean_text, lang=lang).save, out_path)
+            return out_path
+        except ImportError:
+            logger.warning("{}: gTTS is not installed", self.name)
+            return None
+        except Exception as e:
+            logger.warning("{}: gTTS synthesis failed: {}", self.name, e)
+            return None
+
+    async def login(self, force: bool = False) -> bool:
+        """
+        Perform channel-specific interactive login (e.g. QR code scan).
+
+        Args:
+            force: If True, ignore existing credentials and force re-authentication.
+
+        Returns True if already authenticated or login succeeds.
+        Override in subclasses that support interactive login.
+        """
+        return True
+
+    @abstractmethod
+    async def start(self) -> None:
+        """
+        Start the channel and begin listening for messages.
+
+        This should be a long-running async task that:
+        1. Connects to the chat platform
+        2. Listens for incoming messages
+        3. Forwards messages to the bus via _handle_message()
+        """
+        pass
+
+    @abstractmethod
+    async def stop(self) -> None:
+        """Stop the channel and clean up resources."""
+        pass
+
+    @abstractmethod
+    async def send(self, msg: OutboundMessage) -> None:
+        """
+        Send a message through this channel.
+
+        Args:
+            msg: The message to send.
+
+        Implementations should raise on delivery failure so the channel manager
+        can apply any retry policy in one place.
+        """
+        pass
+
+    async def send_delta(self, chat_id: str, delta: str, metadata: dict[str, Any] | None = None) -> None:
+        """Deliver a streaming text chunk.
+
+        Override in subclasses to enable streaming. Implementations should
+        raise on delivery failure so the channel manager can retry.
+
+        Streaming contract: ``_stream_delta`` is a chunk, ``_stream_end`` ends
+        the current segment, and stateful implementations must key buffers by
+        ``_stream_id`` rather than only by ``chat_id``.
+        """
+        pass
+
+    @property
+    def supports_streaming(self) -> bool:
+        """True when config enables streaming AND this subclass implements send_delta."""
+        cfg = self.config
+        streaming = cfg.get("streaming", False) if isinstance(cfg, dict) else getattr(cfg, "streaming", False)
+        return bool(streaming) and type(self).send_delta is not BaseChannel.send_delta
+
+    def is_allowed(self, sender_id: str) -> bool:
+        """Check if *sender_id* is permitted.  Empty list → deny all; ``"*"`` → allow all."""
+        allow_list = getattr(self.config, "allow_from", [])
+        if not allow_list:
+            logger.warning("{}: allow_from is empty — all access denied", self.name)
+            return False
+        if "*" in allow_list:
+            return True
+        return str(sender_id) in allow_list
+
+    async def _handle_message(
+        self,
+        sender_id: str,
+        chat_id: str,
+        content: str,
+        media: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        session_key: str | None = None,
+    ) -> None:
+        """
+        Handle an incoming message from the chat platform.
+
+        This method checks permissions and forwards to the bus.
+
+        Args:
+            sender_id: The sender's identifier.
+            chat_id: The chat/channel identifier.
+            content: Message text content.
+            media: Optional list of media URLs.
+            metadata: Optional channel-specific metadata.
+            session_key: Optional session key override (e.g. thread-scoped sessions).
+        """
+        if not self.is_allowed(sender_id):
+            logger.warning(
+                "Access denied for sender {} on channel {}. "
+                "Add them to allowFrom list in config to grant access.",
+                sender_id, self.name,
+            )
+            return
+
+        meta = metadata or {}
+        if self.supports_streaming:
+            meta = {**meta, "_wants_stream": True}
+
+        msg = InboundMessage(
+            channel=self.name,
+            sender_id=str(sender_id),
+            chat_id=str(chat_id),
+            content=content,
+            media=media or [],
+            metadata=meta,
+            session_key_override=session_key,
+        )
+
+        await self.bus.publish_inbound(msg)
+
+    @classmethod
+    def default_config(cls) -> dict[str, Any]:
+        """Return default config for onboard auto-population in config.json."""
+        return {"enabled": False}
+
+    @property
+    def is_running(self) -> bool:
+        """Check if the channel is running."""
+        return self._running
