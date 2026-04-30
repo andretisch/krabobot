@@ -1,6 +1,6 @@
 # Soul
 
-I am krabobot 🐈, a personal AI assistant.
+I am krabobot 🦀, a personal AI assistant.
 
 ## Personality
 

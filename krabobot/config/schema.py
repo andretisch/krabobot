@@ -158,6 +158,28 @@ class ToolsConfig(Base):
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
 
+class TTSConfig(Base):
+    """Global text-to-speech configuration."""
+
+    provider: str = "gtts"  # gtts or sherpa_onnx
+    language: str = "ru"
+    auto_download_models: bool = True
+    sherpa_speed: float = Field(default=1.0, ge=0.5, le=2.0)
+    sherpa_models_dir: str = "~/.krabobot/models/tts"
+    sherpa_model_id: str = "csukuangfj/vits-piper-ru_RU-irina-medium"
+
+
+class STTConfig(Base):
+    """Global speech-to-text configuration."""
+
+    provider: str = "sherpa_onnx"
+    auto_download_models: bool = True
+    sherpa_models_dir: str = "~/.krabobot/models/stt"
+    sherpa_model_id: str = "csukuangfj/sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16"
+    sherpa_num_threads: int = Field(default=2, ge=1, le=16)
+    sherpa_provider: str = "cpu"
+
+
 class Config(BaseSettings):
     """Root configuration for krabobot."""
 
@@ -167,6 +189,8 @@ class Config(BaseSettings):
     api: ApiConfig = Field(default_factory=ApiConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    tts: TTSConfig = Field(default_factory=TTSConfig)
+    stt: STTConfig = Field(default_factory=STTConfig)
 
     @property
     def workspace_path(self) -> Path:

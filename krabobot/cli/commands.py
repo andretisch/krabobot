@@ -256,6 +256,8 @@ def onboard(
     """Initialize krabobot configuration and workspace."""
     from krabobot.config.loader import get_config_path, load_config, save_config, set_config_path
     from krabobot.config.schema import Config
+    from krabobot.stt.model_manager import ensure_sherpa_stt_model
+    from krabobot.tts.model_manager import ensure_sherpa_tts_models
 
     if config:
         config_path = Path(config).expanduser().resolve()
@@ -318,6 +320,8 @@ def onboard(
         console.print(f"[green]✓[/green] Created workspace at {workspace_path}")
 
     sync_workspace_templates(workspace_path)
+    ensure_sherpa_stt_model(config.stt)
+    ensure_sherpa_tts_models(config.tts)
 
     agent_cmd = 'krabobot agent -m "Hello!"'
     gateway_cmd = "krabobot gateway"
@@ -575,12 +579,16 @@ def gateway(
     from krabobot.cron.types import CronJob
     from krabobot.heartbeat.service import HeartbeatService
     from krabobot.session.manager import SessionManager
+    from krabobot.stt.model_manager import ensure_sherpa_stt_model
+    from krabobot.tts.model_manager import ensure_sherpa_tts_models
 
     if verbose:
         import logging
         logging.basicConfig(level=logging.DEBUG)
 
     config = _load_runtime_config(config, workspace)
+    ensure_sherpa_stt_model(config.stt)
+    ensure_sherpa_tts_models(config.tts)
     port = port if port is not None else config.gateway.port
 
     console.print(f"{__logo__} Starting krabobot gateway version {__version__} on port {port}...")
@@ -786,8 +794,12 @@ def agent(
     from krabobot.agent.loop import AgentLoop
     from krabobot.bus.queue import MessageBus
     from krabobot.cron.service import CronService
+    from krabobot.stt.model_manager import ensure_sherpa_stt_model
+    from krabobot.tts.model_manager import ensure_sherpa_tts_models
 
     config = _load_runtime_config(config, workspace)
+    ensure_sherpa_stt_model(config.stt)
+    ensure_sherpa_tts_models(config.tts)
     sync_workspace_templates(config.workspace_path)
 
     bus = MessageBus()

@@ -209,6 +209,7 @@ class TelegramChannel(BaseChannel):
         BotCommand("stop", "Остановить текущую задачу"),
         BotCommand("id", "Показать ваши ID"),
         BotCommand("link", "Связать аккаунт между каналами"),
+        BotCommand("tts", "Вкл/выкл голосовые ответы"),
         BotCommand("help", "Список команд"),
         BotCommand("restart", "Перезапуск бота"),
         BotCommand("status", "Статус бота"),
@@ -425,7 +426,7 @@ class TelegramChannel(BaseChannel):
                 )
 
         if not (msg.media or []):
-            wants_tts = bool(self.config.tts_enabled)
+            wants_tts = bool(msg.metadata.get("_tts_enabled_for_user", self.config.tts_enabled))
             if wants_tts and not bool(msg.metadata.get("_skip_tts")) and msg.content and msg.content != "[empty message]":
                 tts_path = await self.synthesize_speech(msg.content)
                 if tts_path:
@@ -645,6 +646,7 @@ class TelegramChannel(BaseChannel):
             "/clear_memory — очистить память (архив в HISTORY.md)\n"
             "/stop — остановить текущую задачу\n"
             "/id — показать ваши ID\n"
+            "/tts on|off|status — голосовые ответы для вашего аккаунта\n"
             "/restart — перезапуск бота\n"
             "/status — статус бота\n"
             "/help — эта справка"

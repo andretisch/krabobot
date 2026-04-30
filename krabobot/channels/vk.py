@@ -7,7 +7,6 @@ import importlib.util
 import json
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -22,6 +21,7 @@ from krabobot.bus.queue import MessageBus
 from krabobot.channels.base import BaseChannel
 from krabobot.config.paths import get_media_dir
 from krabobot.config.schema import Base
+from krabobot.utils.ffmpeg import resolve_ffmpeg_exe
 
 VKBOTTLE_AVAILABLE = importlib.util.find_spec("vkbottle") is not None
 if VKBOTTLE_AVAILABLE:
@@ -170,8 +170,7 @@ class VKChannel(BaseChannel):
             if not upload_url:
                 return None, "docs.getMessagesUploadServer(type=audio_message) returned no upload_url"
 
-            speed = 1.25 if os.path.basename(file_path).startswith("vk_tts_") else 1.0
-            voice_path = await self._ensure_voice_ogg(file_path, speed=speed)
+            voice_path = await self._ensure_voice_ogg(file_path, speed=1.0)
             with open(voice_path, "rb") as f:
                 files = {"file": (os.path.basename(voice_path), f, "audio/ogg")}
                 async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
@@ -228,7 +227,7 @@ class VKChannel(BaseChannel):
         in_path = Path(file_path)
         if in_path.suffix.lower() == ".ogg" and abs(speed - 1.0) < 0.001:
             return file_path
-        ffmpeg = shutil.which("ffmpeg")
+        ffmpeg = resolve_ffmpeg_exe()
         if not ffmpeg:
             logger.warning("ffmpeg not found, trying to upload non-ogg voice file: {}", file_path)
             return file_path
@@ -292,10 +291,15 @@ class VKChannel(BaseChannel):
                     {"action": {"type": "text", "label": "/id", "payload": "{}"}, "color": "secondary"},
                 ],
                 [
+                    {"action": {"type": "text", "label": "/stop", "payload": "{}"}, "color": "negative"},
+                    {"action": {"type": "text", "label": "/restart", "payload": "{}"}, "color": "negative"},
+                ],
+                [
                     {"action": {"type": "text", "label": "/link", "payload": "{}"}, "color": "primary"},
                     {"action": {"type": "text", "label": "/status", "payload": "{}"}, "color": "secondary"},
                 ],
                 [
+                    {"action": {"type": "text", "label": "/tts status", "payload": "{}"}, "color": "secondary"},
                     {"action": {"type": "text", "label": "/new", "payload": "{}"}, "color": "negative"},
                 ],
             ],
@@ -457,7 +461,7 @@ class VKChannel(BaseChannel):
         failed_details: list[str] = []
 
         if not (msg.media or []):
-            wants_tts = bool(self.config.tts_enabled)
+            wants_tts = bool(msg.metadata.get("_tts_enabled_for_user", self.config.tts_enabled))
             if wants_tts and not bool(msg.metadata.get("_skip_tts")) and msg.content and msg.content != "[empty message]":
                 tts_path = await self.synthesize_speech(self._vk_plain_text(msg.content))
                 if tts_path:

@@ -47,3 +47,14 @@ async def test_accounts_for_user_returns_all_linked_accounts(tmp_path: Path):
     assert "telegram:42" in accounts
     assert "vk:123" in accounts
     assert "email:alice@example.com" in accounts
+
+
+@pytest.mark.asyncio
+async def test_tts_preference_roundtrip(tmp_path: Path):
+    resolver = UserResolver(tmp_path)
+    user = await resolver.resolve_or_create("telegram", "42")
+
+    assert await resolver.get_tts_enabled(user, default=False) is False
+
+    await resolver.set_tts_enabled(user, True)
+    assert await resolver.get_tts_enabled(user, default=False) is True

@@ -726,6 +726,7 @@ class AgentLoop:
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
 
         meta = dict(msg.metadata or {})
+        meta["_tts_enabled_for_user"] = await self._tts_enabled_for_user(msg)
         if on_stream is not None:
             meta["_streamed"] = True
         return OutboundMessage(
@@ -742,6 +743,16 @@ class AgentLoop:
         except Exception as exc:
             logger.warning("Failed to load linked accounts for {}: {}", msg.user_id, exc)
             return []
+
+    async def _tts_enabled_for_user(self, msg: InboundMessage) -> bool:
+        """Resolve per-user TTS switch for channels that support voice replies."""
+        if not self.multi_user_enabled or not msg.user_id:
+            return False
+        try:
+            return await self.user_resolver.get_tts_enabled(msg.user_id, default=False)
+        except Exception as exc:
+            logger.warning("Failed to load TTS preference for {}: {}", msg.user_id, exc)
+            return False
 
     @staticmethod
     def _image_placeholder(block: dict[str, Any]) -> dict[str, str]:

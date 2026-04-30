@@ -136,6 +136,26 @@ class TestRestartCommand:
         assert response.metadata.get("_skip_tts") is True
 
     @pytest.mark.asyncio
+    async def test_tts_command_reports_status(self):
+        loop, _bus = _make_loop()
+        loop.multi_user_enabled = True
+        loop.user_resolver.get_tts_enabled = AsyncMock(return_value=False)
+        msg = InboundMessage(
+            channel="telegram",
+            sender_id="123|alice",
+            chat_id="-1001",
+            content="/tts status",
+            user_id="u-1",
+        )
+
+        response = await loop._process_message(msg)
+
+        assert response is not None
+        assert "TTS for your user is OFF" in response.content
+        assert response.metadata.get("render_as") == "text"
+        assert response.metadata.get("_skip_tts") is True
+
+    @pytest.mark.asyncio
     async def test_status_reports_runtime_info(self):
         loop, _bus = _make_loop()
         session = MagicMock()
@@ -167,11 +187,14 @@ class TestRestartCommand:
             LLMResponse(content="first", usage={"prompt_tokens": 9, "completion_tokens": 4}),
             LLMResponse(content="second", usage={}),
         ])
+        runtime = await loop._runtime_for_message(
+            InboundMessage(channel="telegram", sender_id="u1", chat_id="c1", content="hi")
+        )
 
-        await loop._run_agent_loop([])
+        await loop._run_agent_loop(runtime=runtime, initial_messages=[])
         assert loop._last_usage == {"prompt_tokens": 9, "completion_tokens": 4}
 
-        await loop._run_agent_loop([])
+        await loop._run_agent_loop(runtime=runtime, initial_messages=[])
         assert loop._last_usage == {"prompt_tokens": 0, "completion_tokens": 0}
 
     @pytest.mark.asyncio

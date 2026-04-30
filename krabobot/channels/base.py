@@ -9,11 +9,11 @@ import os
 from pathlib import Path
 from typing import Any
 
-import httpx
 from loguru import logger
 
 from krabobot.bus.events import InboundMessage, OutboundMessage
 from krabobot.bus.queue import MessageBus
+from krabobot.config.schema import STTConfig, TTSConfig
 
 
 class BaseChannel(ABC):
@@ -39,60 +39,68 @@ class BaseChannel(ABC):
         self.bus = bus
         self._running = False
         self._last_stt_error: str | None = None
+        self._tts_config: TTSConfig | None = None
+        self._stt_config: STTConfig | None = None
+
+    def set_tts_config(self, cfg: TTSConfig) -> None:
+        """Attach global TTS settings from root config."""
+        self._tts_config = cfg
+
+    def set_stt_config(self, cfg: STTConfig) -> None:
+        """Attach global STT settings from root config."""
+        self._stt_config = cfg
 
     async def transcribe_audio_with_error(self, file_path: str | Path) -> tuple[str, str | None]:
         """Transcribe audio and return ``(text, error)`` for user-facing diagnostics."""
         self._last_stt_error = None
         path = Path(file_path)
-        provider = (os.getenv("STT_PROVIDER", "gigaam_onnx") or "gigaam_onnx").strip().lower()
-        if provider in {"gigaam", "gigaam_onnx"}:
-            onnx_dir = os.getenv("GIGAAM_ONNX_DIR", "").strip()
-            if not onnx_dir:
-                onnx_dir = str((Path.home() / ".krabobot" / "models" / "gigaam" / "onnx").resolve())
-            model_version = (os.getenv("GIGAAM_MODEL_VERSION", "v2_ctc") or "v2_ctc").strip()
-            try:
-                from krabobot.stt.gigaam_onnx import GigaamOnnxTranscriber
-
-                text = await asyncio.to_thread(
-                    GigaamOnnxTranscriber.transcribe,
-                    path,
-                    onnx_dir=onnx_dir,
-                    model_version=model_version,
-                )
-                if text:
-                    return text, None
-                self._last_stt_error = "gigaam_onnx returned empty transcription"
-                return "", self._last_stt_error
-            except Exception as e:
-                logger.warning("{}: GigaAM ONNX transcription failed: {}", self.name, e)
-                self._last_stt_error = f"gigaam_onnx failed: {e}"
-                return "", self._last_stt_error
-
-        audio_url = os.getenv("AUDIO_URL", "").strip()
-        if not audio_url:
-            self._last_stt_error = "no STT backend configured (set STT_PROVIDER/GIGAAM_ONNX_DIR or AUDIO_URL)"
-            return "", self._last_stt_error
         try:
-            with path.open("rb") as f:
-                files = {"file": (path.name, f, "application/octet-stream")}
-                async with httpx.AsyncClient(timeout=120.0) as client:
-                    resp = await client.post(f"{audio_url.rstrip('/')}/transcribe", files=files)
-                    resp.raise_for_status()
-            data = resp.json()
-            text = str(data.get("text") or "").strip() if isinstance(data, dict) else ""
+            from krabobot.stt.sherpa_onnx_stt import SherpaOnnxTranscriber
+
+            model_dir = self._resolve_sherpa_stt_model_dir()
+            num_threads = self._resolve_sherpa_stt_num_threads()
+            backend_provider = self._resolve_sherpa_stt_provider()
+            text = await asyncio.to_thread(
+                SherpaOnnxTranscriber.transcribe,
+                path,
+                model_dir=model_dir,
+                num_threads=num_threads,
+                provider=backend_provider,
+            )
             if text:
                 return text, None
-            logger.warning(
-                "{}: AUDIO_URL transcription returned empty text: {}",
-                self.name,
-                data if isinstance(data, dict) else "non-JSON response",
-            )
-            self._last_stt_error = "AUDIO_URL transcribe returned empty text"
+            self._last_stt_error = "sherpa_onnx returned empty transcription"
             return "", self._last_stt_error
         except Exception as e:
-            logger.warning("{}: AUDIO_URL transcription failed: {}", self.name, e)
-            self._last_stt_error = f"AUDIO_URL transcribe failed: {e}"
+            logger.warning("{}: sherpa-onnx transcription failed: {}", self.name, e)
+            self._last_stt_error = f"sherpa_onnx failed: {e}"
             return "", self._last_stt_error
+
+    def _resolve_sherpa_stt_model_dir(self) -> str:
+        """Resolve sherpa-onnx STT model directory from config/env."""
+        if self._stt_config:
+            base = Path(self._stt_config.sherpa_models_dir).expanduser().resolve()
+            model_id = (self._stt_config.sherpa_model_id or "").strip()
+            model_name = model_id.split("/", 1)[-1] if "/" in model_id else model_id
+            if model_name:
+                return str((base / model_name).resolve())
+            return str(base.resolve())
+        default_dir = str((Path.home() / ".krabobot" / "models" / "stt" / "sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16").resolve())
+        return (os.getenv("SHERPA_STT_MODEL_DIR", default_dir) or "").strip()
+
+    def _resolve_sherpa_stt_num_threads(self) -> int:
+        if self._stt_config:
+            return int(max(1, self._stt_config.sherpa_num_threads))
+        raw = (os.getenv("SHERPA_STT_NUM_THREADS", "2") or "2").strip()
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            return 2
+
+    def _resolve_sherpa_stt_provider(self) -> str:
+        if self._stt_config and self._stt_config.sherpa_provider:
+            return str(self._stt_config.sherpa_provider).strip() or "cpu"
+        return (os.getenv("SHERPA_STT_PROVIDER", "cpu") or "cpu").strip()
 
     async def transcribe_audio(self, file_path: str | Path) -> str:
         """Backward-compatible wrapper that returns only text."""
@@ -108,14 +116,28 @@ class BaseChannel(ABC):
     async def synthesize_speech(
         self, text: str
     ) -> str | None:
-        """Synthesize speech via gTTS and return a local mp3 file path."""
+        """Synthesize speech with configured backend and return local audio path."""
         clean_text = (text or "").strip()
         if not clean_text:
             return None
+        provider = (
+            (self._tts_config.provider if self._tts_config else os.getenv("TTS_PROVIDER", "gtts"))
+            or "gtts"
+        ).strip().lower()
+        if provider in {"sherpa", "sherpa_onnx", "sherpa-onnx"}:
+            path = await self._synthesize_sherpa_onnx(clean_text)
+            if path:
+                return path
+            logger.warning("{}: sherpa-onnx TTS failed, falling back to gTTS", self.name)
         try:
             from gtts import gTTS
 
-            lang = (os.getenv("TTS_LANG", "ru") or "ru").strip()
+            lang = (
+                self._tts_config.language
+                if self._tts_config and self._tts_config.language
+                else os.getenv("TTS_LANG", "ru")
+            )
+            lang = (lang or "ru").strip()
             fd, out_path = tempfile.mkstemp(prefix=f"{self.name}_tts_", suffix=".mp3")
             os.close(fd)
             await asyncio.to_thread(gTTS(clean_text, lang=lang).save, out_path)
@@ -126,6 +148,56 @@ class BaseChannel(ABC):
         except Exception as e:
             logger.warning("{}: gTTS synthesis failed: {}", self.name, e)
             return None
+
+    async def _synthesize_sherpa_onnx(self, clean_text: str) -> str | None:
+        """Synthesize speech via sherpa-onnx VITS model directory."""
+        from krabobot.tts.sherpa_onnx_tts import SherpaOnnxTTS
+
+        model_dir = self._resolve_sherpa_tts_model_dir()
+        if not model_dir:
+            logger.warning("{}: sherpa-onnx model dir is not configured", self.name)
+            return None
+        speed = self._sherpa_tts_speed()
+        fd, out_path = tempfile.mkstemp(prefix=f"{self.name}_tts_", suffix=".wav")
+        os.close(fd)
+        try:
+            await asyncio.to_thread(
+                SherpaOnnxTTS.synthesize_to_wav,
+                text=clean_text,
+                model_dir=model_dir,
+                out_path=out_path,
+                speed=speed,
+                sid=0,
+            )
+            return out_path
+        except ImportError:
+            logger.warning("{}: sherpa-onnx is not installed", self.name)
+            return None
+        except Exception as e:
+            logger.warning("{}: sherpa-onnx TTS failed: {}", self.name, e)
+            return None
+
+    def _resolve_sherpa_tts_model_dir(self) -> str:
+        """Resolve sherpa-onnx TTS model directory from config/env."""
+        if self._tts_config:
+            base = Path(self._tts_config.sherpa_models_dir).expanduser().resolve()
+            model_id = (self._tts_config.sherpa_model_id or "").strip()
+            model_name = model_id.split("/", 1)[-1] if "/" in model_id else model_id
+            if model_name:
+                return str((base / model_name).resolve())
+            return str(base.resolve())
+        default_dir = str((Path.home() / ".krabobot" / "models" / "tts" / "vits-piper-ru_RU-irina-medium").resolve())
+        return (os.getenv("SHERPA_TTS_MODEL_DIR", default_dir) or "").strip()
+
+    def _sherpa_tts_speed(self) -> float:
+        if self._tts_config:
+            return max(0.5, min(2.0, float(self._tts_config.sherpa_speed)))
+        raw = (os.getenv("SHERPA_TTS_SPEED", "1.0") or "1.0").strip()
+        try:
+            val = float(raw)
+        except ValueError:
+            return 1.0
+        return max(0.5, min(2.0, val))
 
     async def login(self, force: bool = False) -> bool:
         """
