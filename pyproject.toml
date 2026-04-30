@@ -60,8 +60,7 @@ dev = [
     "ruff>=0.1.0",
 ]
 stt = [
-    "gigaam",
-    "onnxruntime",
+    "sherpa-onnx>=1.12.8",
 ]
 tts = [
     "sherpa-onnx>=1.12.8",

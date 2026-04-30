@@ -167,11 +167,14 @@ class TestRestartCommand:
             LLMResponse(content="first", usage={"prompt_tokens": 9, "completion_tokens": 4}),
             LLMResponse(content="second", usage={}),
         ])
+        runtime = await loop._runtime_for_message(
+            InboundMessage(channel="telegram", sender_id="u1", chat_id="c1", content="hi")
+        )
 
-        await loop._run_agent_loop([])
+        await loop._run_agent_loop(runtime=runtime, initial_messages=[])
         assert loop._last_usage == {"prompt_tokens": 9, "completion_tokens": 4}
 
-        await loop._run_agent_loop([])
+        await loop._run_agent_loop(runtime=runtime, initial_messages=[])
         assert loop._last_usage == {"prompt_tokens": 0, "completion_tokens": 0}
 
     @pytest.mark.asyncio

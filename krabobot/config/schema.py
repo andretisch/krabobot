@@ -169,6 +169,17 @@ class TTSConfig(Base):
     sherpa_model_id: str = "csukuangfj/vits-piper-ru_RU-irina-medium"
 
 
+class STTConfig(Base):
+    """Global speech-to-text configuration."""
+
+    provider: str = "sherpa_onnx"
+    auto_download_models: bool = True
+    sherpa_models_dir: str = "~/.krabobot/models/stt"
+    sherpa_model_id: str = "csukuangfj/sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16"
+    sherpa_num_threads: int = Field(default=2, ge=1, le=16)
+    sherpa_provider: str = "cpu"
+
+
 class Config(BaseSettings):
     """Root configuration for krabobot."""
 
@@ -179,6 +190,7 @@ class Config(BaseSettings):
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     tts: TTSConfig = Field(default_factory=TTSConfig)
+    stt: STTConfig = Field(default_factory=STTConfig)
 
     @property
     def workspace_path(self) -> Path:
