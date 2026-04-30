@@ -170,8 +170,7 @@ class VKChannel(BaseChannel):
             if not upload_url:
                 return None, "docs.getMessagesUploadServer(type=audio_message) returned no upload_url"
 
-            speed = 1.25 if os.path.basename(file_path).startswith("vk_tts_") else 1.0
-            voice_path = await self._ensure_voice_ogg(file_path, speed=speed)
+            voice_path = await self._ensure_voice_ogg(file_path, speed=1.0)
             with open(voice_path, "rb") as f:
                 files = {"file": (os.path.basename(voice_path), f, "audio/ogg")}
                 async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
