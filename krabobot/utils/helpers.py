@@ -261,11 +261,11 @@ def build_status_content(
     ctx_total_str = f"{ctx_total // 1024}k" if ctx_total > 0 else "n/a"
     return "\n".join([
         f"\U0001f980 krabobot v{version}",
-        f"\U0001f9e0 Model: {model}",
-        f"\U0001f4ca Tokens: {last_in} in / {last_out} out",
-        f"\U0001f4da Context: {ctx_used_str}/{ctx_total_str} ({ctx_pct}%)",
-        f"\U0001f4ac Session: {session_msg_count} messages",
-        f"\u23f1 Uptime: {uptime}",
+        f"\U0001f9e0 Модель: {model}",
+        f"\U0001f4ca Токены: {last_in} вход / {last_out} выход",
+        f"\U0001f4da Контекст: {ctx_used_str}/{ctx_total_str} ({ctx_pct}%)",
+        f"\U0001f4ac Сессия: {session_msg_count} сообщений",
+        f"\u23f1 Аптайм: {uptime}",
     ])
 
 

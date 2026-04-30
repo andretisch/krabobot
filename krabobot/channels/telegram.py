@@ -20,6 +20,7 @@ from telegram.request import HTTPXRequest
 from krabobot.bus.events import OutboundMessage
 from krabobot.bus.queue import MessageBus
 from krabobot.channels.base import BaseChannel
+from krabobot.command.builtin import builtin_menu_entries, build_help_text
 from krabobot.config.paths import get_media_dir
 from krabobot.config.schema import Base
 from krabobot.security.network import validate_url_target
@@ -201,19 +202,8 @@ class TelegramChannel(BaseChannel):
     name = "telegram"
     display_name = "Telegram"
 
-    # Commands registered with Telegram's command menu
-    BOT_COMMANDS = [
-        BotCommand("start", "Запуск и приветствие"),
-        BotCommand("new", "Новый разговор"),
-        BotCommand("clear_memory", "Очистить память (архив в HISTORY.md)"),
-        BotCommand("stop", "Остановить текущую задачу"),
-        BotCommand("id", "Показать ваши ID"),
-        BotCommand("link", "Связать аккаунт между каналами"),
-        BotCommand("tts", "Вкл/выкл голосовые ответы"),
-        BotCommand("help", "Список команд"),
-        BotCommand("restart", "Перезапуск бота"),
-        BotCommand("status", "Статус бота"),
-    ]
+    # Commands registered with Telegram's command menu.
+    BOT_COMMANDS = [BotCommand("start", "Запуск и приветствие")]
 
     @classmethod
     def default_config(cls) -> dict[str, Any]:
@@ -312,14 +302,14 @@ class TelegramChannel(BaseChannel):
 
         # Add command handlers
         self._app.add_handler(CommandHandler("start", self._on_start))
-        self._app.add_handler(CommandHandler("new", self._forward_command))
         self._app.add_handler(CommandHandler("clear_memory", self._forward_command))
-        self._app.add_handler(CommandHandler("stop", self._forward_command))
-        self._app.add_handler(CommandHandler("id", self._forward_command))
-        self._app.add_handler(CommandHandler("link", self._forward_command))
-        self._app.add_handler(CommandHandler("restart", self._forward_command))
-        self._app.add_handler(CommandHandler("status", self._forward_command))
-        self._app.add_handler(CommandHandler("help", self._on_help))
+        for cmd, _desc in builtin_menu_entries():
+            if cmd == "start":
+                continue
+            if cmd == "help":
+                self._app.add_handler(CommandHandler(cmd, self._on_help))
+            else:
+                self._app.add_handler(CommandHandler(cmd, self._forward_command))
 
         # Add message handler for text, photos, voice, documents
         self._app.add_handler(
@@ -343,7 +333,7 @@ class TelegramChannel(BaseChannel):
         logger.info("Telegram bot @{} connected", bot_info.username)
 
         try:
-            await self._app.bot.set_my_commands(self.BOT_COMMANDS)
+            await self._app.bot.set_my_commands(self._build_bot_commands())
             logger.debug("Telegram bot commands registered")
         except Exception as e:
             logger.warning("Failed to register bot commands: {}", e)
@@ -640,17 +630,7 @@ class TelegramChannel(BaseChannel):
         """Handle /help command, bypassing ACL so all users can access it."""
         if not update.message:
             return
-        await update.message.reply_text(
-            "🦀 Команды крабобот.рф:\n\n"
-            "/new — новый разговор\n"
-            "/clear_memory — очистить память (архив в HISTORY.md)\n"
-            "/stop — остановить текущую задачу\n"
-            "/id — показать ваши ID\n"
-            "/tts on|off|status — голосовые ответы для вашего аккаунта\n"
-            "/restart — перезапуск бота\n"
-            "/status — статус бота\n"
-            "/help — эта справка"
-        )
+        await update.message.reply_text(build_help_text())
 
     @staticmethod
     def _sender_id(user) -> str:
@@ -1041,3 +1021,13 @@ class TelegramChannel(BaseChannel):
             return "".join(Path(filename).suffixes)
 
         return ""
+
+    @classmethod
+    def _build_bot_commands(cls) -> list[BotCommand]:
+        """Build Telegram command menu from builtin command registry."""
+        commands = [BotCommand("start", "Запуск и приветствие")]
+        for cmd, desc in builtin_menu_entries():
+            if cmd == "start":
+                continue
+            commands.append(BotCommand(cmd, desc))
+        return commands

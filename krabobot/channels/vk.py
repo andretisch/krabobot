@@ -19,6 +19,7 @@ from pydantic import Field
 from krabobot.bus.events import OutboundMessage
 from krabobot.bus.queue import MessageBus
 from krabobot.channels.base import BaseChannel
+from krabobot.command.builtin import builtin_menu_commands
 from krabobot.config.paths import get_media_dir
 from krabobot.config.schema import Base
 from krabobot.utils.ffmpeg import resolve_ffmpeg_exe
@@ -282,29 +283,39 @@ class VKChannel(BaseChannel):
     @staticmethod
     def _vk_commands_keyboard() -> str:
         """Build VK keyboard with common slash commands."""
+        labels = VKChannel._vk_menu_labels()
+        buttons: list[list[dict[str, Any]]] = []
+        row: list[dict[str, Any]] = []
+        for label in labels:
+            row.append(
+                {
+                    "action": {"type": "text", "label": label, "payload": "{}"},
+                    "color": "secondary",
+                }
+            )
+            if len(row) == 2:
+                buttons.append(row)
+                row = []
+        if row:
+            buttons.append(row)
+
         payload = {
             "one_time": False,
             "inline": False,
-            "buttons": [
-                [
-                    {"action": {"type": "text", "label": "/help", "payload": "{}"}, "color": "primary"},
-                    {"action": {"type": "text", "label": "/id", "payload": "{}"}, "color": "secondary"},
-                ],
-                [
-                    {"action": {"type": "text", "label": "/stop", "payload": "{}"}, "color": "negative"},
-                    {"action": {"type": "text", "label": "/restart", "payload": "{}"}, "color": "negative"},
-                ],
-                [
-                    {"action": {"type": "text", "label": "/link", "payload": "{}"}, "color": "primary"},
-                    {"action": {"type": "text", "label": "/status", "payload": "{}"}, "color": "secondary"},
-                ],
-                [
-                    {"action": {"type": "text", "label": "/tts status", "payload": "{}"}, "color": "secondary"},
-                    {"action": {"type": "text", "label": "/new", "payload": "{}"}, "color": "negative"},
-                ],
-            ],
+            "buttons": buttons,
         }
         return json.dumps(payload, ensure_ascii=False)
+
+    @staticmethod
+    def _vk_menu_labels() -> list[str]:
+        """Build VK-visible command labels from builtin command registry."""
+        labels: list[str] = []
+        for cmd in builtin_menu_commands():
+            if cmd == "/tts":
+                labels.append("/tts status")
+            else:
+                labels.append(cmd)
+        return labels
 
     async def _upload_photo_attachment(self, peer_id: int, file_path: str) -> str | None:
         """Upload file as VK message photo and return attachment token."""

@@ -5,11 +5,23 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from dataclasses import dataclass
+from typing import Literal
 
 from krabobot import __version__
 from krabobot.bus.events import OutboundMessage
 from krabobot.command.router import CommandContext, CommandRouter
 from krabobot.utils.helpers import build_status_content
+
+
+@dataclass(frozen=True)
+class BuiltinCommandSpec:
+    """Single built-in slash command registration and menu metadata."""
+
+    command: str
+    route: Literal["priority", "exact", "prefix"]
+    handler_name: str
+    help_line: str
 
 
 async def cmd_stop(ctx: CommandContext) -> OutboundMessage:
@@ -26,7 +38,7 @@ async def cmd_stop(ctx: CommandContext) -> OutboundMessage:
             pass
     sub_cancelled = await runtime.subagents.cancel_by_session(msg.dispatch_key)
     total = cancelled + sub_cancelled
-    content = f"Stopped {total} task(s)." if total else "No active task to stop."
+    content = f"Остановлено задач: {total}." if total else "Нет активных задач для остановки."
     return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
 
@@ -39,7 +51,7 @@ async def cmd_restart(ctx: CommandContext) -> OutboundMessage:
         os.execv(sys.executable, [sys.executable, "-m", "krabobot"] + sys.argv[1:])
 
     asyncio.create_task(_do_restart())
-    return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="Restarting...")
+    return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="Перезапускаюсь...")
 
 
 async def cmd_status(ctx: CommandContext) -> OutboundMessage:
@@ -81,7 +93,7 @@ async def cmd_new(ctx: CommandContext) -> OutboundMessage:
         loop._schedule_background(runtime.memory_consolidator.archive_messages(snapshot))
     return OutboundMessage(
         channel=ctx.msg.channel, chat_id=ctx.msg.chat_id,
-        content="New session started.",
+        content="Новая сессия начата.",
     )
 
 
@@ -97,17 +109,8 @@ async def cmd_help(ctx: CommandContext) -> OutboundMessage:
 
 def build_help_text() -> str:
     """Build canonical help text shared across channels."""
-    lines = [
-        "🦀 krabobot commands:",
-        "/new — Start a new conversation",
-        "/stop — Stop the current task",
-        "/restart — Restart the bot",
-        "/status — Show bot status",
-        "/id — Show your IDs",
-        "/link — Link account across channels",
-        "/tts on|off|status — Per-user voice replies",
-        "/help — Show available commands",
-    ]
+    lines = ["🦀 Команды krabobot:"]
+    lines.extend(spec.help_line for spec in _builtin_command_specs())
     return "\n".join(lines)
 
 
@@ -115,13 +118,23 @@ async def cmd_id(ctx: CommandContext) -> OutboundMessage:
     """Return caller identifiers useful for manual linking/debug."""
     msg = ctx.msg
     lines = [
-        "Your identifiers:",
-        f"- channel: {msg.channel}",
+        "Ваши идентификаторы:",
+        f"- канал: {msg.channel}",
         f"- sender_id: {msg.sender_id}",
         f"- chat_id: {msg.chat_id}",
     ]
     if msg.user_id:
         lines.append(f"- user_id: {msg.user_id}")
+        linked_accounts = await ctx.loop.user_resolver.accounts_for_user(msg.user_id)
+        if linked_accounts:
+            lines.append("")
+            lines.append("Привязанные каналы:")
+            for account in linked_accounts:
+                channel, sep, sender_id = account.partition(":")
+                if sep:
+                    lines.append(f"- {channel}: {sender_id}")
+                else:
+                    lines.append(f"- {account}")
     return OutboundMessage(
         channel=msg.channel,
         chat_id=msg.chat_id,
@@ -139,13 +152,13 @@ async def cmd_link(ctx: CommandContext) -> OutboundMessage:
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
-            content="Multi-user mode is disabled in config.",
+            content="Режим multi-user отключен в конфиге.",
         )
     if not msg.user_id:
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
-            content="Unable to resolve your account identity.",
+            content="Не удалось определить вашу учетную запись.",
         )
     if not code:
         generated = await loop.user_resolver.create_link_code(msg.user_id)
@@ -153,8 +166,8 @@ async def cmd_link(ctx: CommandContext) -> OutboundMessage:
             channel=msg.channel,
             chat_id=msg.chat_id,
             content=(
-                "Link code created.\n"
-                f"Use `/link {generated}` in your other channel account within the TTL window."
+                "Код привязки создан.\n"
+                f"Используйте `/link {generated}` в вашем другом канале в течение времени жизни кода."
             ),
             metadata={"render_as": "text"},
         )
@@ -165,14 +178,14 @@ async def cmd_link(ctx: CommandContext) -> OutboundMessage:
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
-            content=f"Link failed: {result.error or 'invalid_code'}",
+            content=f"Привязка не выполнена: {result.error or 'invalid_code'}",
             metadata={"render_as": "text"},
         )
     msg.user_id = result.user_id
     return OutboundMessage(
         channel=msg.channel,
         chat_id=msg.chat_id,
-        content="Account linked successfully. Your future messages will share the same user data.",
+        content="Аккаунт успешно привязан. Дальнейшие сообщения будут использовать общий профиль пользователя.",
         metadata={"render_as": "text"},
     )
 
@@ -185,53 +198,152 @@ async def cmd_tts(ctx: CommandContext) -> OutboundMessage:
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
-            content="Per-user TTS requires tools.multiUser.enabled=true.",
+            content="Персональный TTS требует tools.multiUser.enabled=true.",
             metadata={"render_as": "text"},
         )
     if not msg.user_id:
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
-            content="Unable to resolve your account identity.",
+            content="Не удалось определить вашу учетную запись.",
             metadata={"render_as": "text"},
         )
 
     arg = (ctx.args or "").strip().lower()
     if arg in {"", "status"}:
         enabled = await loop.user_resolver.get_tts_enabled(msg.user_id, default=False)
-        state = "ON" if enabled else "OFF"
+        state = "включен" if enabled else "выключен"
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
-            content=f"TTS for your user is {state}. Use `/tts on` or `/tts off`.",
+            content=f"TTS для вашего пользователя {state}. Используйте `/tts on` или `/tts off`.",
             metadata={"render_as": "text"},
         )
     if arg in {"on", "off"}:
         enabled = arg == "on"
         await loop.user_resolver.set_tts_enabled(msg.user_id, enabled)
-        state = "enabled" if enabled else "disabled"
+        state = "включен" if enabled else "выключен"
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
-            content=f"TTS is now {state} for your user.",
+            content=f"TTS теперь {state} для вашего пользователя.",
             metadata={"render_as": "text"},
         )
     return OutboundMessage(
         channel=msg.channel,
         chat_id=msg.chat_id,
-        content="Usage: /tts on | /tts off | /tts status",
+        content="Использование: /tts on | /tts off | /tts status",
         metadata={"render_as": "text"},
     )
 
 
 def register_builtin_commands(router: CommandRouter) -> None:
     """Register the default set of slash commands."""
-    router.priority("/stop", cmd_stop)
-    router.priority("/restart", cmd_restart)
-    router.priority("/status", cmd_status)
-    router.exact("/new", cmd_new)
-    router.exact("/status", cmd_status)
-    router.exact("/id", cmd_id)
-    router.prefix("/link", cmd_link)
-    router.prefix("/tts", cmd_tts)
-    router.exact("/help", cmd_help)
+    handlers = {
+        "cmd_stop": cmd_stop,
+        "cmd_restart": cmd_restart,
+        "cmd_status": cmd_status,
+        "cmd_new": cmd_new,
+        "cmd_id": cmd_id,
+        "cmd_link": cmd_link,
+        "cmd_tts": cmd_tts,
+        "cmd_help": cmd_help,
+    }
+    for spec in _builtin_command_specs():
+        handler = handlers[spec.handler_name]
+        if spec.route == "priority":
+            router.priority(spec.command, handler)
+        elif spec.route == "exact":
+            router.exact(spec.command, handler)
+        else:
+            router.prefix(spec.command, handler)
+
+
+def builtin_menu_commands() -> list[str]:
+    """Return canonical slash commands for channel menu generation."""
+    commands: list[str] = []
+    seen: set[str] = set()
+    for spec in _builtin_command_specs():
+        if not spec.command.startswith("/"):
+            continue
+        if spec.command in seen:
+            continue
+        seen.add(spec.command)
+        commands.append(spec.command)
+    return commands
+
+
+def builtin_menu_entries() -> list[tuple[str, str]]:
+    """Return unique menu entries as (command_without_slash, description)."""
+    entries: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for spec in _builtin_command_specs():
+        if not spec.command.startswith("/"):
+            continue
+        if spec.command in seen:
+            continue
+        seen.add(spec.command)
+        cmd = spec.command.lstrip("/")
+        desc = spec.help_line.split(" — ", 1)[1] if " — " in spec.help_line else spec.help_line
+        entries.append((cmd, desc))
+    return entries
+
+
+def _builtin_command_specs() -> list[BuiltinCommandSpec]:
+    """Canonical built-in command registry."""
+    return [
+        BuiltinCommandSpec(
+            command="/new",
+            route="exact",
+            handler_name="cmd_new",
+            help_line="/new — Новый разговор",
+        ),
+        BuiltinCommandSpec(
+            command="/stop",
+            route="priority",
+            handler_name="cmd_stop",
+            help_line="/stop — Остановить текущую задачу",
+        ),
+        BuiltinCommandSpec(
+            command="/restart",
+            route="priority",
+            handler_name="cmd_restart",
+            help_line="/restart — Перезапустить бота",
+        ),
+        BuiltinCommandSpec(
+            command="/status",
+            route="priority",
+            handler_name="cmd_status",
+            help_line="/status — Показать статус бота",
+        ),
+        BuiltinCommandSpec(
+            command="/status",
+            route="exact",
+            handler_name="cmd_status",
+            help_line="/status — Показать статус бота",
+        ),
+        BuiltinCommandSpec(
+            command="/id",
+            route="exact",
+            handler_name="cmd_id",
+            help_line="/id — Показать ваши ID",
+        ),
+        BuiltinCommandSpec(
+            command="/link",
+            route="prefix",
+            handler_name="cmd_link",
+            help_line="/link — Привязать аккаунт между каналами",
+        ),
+        BuiltinCommandSpec(
+            command="/tts",
+            route="prefix",
+            handler_name="cmd_tts",
+            help_line="/tts on|off|status — Голосовые ответы для вашего пользователя",
+        ),
+        BuiltinCommandSpec(
+            command="/help",
+            route="exact",
+            handler_name="cmd_help",
+            help_line="/help — Показать список команд",
+        ),
+    ]

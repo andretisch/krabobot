@@ -120,8 +120,8 @@ async def test_print_interactive_progress_line_pauses_spinner_before_printing():
 def test_response_renderable_uses_text_for_explicit_plain_rendering():
     status = (
         "🦀 krabobot v20260427\n"
-        "🧠 Model: MiniMax-M2.7\n"
-        "📊 Tokens: 20639 in / 29 out"
+        "🧠 Модель: MiniMax-M2.7\n"
+        "📊 Токены: 20639 вход / 29 выход"
     )
 
     renderable = commands._response_renderable(
@@ -140,7 +140,7 @@ def test_response_renderable_preserves_normal_markdown_rendering():
 
 
 def test_response_renderable_without_metadata_keeps_markdown_path():
-    help_text = "🦀 krabobot commands:\n/status — Show bot status\n/help — Show available commands"
+    help_text = "🦀 Команды krabobot:\n/status — Показать статус бота\n/help — Показать список команд"
 
     renderable = commands._response_renderable(help_text, render_markdown=True)
 

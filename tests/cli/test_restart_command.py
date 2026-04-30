@@ -43,7 +43,7 @@ class TestRestartCommand:
 
         with patch("krabobot.command.builtin.os.execv") as mock_execv:
             out = await cmd_restart(ctx)
-            assert "Restarting" in out.content
+            assert "Перезапускаюсь" in out.content
 
             await asyncio.sleep(1.5)
             mock_execv.assert_called_once()
@@ -70,7 +70,7 @@ class TestRestartCommand:
 
             mock_dispatch.assert_not_called()
             out = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
-            assert "Restarting" in out.content
+            assert "Перезапускаюсь" in out.content
 
     @pytest.mark.asyncio
     async def test_status_intercepted_in_run_loop(self):
@@ -124,6 +124,7 @@ class TestRestartCommand:
     @pytest.mark.asyncio
     async def test_id_command_returns_sender_and_chat_ids(self):
         loop, _bus = _make_loop()
+        loop.user_resolver.accounts_for_user = AsyncMock(return_value=[])
         msg = InboundMessage(channel="telegram", sender_id="123|alice", chat_id="-1001", content="/id")
 
         response = await loop._process_message(msg)
@@ -131,9 +132,31 @@ class TestRestartCommand:
         assert response is not None
         assert "sender_id: 123|alice" in response.content
         assert "chat_id: -1001" in response.content
-        assert "channel: telegram" in response.content
+        assert "канал: telegram" in response.content
         assert response.metadata.get("render_as") == "text"
         assert response.metadata.get("_skip_tts") is True
+
+    @pytest.mark.asyncio
+    async def test_id_command_includes_all_linked_accounts(self):
+        loop, _bus = _make_loop()
+        loop.user_resolver.accounts_for_user = AsyncMock(
+            return_value=["telegram:123|alice", "vk:85554821", "email:alice@example.com"]
+        )
+        msg = InboundMessage(
+            channel="telegram",
+            sender_id="123|alice",
+            chat_id="-1001",
+            content="/id",
+            user_id="u-1",
+        )
+
+        response = await loop._process_message(msg)
+
+        assert response is not None
+        assert "Привязанные каналы:" in response.content
+        assert "- telegram: 123|alice" in response.content
+        assert "- vk: 85554821" in response.content
+        assert "- email: alice@example.com" in response.content
 
     @pytest.mark.asyncio
     async def test_tts_command_reports_status(self):
@@ -151,7 +174,7 @@ class TestRestartCommand:
         response = await loop._process_message(msg)
 
         assert response is not None
-        assert "TTS for your user is OFF" in response.content
+        assert "TTS для вашего пользователя выключен" in response.content
         assert response.metadata.get("render_as") == "text"
         assert response.metadata.get("_skip_tts") is True
 
@@ -172,11 +195,11 @@ class TestRestartCommand:
         response = await loop._process_message(msg)
 
         assert response is not None
-        assert "Model: test-model" in response.content
-        assert "Tokens: 0 in / 0 out" in response.content
-        assert "Context: 20k/64k (31%)" in response.content
-        assert "Session: 3 messages" in response.content
-        assert "Uptime: 2m 5s" in response.content
+        assert "Модель: test-model" in response.content
+        assert "Токены: 0 вход / 0 выход" in response.content
+        assert "Контекст: 20k/64k (31%)" in response.content
+        assert "Сессия: 3 сообщений" in response.content
+        assert "Аптайм: 2m 5s" in response.content
         assert response.metadata.get("render_as") == "text"
         assert response.metadata.get("_skip_tts") is True
 
@@ -213,8 +236,8 @@ class TestRestartCommand:
         )
 
         assert response is not None
-        assert "Tokens: 1200 in / 34 out" in response.content
-        assert "Context: 1k/64k (1%)" in response.content
+        assert "Токены: 1200 вход / 34 выход" in response.content
+        assert "Контекст: 1k/64k (1%)" in response.content
 
     @pytest.mark.asyncio
     async def test_process_direct_preserves_render_metadata(self):
