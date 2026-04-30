@@ -1,39 +1,36 @@
 # krabobot
 
-`krabobot` is a lightweight personal AI assistant framework focused on:
+`krabobot` — локальный многоканальный AI-бот с акцентом на:
 
-- simple setup and local control;
-- built-in channels (`telegram`, `vk`, `email`) without third-party channel plugins;
-- OpenAI-compatible providers (including custom proxy backends);
-- multi-user account linking across channels;
-- optional voice pipeline: TTS (`gTTS`) + STT (`gigaam` + `onnxruntime`).
-
----
-
-## Features
-
-- **CLI modes**: interactive agent, gateway worker, API server.
-- **Channels**: Telegram, VK, Email.
-- **Built-in commands**: `/new`, `/status`, `/help`, `/id`, `/link`.
-- **Multi-user isolation**: per-user workspace, sessions, memory.
-- **Message tools**: file operations, shell, web fetch/search, message send, spawn.
-- **STT/TTS**:
-  - STT from voice/audio with local GigaAM ONNX backend.
-  - TTS voice replies per channel with `ttsEnabled`.
+- русскоязычную аудиторию;
+- работу через Telegram, VK и Email;
+- единый профиль пользователя между каналами;
+- регистрацию с подтверждением владельца;
+- локальные STT/TTS через `sherpa-onnx`.
 
 ---
 
-## Requirements
+## Что умеет
 
-- Linux/macOS
+- Режимы запуска: `gateway`, `agent`, `serve`.
+- Каналы: `telegram`, `vk`, `email`.
+- Команды: `/start`, `/help`, `/new`, `/clear_memory`, `/id`, `/link`, `/tts`, `/reg`, `/regcode`, `/status`, `/restart`.
+- Встроенная модель доступа:
+  - первый пользователь становится владельцем;
+  - остальные проходят регистрацию (`/reg`) и подтверждение владельцем.
+- Персональная память по каждому пользователю (отдельные workspace).
+
+---
+
+## Требования
+
+- Linux/macOS/Windows
 - Python `3.11+`
-- `ffmpeg` (recommended; required for best VK voice-note compatibility and speed transforms)
+- Для аудио/STT используется `imageio-ffmpeg` (кроссплатформенно, включая Windows); при его недоступности используется системный `ffmpeg` из `PATH`
 
 ---
 
-## Installation
-
-### 1. Clone and create virtualenv
+## Установка
 
 ```bash
 git clone https://github.com/andretisch/krabobot.git
@@ -41,95 +38,62 @@ cd krabobot
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
-```
-
-### 2. Install package
-
-Base install:
-
-```bash
-pip install -e .
-```
-
-Development install:
-
-```bash
 pip install -e ".[dev,api]"
 ```
 
-STT install:
-
-```bash
-pip install -e ".[stt]"
-```
-
-Optional TTS dependency (if not already present in your environment):
-
-```bash
-pip install gTTS
-```
-
 ---
 
-## First Run
-
-Initialize config and run onboarding:
+## Первый запуск
 
 ```bash
 krabobot onboard
-```
-
-Start gateway (channels + agent loop):
-
-```bash
 krabobot gateway
 ```
 
-Interactive local mode (without channels):
+Полезно:
 
 ```bash
 krabobot agent
-```
-
-API mode:
-
-```bash
 krabobot serve
+krabobot --help
 ```
+
+Основной конфиг:
+
+- `~/.krabobot/config.json`
 
 ---
 
-## Configuration
-
-Main config path:
-
-`~/.krabobot/config.json`
-
-### Minimal example
+## Базовая структура конфига
 
 ```json
 {
   "agents": {
     "defaults": {
       "workspace": "~/.krabobot/workspace",
-      "model": "openai/gpt-4o-mini",
-      "provider": "custom"
+      "model": "gpt-5.4-nano",
+      "provider": "proxyapi"
     }
   },
   "providers": {
-    "custom": {
+    "proxyapi": {
       "apiKey": "YOUR_API_KEY",
-      "apiBase": "https://api.openai.com/v1"
+      "apiBase": "https://api.proxyapi.ru/openai/v1",
+      "useMaxCompletionTokens": true
     }
   },
   "channels": {
     "telegram": {
-      "enabled": true,
-      "token": "YOUR_BOT_TOKEN",
-      "allowFrom": ["123456789"],
-      "ttsEnabled": false,
-      "transcribeVoice": true,
-      "transcribeAudio": false
+      "enabled": false,
+      "token": ""
+    },
+    "vk": {
+      "enabled": false,
+      "token": ""
+    },
+    "email": {
+      "enabled": false,
+      "consentGranted": false
     }
   }
 }
@@ -137,11 +101,152 @@ Main config path:
 
 ---
 
-## Providers
+## Регистрация пользователей и права
 
-`krabobot` uses OpenAI-compatible providers via shared transport.
+`krabobot` работает в модели owner + registration:
 
-Common configured sections:
+1. Первый пользователь, который начинает работу, становится владельцем.
+2. Остальные пользователи отправляют `/reg [кто вы]` или `/reg <одноразовый_код>`.
+3. Владелец подтверждает:
+   - `/reg list`
+   - `/reg approve <request_id>`
+   - `/reg reject <request_id>`
+4. Одноразовый код:
+   - владелец: `/regcode create [ttl_seconds]`
+   - пользователь: `/reg <код>`
+
+Ограниченные команды владельца:
+
+- `/status`
+- `/restart`
+
+Связка каналов одного пользователя:
+
+- `/link` — сгенерировать код привязки
+- `/link <код>` — привязать аккаунт в другом канале
+- `/id` — показать IDs и список связанных каналов
+
+---
+
+## Настройка каналов
+
+## 1) VK (ВКонтакте)
+
+### Подготовка сообщества ВКонтакте
+
+1. Создайте сообщество (группу или паблик), если его еще нет.
+2. Откройте **Управление → Сообщения** и включите сообщения.
+3. Откройте **Управление → Дополнительно → Работа с API → Ключи доступа**.
+4. Нажмите **Создать ключ** и выберите права:
+   - `Сообщения сообщества`
+   - `Управление сообществом` (нужно для Bots Long Poll API)
+5. Откройте **Управление → Дополнительно → Работа с API → Long Poll API**:
+   - включите Long Poll API (`Включен`);
+   - во вкладке **Типы событий** обязательно отметьте `Входящие сообщения`.
+6. Для работы в беседах:
+   - **Управление → Сообщения → Настройки для бота**
+   - включите `Разрешать добавлять сообщество в чаты`.
+
+### Конфиг VK
+
+```json
+"vk": {
+  "enabled": true,
+  "token": "vk1.a....",
+  "reactionId": 10,
+  "transcribeVoice": true,
+  "transcribeAudio": false
+}
+```
+
+Примечания:
+
+- Для голосовых вложений используется `audio_message`.
+- Нужны рабочие права токена на сообщения/документы.
+
+---
+
+## 2) Telegram
+
+### Подготовка бота
+
+1. Создайте бота через `@BotFather`.
+2. Получите токен.
+3. Если нужен доступ в группы:
+   - добавьте бота в группу;
+   - при необходимости отключите privacy mode в `@BotFather`.
+
+### Конфиг Telegram
+
+```json
+"telegram": {
+  "enabled": true,
+  "token": "123456:ABCDEF...",
+  "groupPolicy": "mention",
+  "streaming": true,
+  "transcribeVoice": true,
+  "transcribeAudio": false,
+  "welcomeMessage": ""
+}
+```
+
+Опционально:
+
+- `proxy` — прокси для Telegram API.
+- `groupPolicy`:
+  - `mention` — бот отвечает в группе при упоминании/reply;
+  - `open` — бот отвечает на все сообщения группы.
+
+---
+
+## 3) Email
+
+### Что нужно
+
+- IMAP и SMTP одной почты/домена;
+- явное согласие на отправку почты (`consentGranted: true`).
+
+### Конфиг Email
+
+```json
+"email": {
+  "enabled": true,
+  "consentGranted": true,
+  "imapHost": "imap.mail.ru",
+  "imapPort": 993,
+  "imapUsername": "bot@example.com",
+  "imapPassword": "APP_PASSWORD",
+  "imapMailbox": "INBOX",
+  "imapUseSsl": true,
+  "smtpHost": "smtp.mail.ru",
+  "smtpPort": 587,
+  "smtpUsername": "bot@example.com",
+  "smtpPassword": "APP_PASSWORD",
+  "smtpUseTls": true,
+  "smtpUseSsl": false,
+  "fromAddress": "bot@example.com",
+  "autoReplyEnabled": true,
+  "replyRegisteredOnly": true,
+  "pollIntervalSeconds": 30,
+  "markSeen": true,
+  "maxBodyChars": 12000,
+  "subjectPrefix": "Re: ",
+  "verifyDkim": true,
+  "verifySpf": true
+}
+```
+
+Ключевые флаги:
+
+- `autoReplyEnabled` — автоответ на входящие письма.
+- `replyRegisteredOnly` — отвечать только зарегистрированным пользователям.
+- `verifyDkim`/`verifySpf` — защита от spoofing.
+
+---
+
+## Провайдеры LLM
+
+Поддерживаются OpenAI-compatible:
 
 - `custom`
 - `openrouter`
@@ -149,164 +254,68 @@ Common configured sections:
 - `gptunnel`
 - `ollama`
 
-For providers/proxies that require `max_completion_tokens` instead of `max_tokens`, use:
+Если провайдер требует `max_completion_tokens`:
 
 ```json
-{
-  "providers": {
-    "proxyapi": {
-      "useMaxCompletionTokens": true
-    }
-  }
+"proxyapi": {
+  "apiKey": "...",
+  "apiBase": "https://api.proxyapi.ru/openai/v1",
+  "useMaxCompletionTokens": true
 }
 ```
 
 ---
 
-## Channels
+## STT / TTS (sherpa-onnx)
 
-### Telegram
+Пример:
 
-Required:
-
-- `channels.telegram.enabled = true`
-- `channels.telegram.token`
-- `channels.telegram.allowFrom`
-
-Optional voice:
-
-- `ttsEnabled` - send voice reply in addition to text.
-- `transcribeVoice` - transcribe voice notes to text context.
-- `transcribeAudio` - transcribe generic audio attachments.
-
-### VK
-
-Required:
-
-- `channels.vk.enabled = true`
-- `channels.vk.token`
-- `channels.vk.allowFrom`
-
-Optional voice:
-
-- `ttsEnabled` - TTS voice replies.
-- `transcribeVoice` / `transcribeAudio`.
-
-Notes:
-
-- Voice notes are uploaded as `audio_message`.
-- `ffmpeg` is used to convert voice to OGG/Opus when needed.
-
-### Email
-
-Required:
-
-- IMAP + SMTP credentials in `channels.email`.
-- Explicit consent:
-  - `channels.email.consentGranted = true`
-
-Behavior:
-
-- inbound email is polled via IMAP;
-- outbound replies are sent via SMTP;
-- slash commands in email body (e.g. `/new`, `/link CODE`) are supported.
-
----
-
-## Multi-user and Account Linking
-
-When multi-user mode is enabled, accounts from different channels can be linked into one internal user.
-
-User commands:
-
-- `/id` - show current `channel`, `sender_id`, `chat_id`, `user_id`.
-- `/link` - generate one-time code.
-- `/link CODE` - link current account to existing user.
-
-CLI helpers:
-
-- `krabobot users link ...`
-- `krabobot users list`
-
-Identity storage:
-
-- `~/.krabobot/workspace/identity/user_links.json`
-
----
-
-## Voice Pipeline
-
-### TTS (`gTTS`)
-
-- Enabled per channel with `ttsEnabled`.
-- Slash-command responses skip TTS.
-- Telegram/VK send both text and (if enabled) voice attachment.
-
-### STT (`gigaam` + ONNX Runtime)
-
-Recommended environment:
-
-```bash
-export STT_PROVIDER=gigaam_onnx
-export GIGAAM_MODEL_VERSION=v2_ctc
-# optional:
-export GIGAAM_ONNX_DIR="$HOME/.krabobot/models/gigaam/onnx"
-```
-
-If `GIGAAM_ONNX_DIR` is omitted, default directory is used under `~/.krabobot/models/...`.
-
----
-
-## Useful Commands
-
-```bash
-krabobot --help
-krabobot onboard
-krabobot gateway
-krabobot agent
-krabobot serve
-krabobot users --help
+```json
+"tts": {
+  "provider": "sherpa_onnx",
+  "language": "ru",
+  "autoDownloadModels": true,
+  "sherpaSpeed": 1.0,
+  "sherpaModelsDir": "~/.krabobot/models/tts",
+  "sherpaModelId": "csukuangfj/vits-piper-ru_RU-irina-medium"
+},
+"stt": {
+  "provider": "sherpa_onnx",
+  "autoDownloadModels": true,
+  "sherpaModelsDir": "~/.krabobot/models/stt",
+  "sherpaModelId": "csukuangfj/sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16",
+  "sherpaNumThreads": 16,
+  "sherpaProvider": "cpu"
+}
 ```
 
 ---
 
-## Troubleshooting
+## Частые проблемы
 
-- **Email does not send**
-  - check `channels.email.consentGranted = true`;
-  - verify SMTP credentials and host/port/TLS settings.
-
-- **VK voice attachments fail**
-  - verify community token permissions for docs/messages;
-  - ensure `ffmpeg` is installed;
-  - inspect gateway logs for `docs.getMessagesUploadServer` / `docs.save`.
-
-- **Provider rejects `max_tokens`**
-  - enable `useMaxCompletionTokens` for that provider in config.
-
-- **STT returns empty/error**
-  - verify `gigaam` and `onnxruntime` installed;
-  - check model version (`v2_ctc`) and ONNX model directory.
+- VK не отвечает:
+  - проверьте Long Poll API и тип события `Входящие сообщения`;
+  - проверьте права ключа и что ключ от нужного сообщества.
+- Email не отправляется:
+  - проверьте `consentGranted: true`;
+  - проверьте SMTP auth и TLS/SSL режим.
+- `/status` недоступен:
+  - команда только для владельца.
+- Пользователь не может общаться:
+  - он не прошел `/reg` + подтверждение владельца.
 
 ---
 
-## Development
-
-Run tests:
+## Разработка
 
 ```bash
 pytest
-```
-
-Run selected tests:
-
-```bash
 pytest tests/channels/test_email_channel.py
 pytest tests/channels/test_vk_channel_helpers.py
 ```
 
 ---
 
-## License
+## Лицензия
 
-MIT.
+MIT
