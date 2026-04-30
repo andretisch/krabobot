@@ -685,6 +685,8 @@ class AgentLoop:
 
         registered = bool(msg.user_id and await self.user_resolver.is_registered(msg.channel, msg.sender_id))
         if not registered:
+            if self._should_suppress_unregistered_prompt(msg):
+                return None
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
@@ -754,6 +756,24 @@ class AgentLoop:
         return OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id, content=final_content,
             metadata=meta,
+        )
+
+    def _should_suppress_unregistered_prompt(self, msg: InboundMessage) -> bool:
+        """Return True when channel policy says to ignore unregistered messages."""
+        if msg.channel != "email":
+            return False
+        channels_cfg = self.channels_config
+        section = getattr(channels_cfg, "email", None) if channels_cfg is not None else None
+        if section is None:
+            return False
+        if isinstance(section, dict):
+            return bool(
+                section.get("replyRegisteredOnly")
+                or section.get("reply_registered_only")
+            )
+        return bool(
+            getattr(section, "reply_registered_only", False)
+            or getattr(section, "replyRegisteredOnly", False)
         )
 
     async def _linked_accounts_for_prompt(self, msg: InboundMessage) -> list[str]:

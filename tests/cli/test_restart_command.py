@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -206,6 +207,25 @@ class TestRestartCommand:
         assert "- email: alice@example.com" in response.content
 
     @pytest.mark.asyncio
+    async def test_link_command_with_code_works_without_user_id(self):
+        loop, _bus = _make_loop()
+        loop.user_resolver.consume_link_code = AsyncMock(
+            return_value=SimpleNamespace(ok=True, user_id="u-linked", error=None)
+        )
+        msg = InboundMessage(
+            channel="telegram",
+            sender_id="123|alice",
+            chat_id="-1001",
+            content="/link ABCD1234",
+        )
+
+        response = await loop._process_message(msg, runtime=loop._default_runtime)
+
+        assert response is not None
+        assert "Аккаунт успешно привязан" in response.content
+        assert msg.user_id == "u-linked"
+
+    @pytest.mark.asyncio
     async def test_tts_command_reports_status(self):
         loop, _bus = _make_loop()
         loop.user_resolver.get_tts_enabled = AsyncMock(return_value=False)
@@ -326,3 +346,19 @@ class TestRestartCommand:
         assert response is not None
         assert response.metadata.get("render_as") == "text"
         assert response.metadata.get("_skip_tts") is True
+
+    @pytest.mark.asyncio
+    async def test_unregistered_email_can_be_silenced_by_config(self):
+        loop, _bus = _make_loop()
+        loop.channels_config = SimpleNamespace(email={"replyRegisteredOnly": True})
+        loop.user_resolver.is_registered = AsyncMock(return_value=False)
+        msg = InboundMessage(
+            channel="email",
+            sender_id="new.user@example.com",
+            chat_id="new.user@example.com",
+            content="hello",
+        )
+
+        response = await loop._process_message(msg, runtime=loop._default_runtime)
+
+        assert response is None

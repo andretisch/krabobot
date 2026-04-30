@@ -217,13 +217,13 @@ async def cmd_link(ctx: CommandContext) -> OutboundMessage:
     loop = ctx.loop
     msg = ctx.msg
     code = (ctx.args or "").strip().upper()
-    if not msg.user_id:
-        return OutboundMessage(
-            channel=msg.channel,
-            chat_id=msg.chat_id,
-            content="Не удалось определить вашу учетную запись.",
-        )
     if not code:
+        if not msg.user_id:
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="Не удалось определить вашу учетную запись.",
+            )
         generated = await loop.user_resolver.create_link_code(msg.user_id)
         return OutboundMessage(
             channel=msg.channel,

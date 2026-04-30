@@ -49,6 +49,7 @@ class EmailConfig(Base):
     from_address: str = ""
 
     auto_reply_enabled: bool = True
+    reply_registered_only: bool = False
     poll_interval_seconds: int = 30
     mark_seen: bool = True
     max_body_chars: int = 12000
