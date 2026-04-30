@@ -105,6 +105,7 @@ def build_help_text() -> str:
         "/status — Show bot status",
         "/id — Show your IDs",
         "/link — Link account across channels",
+        "/tts on|off|status — Per-user voice replies",
         "/help — Show available commands",
     ]
     return "\n".join(lines)
@@ -176,6 +177,53 @@ async def cmd_link(ctx: CommandContext) -> OutboundMessage:
     )
 
 
+async def cmd_tts(ctx: CommandContext) -> OutboundMessage:
+    """Manage per-user TTS preference: /tts on|off|status."""
+    msg = ctx.msg
+    loop = ctx.loop
+    if not loop.multi_user_enabled:
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content="Per-user TTS requires tools.multiUser.enabled=true.",
+            metadata={"render_as": "text"},
+        )
+    if not msg.user_id:
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content="Unable to resolve your account identity.",
+            metadata={"render_as": "text"},
+        )
+
+    arg = (ctx.args or "").strip().lower()
+    if arg in {"", "status"}:
+        enabled = await loop.user_resolver.get_tts_enabled(msg.user_id, default=False)
+        state = "ON" if enabled else "OFF"
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=f"TTS for your user is {state}. Use `/tts on` or `/tts off`.",
+            metadata={"render_as": "text"},
+        )
+    if arg in {"on", "off"}:
+        enabled = arg == "on"
+        await loop.user_resolver.set_tts_enabled(msg.user_id, enabled)
+        state = "enabled" if enabled else "disabled"
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=f"TTS is now {state} for your user.",
+            metadata={"render_as": "text"},
+        )
+    return OutboundMessage(
+        channel=msg.channel,
+        chat_id=msg.chat_id,
+        content="Usage: /tts on | /tts off | /tts status",
+        metadata={"render_as": "text"},
+    )
+
+
 def register_builtin_commands(router: CommandRouter) -> None:
     """Register the default set of slash commands."""
     router.priority("/stop", cmd_stop)
@@ -185,4 +233,5 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.exact("/status", cmd_status)
     router.exact("/id", cmd_id)
     router.prefix("/link", cmd_link)
+    router.prefix("/tts", cmd_tts)
     router.exact("/help", cmd_help)

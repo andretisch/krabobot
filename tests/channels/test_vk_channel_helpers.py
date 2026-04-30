@@ -61,3 +61,6 @@ def test_vk_commands_keyboard_contains_basic_commands() -> None:
     assert "/link" in labels
     assert "/status" in labels
     assert "/new" in labels
+    assert "/stop" in labels
+    assert "/restart" in labels
+    assert "/tts status" in labels

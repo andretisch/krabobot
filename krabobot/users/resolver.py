@@ -95,6 +95,30 @@ class UserResolver:
         linked.sort()
         return linked
 
+    async def get_tts_enabled(self, user_id: str, *, default: bool = False) -> bool:
+        """Return per-user TTS preference."""
+        if not user_id:
+            return bool(default)
+        async with self._lock:
+            db = self._load()
+            prefs = db.get("user_prefs", {}) or {}
+            user_pref = prefs.get(str(user_id), {}) or {}
+            raw = user_pref.get("tts_enabled")
+            if raw is None:
+                return bool(default)
+            return bool(raw)
+
+    async def set_tts_enabled(self, user_id: str, enabled: bool) -> None:
+        """Persist per-user TTS preference."""
+        if not user_id:
+            return
+        async with self._lock:
+            db = self._load()
+            prefs = db.setdefault("user_prefs", {})
+            user_pref = prefs.setdefault(str(user_id), {})
+            user_pref["tts_enabled"] = bool(enabled)
+            self._save(db)
+
     async def create_link_code(self, user_id: str) -> str:
         """Create a one-time code that can link another account to *user_id*."""
         alphabet = string.ascii_uppercase + string.digits
@@ -171,16 +195,17 @@ class UserResolver:
 
     def _load(self) -> dict[str, Any]:
         if not self._path.exists():
-            return {"accounts": {}, "pending_links": {}}
+            return {"accounts": {}, "pending_links": {}, "user_prefs": {}}
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 data.setdefault("accounts", {})
                 data.setdefault("pending_links", {})
+                data.setdefault("user_prefs", {})
                 return data
         except Exception:
             logger.exception("Failed to load user links from {}", self._path)
-        return {"accounts": {}, "pending_links": {}}
+        return {"accounts": {}, "pending_links": {}, "user_prefs": {}}
 
     def _save(self, payload: dict[str, Any]) -> None:
         self._path.write_text(

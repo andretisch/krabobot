@@ -136,6 +136,26 @@ class TestRestartCommand:
         assert response.metadata.get("_skip_tts") is True
 
     @pytest.mark.asyncio
+    async def test_tts_command_reports_status(self):
+        loop, _bus = _make_loop()
+        loop.multi_user_enabled = True
+        loop.user_resolver.get_tts_enabled = AsyncMock(return_value=False)
+        msg = InboundMessage(
+            channel="telegram",
+            sender_id="123|alice",
+            chat_id="-1001",
+            content="/tts status",
+            user_id="u-1",
+        )
+
+        response = await loop._process_message(msg)
+
+        assert response is not None
+        assert "TTS for your user is OFF" in response.content
+        assert response.metadata.get("render_as") == "text"
+        assert response.metadata.get("_skip_tts") is True
+
+    @pytest.mark.asyncio
     async def test_status_reports_runtime_info(self):
         loop, _bus = _make_loop()
         session = MagicMock()

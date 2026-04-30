@@ -8,6 +8,7 @@ import wave
 from pathlib import Path
 
 import numpy as np
+from krabobot.utils.ffmpeg import resolve_ffmpeg_exe
 
 
 class SherpaOnnxTranscriber:
@@ -85,7 +86,9 @@ class SherpaOnnxTranscriber:
             except Exception:
                 pass
 
-        ffmpeg = "ffmpeg"
+        ffmpeg = resolve_ffmpeg_exe()
+        if not ffmpeg:
+            raise RuntimeError("ffmpeg is not available (install imageio-ffmpeg or system ffmpeg)")
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
             cmd = [
                 ffmpeg,
