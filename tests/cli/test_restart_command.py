@@ -27,6 +27,9 @@ def _make_loop():
          patch("krabobot.agent.loop.SessionManager"), \
          patch("krabobot.agent.loop.SubagentManager"):
         loop = AgentLoop(bus=bus, provider=provider, workspace=workspace)
+    loop.user_resolver.resolve_or_create = AsyncMock(return_value="u-test-owner")
+    loop.user_resolver.ensure_owner = AsyncMock(return_value="u-test-owner")
+    loop.user_resolver.is_owner = AsyncMock(return_value=True)
     return loop, bus
 
 
@@ -38,6 +41,7 @@ class TestRestartCommand:
         from krabobot.command.router import CommandContext
 
         loop, bus = _make_loop()
+        loop.user_resolver.is_owner = AsyncMock(return_value=True)
         msg = InboundMessage(channel="cli", sender_id="user", chat_id="direct", content="/restart")
         ctx = CommandContext(msg=msg, session=None, key=msg.session_key, raw="/restart", loop=loop)
 
@@ -71,6 +75,27 @@ class TestRestartCommand:
             mock_dispatch.assert_not_called()
             out = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
             assert "Перезапускаюсь" in out.content
+
+    @pytest.mark.asyncio
+    async def test_restart_denied_for_non_owner(self):
+        from krabobot.command.builtin import cmd_restart
+        from krabobot.command.router import CommandContext
+
+        loop, _bus = _make_loop()
+        loop.user_resolver.is_owner = AsyncMock(return_value=False)
+        msg = InboundMessage(
+            channel="telegram",
+            sender_id="u2",
+            chat_id="c1",
+            content="/restart",
+            user_id="user-2",
+        )
+        ctx = CommandContext(msg=msg, session=None, key=msg.session_key, raw="/restart", loop=loop)
+
+        with patch("krabobot.command.builtin.os.execv") as mock_execv:
+            out = await cmd_restart(ctx)
+            assert "только владелец" in out.content.lower()
+            mock_execv.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_status_intercepted_in_run_loop(self):
@@ -112,12 +137,34 @@ class TestRestartCommand:
         loop, bus = _make_loop()
         msg = InboundMessage(channel="telegram", sender_id="u1", chat_id="c1", content="/help")
 
-        response = await loop._process_message(msg)
+        response = await loop._process_message(msg, runtime=loop._default_runtime)
 
         assert response is not None
         assert "/restart" in response.content
         assert "/status" in response.content
         assert "/id" in response.content
+        assert "/clear_memory" in response.content
+        assert response.metadata.get("render_as") == "text"
+        assert response.metadata.get("_skip_tts") is True
+
+    @pytest.mark.asyncio
+    async def test_clear_memory_command_clears_current_runtime_memory(self):
+        loop, _bus = _make_loop()
+        runtime = loop._default_runtime
+        runtime.memory_consolidator.store.clear_and_archive = MagicMock(return_value=True)
+        msg = InboundMessage(
+            channel="telegram",
+            sender_id="u1",
+            chat_id="c1",
+            content="/clear_memory",
+            user_id="u-test-owner",
+        )
+
+        response = await loop._process_message(msg, runtime=runtime)
+
+        assert response is not None
+        assert "Память очищена" in response.content
+        runtime.memory_consolidator.store.clear_and_archive.assert_called_once()
         assert response.metadata.get("render_as") == "text"
         assert response.metadata.get("_skip_tts") is True
 
@@ -127,7 +174,7 @@ class TestRestartCommand:
         loop.user_resolver.accounts_for_user = AsyncMock(return_value=[])
         msg = InboundMessage(channel="telegram", sender_id="123|alice", chat_id="-1001", content="/id")
 
-        response = await loop._process_message(msg)
+        response = await loop._process_message(msg, runtime=loop._default_runtime)
 
         assert response is not None
         assert "sender_id: 123|alice" in response.content
@@ -161,7 +208,6 @@ class TestRestartCommand:
     @pytest.mark.asyncio
     async def test_tts_command_reports_status(self):
         loop, _bus = _make_loop()
-        loop.multi_user_enabled = True
         loop.user_resolver.get_tts_enabled = AsyncMock(return_value=False)
         msg = InboundMessage(
             channel="telegram",
@@ -181,6 +227,7 @@ class TestRestartCommand:
     @pytest.mark.asyncio
     async def test_status_reports_runtime_info(self):
         loop, _bus = _make_loop()
+        loop.user_resolver.is_owner = AsyncMock(return_value=True)
         session = MagicMock()
         session.get_history.return_value = [{"role": "user"}] * 3
         loop.sessions.get_or_create.return_value = session
@@ -190,9 +237,15 @@ class TestRestartCommand:
             return_value=(20500, "tiktoken")
         )
 
-        msg = InboundMessage(channel="telegram", sender_id="u1", chat_id="c1", content="/status")
+        msg = InboundMessage(
+            channel="telegram",
+            sender_id="u1",
+            chat_id="c1",
+            content="/status",
+            user_id="u-test-owner",
+        )
 
-        response = await loop._process_message(msg)
+        response = await loop._process_message(msg, runtime=loop._default_runtime)
 
         assert response is not None
         assert "Модель: test-model" in response.content
@@ -200,6 +253,25 @@ class TestRestartCommand:
         assert "Контекст: 20k/64k (31%)" in response.content
         assert "Сессия: 3 сообщений" in response.content
         assert "Аптайм: 2m 5s" in response.content
+        assert response.metadata.get("render_as") == "text"
+        assert response.metadata.get("_skip_tts") is True
+
+    @pytest.mark.asyncio
+    async def test_status_denied_for_non_owner(self):
+        loop, _bus = _make_loop()
+        loop.user_resolver.is_owner = AsyncMock(return_value=False)
+        msg = InboundMessage(
+            channel="telegram",
+            sender_id="u2",
+            chat_id="c1",
+            content="/status",
+            user_id="user-2",
+        )
+
+        response = await loop._process_message(msg)
+
+        assert response is not None
+        assert "только владелец" in response.content.lower()
         assert response.metadata.get("render_as") == "text"
         assert response.metadata.get("_skip_tts") is True
 
@@ -223,6 +295,7 @@ class TestRestartCommand:
     @pytest.mark.asyncio
     async def test_status_falls_back_to_last_usage_when_context_estimate_missing(self):
         loop, _bus = _make_loop()
+        loop.user_resolver.is_owner = AsyncMock(return_value=True)
         session = MagicMock()
         session.get_history.return_value = [{"role": "user"}]
         loop.sessions.get_or_create.return_value = session
@@ -232,7 +305,8 @@ class TestRestartCommand:
         )
 
         response = await loop._process_message(
-            InboundMessage(channel="telegram", sender_id="u1", chat_id="c1", content="/status")
+            InboundMessage(channel="telegram", sender_id="u1", chat_id="c1", content="/status", user_id="u-test-owner"),
+            runtime=loop._default_runtime,
         )
 
         assert response is not None

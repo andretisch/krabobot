@@ -34,12 +34,7 @@ class VKConfig(Base):
 
     enabled: bool = False
     token: str = ""
-    allow_from: list[str] = Field(default_factory=list, alias="allowFrom")
     reaction_id: int = Field(default=10, alias="reactionId")
-    access_denied_message: str = Field(
-        default="Ваш ID: {id}. Этот пользователь не в доверенных. Обратитесь к администратору бота.",
-        alias="accessDeniedMessage",
-    )
     tts_enabled: bool = False
     transcribe_voice: bool = True
     transcribe_audio: bool = False
@@ -379,20 +374,6 @@ class VKChannel(BaseChannel):
 
             sender_id = str(getattr(message, "from_id", ""))
             chat_id = str(getattr(message, "peer_id", ""))
-
-            if not self.is_allowed(sender_id):
-                try:
-                    deny_text = self.config.access_denied_message
-                    if "{id}" in deny_text:
-                        deny_text = deny_text.replace("{id}", sender_id)
-                    await self.bot.api.messages.send(
-                        peer_id=int(chat_id),
-                        message=deny_text,
-                        random_id=0,
-                    )
-                except Exception:
-                    pass
-                return
 
             content = getattr(message, "text", "") or ""
             media, voice_paths, audio_paths = await self._extract_attachments(message)

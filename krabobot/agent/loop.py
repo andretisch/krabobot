@@ -232,7 +232,7 @@ class AgentLoop:
         if self._multi_user_cfg is None:
             from krabobot.config.schema import ToolsConfig
             self._multi_user_cfg = ToolsConfig.MultiUserConfig()
-        self.multi_user_enabled = bool(getattr(self._multi_user_cfg, "enabled", False))
+        self.multi_user_enabled = True
         self._users_root = self.workspace / str(getattr(self._multi_user_cfg, "users_dirname", "users"))
         self._user_runtime_lock = asyncio.Lock()
         self._user_runtimes: dict[str, AgentRuntime] = {}
@@ -378,16 +378,10 @@ class AgentLoop:
 
     async def _runtime_for_message(self, msg: InboundMessage) -> AgentRuntime:
         """Resolve per-user runtime bundle for an inbound message."""
-        if not self.multi_user_enabled:
+        await self._ensure_identity(msg)
+        user_id = msg.user_id or ("system" if msg.channel == "system" else None)
+        if not user_id:
             return self._default_runtime
-
-        if msg.user_id:
-            user_id = msg.user_id
-        elif msg.channel == "system":
-            user_id = "system"
-        else:
-            user_id = await self.user_resolver.resolve_or_create(msg.channel, msg.sender_id)
-            msg.user_id = user_id
 
         cached = self._user_runtimes.get(user_id)
         if cached is not None:
@@ -407,6 +401,25 @@ class AgentLoop:
             )
             self._user_runtimes[user_id] = runtime
             return runtime
+
+    async def _ensure_identity(self, msg: InboundMessage) -> None:
+        """Resolve user identity without auto-creating non-owner accounts."""
+        if msg.channel == "system":
+            return
+        if msg.user_id:
+            await self.user_resolver.ensure_owner(msg.user_id)
+            return
+        existing = await self.user_resolver.lookup(msg.channel, msg.sender_id)
+        if existing:
+            msg.user_id = existing
+            await self.user_resolver.ensure_owner(existing)
+            return
+        owner_id = await self.user_resolver.get_owner_user_id()
+        if owner_id:
+            return
+        first_user = await self.user_resolver.resolve_or_create(msg.channel, msg.sender_id)
+        await self.user_resolver.ensure_owner(first_user)
+        msg.user_id = first_user
 
     def _set_tool_context(
         self,
@@ -670,6 +683,15 @@ class AgentLoop:
         if result := await self.commands.dispatch(ctx):
             return self._mark_command_response(result)
 
+        registered = bool(msg.user_id and await self.user_resolver.is_registered(msg.channel, msg.sender_id))
+        if not registered:
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="Доступ не активирован. Отправьте /reg [о себе] или /reg <код>.",
+                metadata={"render_as": "text", "_skip_tts": True},
+            )
+
         await runtime.memory_consolidator.maybe_consolidate_by_tokens(session)
 
         self._set_tool_context(runtime, msg.channel, msg.chat_id, msg.metadata.get("message_id"), user_id=runtime.user_id)
@@ -736,7 +758,7 @@ class AgentLoop:
 
     async def _linked_accounts_for_prompt(self, msg: InboundMessage) -> list[str]:
         """Load linked account list for runtime context hints."""
-        if not self.multi_user_enabled or not msg.user_id:
+        if not msg.user_id:
             return []
         try:
             return await self.user_resolver.accounts_for_user(msg.user_id)
@@ -746,7 +768,7 @@ class AgentLoop:
 
     async def _tts_enabled_for_user(self, msg: InboundMessage) -> bool:
         """Resolve per-user TTS switch for channels that support voice replies."""
-        if not self.multi_user_enabled or not msg.user_id:
+        if not msg.user_id:
             return False
         try:
             return await self.user_resolver.get_tts_enabled(msg.user_id, default=False)

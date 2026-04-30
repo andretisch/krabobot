@@ -261,10 +261,11 @@ class BaseChannel(ABC):
         return bool(streaming) and type(self).send_delta is not BaseChannel.send_delta
 
     def is_allowed(self, sender_id: str) -> bool:
-        """Check if *sender_id* is permitted.  Empty list → deny all; ``"*"`` → allow all."""
-        allow_list = getattr(self.config, "allow_from", [])
+        """Legacy allow-list check (kept for compatibility, not enforced globally)."""
+        allow_list = getattr(self.config, "allow_from", None)
+        if allow_list is None:
+            return False
         if not allow_list:
-            logger.warning("{}: allow_from is empty — all access denied", self.name)
             return False
         if "*" in allow_list:
             return True
@@ -282,7 +283,7 @@ class BaseChannel(ABC):
         """
         Handle an incoming message from the chat platform.
 
-        This method checks permissions and forwards to the bus.
+        This method forwards inbound message to the bus.
 
         Args:
             sender_id: The sender's identifier.
@@ -292,14 +293,6 @@ class BaseChannel(ABC):
             metadata: Optional channel-specific metadata.
             session_key: Optional session key override (e.g. thread-scoped sessions).
         """
-        if not self.is_allowed(sender_id):
-            logger.warning(
-                "Access denied for sender {} on channel {}. "
-                "Add them to allowFrom list in config to grant access.",
-                sender_id, self.name,
-            )
-            return
-
         meta = metadata or {}
         if self.supports_streaming:
             meta = {**meta, "_wants_stream": True}

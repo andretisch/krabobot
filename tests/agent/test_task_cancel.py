@@ -25,6 +25,9 @@ def _make_loop(*, exec_config=None):
          patch("krabobot.agent.loop.SubagentManager") as MockSubMgr:
         MockSubMgr.return_value.cancel_by_session = AsyncMock(return_value=0)
         loop = AgentLoop(bus=bus, provider=provider, workspace=workspace, exec_config=exec_config)
+    loop.user_resolver.resolve_or_create = AsyncMock(return_value="u-test-owner")
+    loop.user_resolver.ensure_owner = AsyncMock(return_value="u-test-owner")
+    loop.user_resolver.is_owner = AsyncMock(return_value=True)
     return loop, bus
 
 

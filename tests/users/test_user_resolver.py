@@ -58,3 +58,26 @@ async def test_tts_preference_roundtrip(tmp_path: Path):
 
     await resolver.set_tts_enabled(user, True)
     assert await resolver.get_tts_enabled(user, default=False) is True
+
+
+@pytest.mark.asyncio
+async def test_first_user_becomes_owner(tmp_path: Path):
+    resolver = UserResolver(tmp_path)
+    first = await resolver.resolve_or_create("telegram", "42")
+    owner = await resolver.ensure_owner(first)
+
+    assert owner == first
+    assert await resolver.get_owner_user_id() == first
+    assert await resolver.is_owner(first) is True
+
+
+@pytest.mark.asyncio
+async def test_owner_is_not_overwritten_by_next_user(tmp_path: Path):
+    resolver = UserResolver(tmp_path)
+    first = await resolver.resolve_or_create("telegram", "42")
+    second = await resolver.resolve_or_create("telegram", "43")
+    await resolver.ensure_owner(first)
+    owner = await resolver.ensure_owner(second)
+
+    assert owner == first
+    assert await resolver.is_owner(second) is False

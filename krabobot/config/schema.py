@@ -146,7 +146,6 @@ class ToolsConfig(Base):
     class MultiUserConfig(Base):
         """Multi-user runtime isolation settings."""
 
-        enabled: bool = False
         users_dirname: str = "users"
         link_code_ttl_seconds: int = 600
         link_code_attempt_limit: int = 5

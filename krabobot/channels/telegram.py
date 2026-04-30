@@ -207,7 +207,10 @@ class TelegramChannel(BaseChannel):
 
     @classmethod
     def default_config(cls) -> dict[str, Any]:
-        return TelegramConfig().model_dump(by_alias=True)
+        payload = TelegramConfig().model_dump(by_alias=True)
+        payload.pop("allowFrom", None)
+        payload.pop("allow_from", None)
+        return payload
 
     _STREAM_EDIT_INTERVAL = 0.6  # min seconds between edit_message_text calls
 
@@ -244,22 +247,18 @@ class TelegramChannel(BaseChannel):
         return None
 
     def is_allowed(self, sender_id: str) -> bool:
-        """Preserve Telegram's legacy id|username allowlist matching."""
+        """Legacy allow-list helper kept for compatibility/tests (not enforced)."""
         if super().is_allowed(sender_id):
             return True
-
         allow_list = getattr(self.config, "allow_from", [])
         if not allow_list or "*" in allow_list:
             return False
-
         sender_str = str(sender_id)
         if sender_str.count("|") != 1:
             return False
-
         sid, username = sender_str.split("|", 1)
         if not sid.isdigit() or not username:
             return False
-
         return sid in allow_list or username in allow_list
 
     async def start(self) -> None:
@@ -302,7 +301,6 @@ class TelegramChannel(BaseChannel):
 
         # Add command handlers
         self._app.add_handler(CommandHandler("start", self._on_start))
-        self._app.add_handler(CommandHandler("clear_memory", self._forward_command))
         for cmd, _desc in builtin_menu_entries():
             if cmd == "start":
                 continue
@@ -604,7 +602,6 @@ class TelegramChannel(BaseChannel):
         """Handle /start command."""
         if not update.message or not update.effective_user:
             return
-
         user = update.effective_user
         template = (getattr(self.config, "welcome_message", "") or "").strip()
         if template:
@@ -616,14 +613,12 @@ class TelegramChannel(BaseChannel):
             except Exception:
                 text = template
         else:
-            # Keep the original structure, but translate and replace product name.
             first_name = getattr(user, "first_name", "") or ""
             text = (
                 f"👋 Привет {first_name}! Я 🦀 крабобот.рф.\n\n"
-                "Отправь мне сообщение — я отвечу.\n"
+                "Чтобы запросить доступ, отправь /reg [кто ты] или /reg <код>.\n"
                 "Напиши /help, чтобы посмотреть доступные команды."
             )
-
         await update.message.reply_text(text)
 
     async def _on_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
