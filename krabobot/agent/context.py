@@ -74,7 +74,7 @@ Skills with available="false" need dependencies installed first - you can try in
 - Use file tools when they are simpler or more reliable than shell commands.
 """
 
-        return f"""# krabobot 🐈
+        return f"""# krabobot 🦀
 
 You are krabobot, a helpful AI assistant.
 
