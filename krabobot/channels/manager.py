@@ -51,6 +51,7 @@ class ChannelManager:
                 continue
             try:
                 channel = cls(section, self.bus)
+                channel.set_tts_config(self.config.tts)
                 if name == "telegram":
                     web_proxy = self.config.tools.web.proxy
                     if web_proxy and getattr(channel.config, "proxy", None) in (None, ""):

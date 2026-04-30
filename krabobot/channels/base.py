@@ -14,6 +14,7 @@ from loguru import logger
 
 from krabobot.bus.events import InboundMessage, OutboundMessage
 from krabobot.bus.queue import MessageBus
+from krabobot.config.schema import TTSConfig
 
 
 class BaseChannel(ABC):
@@ -39,6 +40,11 @@ class BaseChannel(ABC):
         self.bus = bus
         self._running = False
         self._last_stt_error: str | None = None
+        self._tts_config: TTSConfig | None = None
+
+    def set_tts_config(self, cfg: TTSConfig) -> None:
+        """Attach global TTS settings from root config."""
+        self._tts_config = cfg
 
     async def transcribe_audio_with_error(self, file_path: str | Path) -> tuple[str, str | None]:
         """Transcribe audio and return ``(text, error)`` for user-facing diagnostics."""
@@ -108,14 +114,28 @@ class BaseChannel(ABC):
     async def synthesize_speech(
         self, text: str
     ) -> str | None:
-        """Synthesize speech via gTTS and return a local mp3 file path."""
+        """Synthesize speech with configured backend and return local audio path."""
         clean_text = (text or "").strip()
         if not clean_text:
             return None
+        provider = (
+            (self._tts_config.provider if self._tts_config else os.getenv("TTS_PROVIDER", "gtts"))
+            or "gtts"
+        ).strip().lower()
+        if provider in {"sherpa", "sherpa_onnx", "sherpa-onnx"}:
+            path = await self._synthesize_sherpa_onnx(clean_text)
+            if path:
+                return path
+            logger.warning("{}: sherpa-onnx TTS failed, falling back to gTTS", self.name)
         try:
             from gtts import gTTS
 
-            lang = (os.getenv("TTS_LANG", "ru") or "ru").strip()
+            lang = (
+                self._tts_config.language
+                if self._tts_config and self._tts_config.language
+                else os.getenv("TTS_LANG", "ru")
+            )
+            lang = (lang or "ru").strip()
             fd, out_path = tempfile.mkstemp(prefix=f"{self.name}_tts_", suffix=".mp3")
             os.close(fd)
             await asyncio.to_thread(gTTS(clean_text, lang=lang).save, out_path)
@@ -126,6 +146,56 @@ class BaseChannel(ABC):
         except Exception as e:
             logger.warning("{}: gTTS synthesis failed: {}", self.name, e)
             return None
+
+    async def _synthesize_sherpa_onnx(self, clean_text: str) -> str | None:
+        """Synthesize speech via sherpa-onnx VITS model directory."""
+        from krabobot.tts.sherpa_onnx_tts import SherpaOnnxTTS
+
+        model_dir = self._resolve_sherpa_tts_model_dir()
+        if not model_dir:
+            logger.warning("{}: sherpa-onnx model dir is not configured", self.name)
+            return None
+        speed = self._sherpa_tts_speed()
+        fd, out_path = tempfile.mkstemp(prefix=f"{self.name}_tts_", suffix=".wav")
+        os.close(fd)
+        try:
+            await asyncio.to_thread(
+                SherpaOnnxTTS.synthesize_to_wav,
+                text=clean_text,
+                model_dir=model_dir,
+                out_path=out_path,
+                speed=speed,
+                sid=0,
+            )
+            return out_path
+        except ImportError:
+            logger.warning("{}: sherpa-onnx is not installed", self.name)
+            return None
+        except Exception as e:
+            logger.warning("{}: sherpa-onnx TTS failed: {}", self.name, e)
+            return None
+
+    def _resolve_sherpa_tts_model_dir(self) -> str:
+        """Resolve sherpa-onnx TTS model directory from config/env."""
+        if self._tts_config:
+            base = Path(self._tts_config.sherpa_models_dir).expanduser().resolve()
+            model_id = (self._tts_config.sherpa_model_id or "").strip()
+            model_name = model_id.split("/", 1)[-1] if "/" in model_id else model_id
+            if model_name:
+                return str((base / model_name).resolve())
+            return str(base.resolve())
+        default_dir = str((Path.home() / ".krabobot" / "models" / "tts" / "vits-piper-ru_RU-irina-medium").resolve())
+        return (os.getenv("SHERPA_TTS_MODEL_DIR", default_dir) or "").strip()
+
+    def _sherpa_tts_speed(self) -> float:
+        if self._tts_config:
+            return max(0.5, min(2.0, float(self._tts_config.sherpa_speed)))
+        raw = (os.getenv("SHERPA_TTS_SPEED", "1.0") or "1.0").strip()
+        try:
+            val = float(raw)
+        except ValueError:
+            return 1.0
+        return max(0.5, min(2.0, val))
 
     async def login(self, force: bool = False) -> bool:
         """
