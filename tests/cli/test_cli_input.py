@@ -119,7 +119,7 @@ async def test_print_interactive_progress_line_pauses_spinner_before_printing():
 
 def test_response_renderable_uses_text_for_explicit_plain_rendering():
     status = (
-        "🦀 krabobot v20260427\n"
+        "🦀 krabobot v11052026\n"
         "🧠 Модель: MiniMax-M2.7\n"
         "📊 Токены: 20639 вход / 29 выход"
     )
