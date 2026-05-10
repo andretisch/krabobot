@@ -15,6 +15,11 @@
   const sessionListEl = document.getElementById("kb-session-list");
   const attachBtn = document.getElementById("kb-attach");
   const fileInputEl = document.getElementById("kb-files");
+  const tabChat = document.getElementById("kb-tab-chat");
+  const tabSettings = document.getElementById("kb-tab-settings");
+  const viewChat = document.getElementById("kb-view-chat");
+  const viewSettings = document.getElementById("kb-view-settings");
+  const copySessionBtn = document.getElementById("kb-copy-session");
 
   let modelId = null;
   /** @type {File[]} */
@@ -35,6 +40,47 @@
 
   function setStatus(text) {
     statusEl.textContent = text || "";
+  }
+
+  function switchTab(which) {
+    const isChat = which === "chat";
+    if (viewChat && viewSettings) {
+      viewChat.classList.toggle("kb-view--hidden", !isChat);
+      viewSettings.classList.toggle("kb-view--hidden", isChat);
+      viewSettings.hidden = isChat;
+    }
+    if (tabChat && tabSettings) {
+      tabChat.classList.toggle("kb-tab--active", isChat);
+      tabSettings.classList.toggle("kb-tab--active", !isChat);
+      tabChat.setAttribute("aria-selected", String(isChat));
+      tabSettings.setAttribute("aria-selected", String(!isChat));
+    }
+    if (!isChat) {
+      refreshSettingsPanel();
+    }
+  }
+
+  async function refreshSettingsPanel() {
+    const elSession = document.getElementById("kb-st-session");
+    const elModel = document.getElementById("kb-st-model");
+    const elHealth = document.getElementById("kb-st-health");
+    if (elSession) {
+      elSession.textContent = getSessionId();
+    }
+    if (elModel) {
+      elModel.textContent = modelId || "—";
+    }
+    if (elHealth) {
+      elHealth.textContent = "…";
+      try {
+        const r = await fetch("/health");
+        const j = await r.json().catch(() => ({}));
+        elHealth.textContent =
+          r.ok && j.status === "ok" ? "ok" : "HTTP " + r.status;
+      } catch {
+        elHealth.textContent = "недоступно";
+      }
+    }
   }
 
   function appendMessage(role, text, kind) {
@@ -352,6 +398,27 @@
 
   refreshSessionsBtn.addEventListener("click", () => refreshSessions());
 
+  if (tabChat) {
+    tabChat.addEventListener("click", () => switchTab("chat"));
+  }
+  if (tabSettings) {
+    tabSettings.addEventListener("click", () => switchTab("settings"));
+  }
+
+  if (copySessionBtn) {
+    copySessionBtn.addEventListener("click", async () => {
+      const id = getSessionId();
+      try {
+        await navigator.clipboard.writeText(id);
+        setStatus("ID сессии скопирован");
+        setTimeout(() => setStatus(""), 2200);
+      } catch {
+        setStatus("Не удалось скопировать");
+        setTimeout(() => setStatus(""), 2200);
+      }
+    });
+  }
+
   attachBtn.addEventListener("click", () => fileInputEl.click());
 
   fileInputEl.addEventListener("change", () => {
@@ -387,6 +454,7 @@
     try {
       modelId = await fetchModel();
       setStatus("Модель: " + modelId);
+      await refreshSettingsPanel();
       await refreshSessions();
       await loadHistoryForSession(getSessionId());
     } catch (err) {

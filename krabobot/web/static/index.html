@@ -7,8 +7,8 @@
   <link rel="stylesheet" href="/static/chat.css" />
 </head>
 <body>
-  <div class="kb-layout">
-    <aside class="kb-sidebar" aria-label="Диалоги">
+  <div id="kb-layout" class="kb-layout">
+    <aside class="kb-sidebar" aria-label="Диалоги" id="kb-sidebar">
       <div class="kb-sidebar-head">
         <h2 class="kb-sidebar-title">Диалоги</h2>
         <button type="button" id="kb-new-session" class="kb-btn kb-btn-secondary kb-btn-block">
@@ -24,35 +24,111 @@
       <header class="kb-top">
         <h1>krabobot</h1>
         <p class="kb-sub">
-          Локально: <code>/v1/chat/completions</code>, сессии и история на сервере в workspace.
+          Локально: тот же origin, что и <code>krabobot serve</code>.
         </p>
+        <nav class="kb-tabs" role="tablist" aria-label="Разделы">
+          <button
+            type="button"
+            id="kb-tab-chat"
+            class="kb-tab kb-tab--active"
+            role="tab"
+            aria-selected="true"
+            aria-controls="kb-view-chat"
+          >
+            Чат
+          </button>
+          <button
+            type="button"
+            id="kb-tab-settings"
+            class="kb-tab"
+            role="tab"
+            aria-selected="false"
+            aria-controls="kb-view-settings"
+          >
+            Настройки
+          </button>
+        </nav>
         <div class="kb-toolbar">
           <span id="kb-status" class="kb-status" aria-live="polite"></span>
         </div>
       </header>
-      <main class="kb-main">
-        <div id="kb-log" class="kb-log" role="log" aria-label="Переписка"></div>
-        <div id="kb-attachments" class="kb-attachments" aria-label="Вложения"></div>
-        <form id="kb-form" class="kb-form">
-          <label class="kb-sr" for="kb-input">Сообщение</label>
-          <input
-            type="file"
-            id="kb-files"
-            class="kb-file-input"
-            multiple
-            accept="image/*,audio/*,text/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.zip,.7z,.rar,.epub"
-          />
-          <div class="kb-compose">
-            <textarea id="kb-input" class="kb-input" rows="3" placeholder="Текст сообщения…"></textarea>
-            <div class="kb-compose-actions">
-              <button type="button" id="kb-attach" class="kb-btn kb-btn-secondary" title="Файлы">
-                Вложения
-              </button>
-              <button type="submit" class="kb-btn kb-btn-primary" id="kb-send">Отправить</button>
+
+      <div
+        id="kb-view-chat"
+        class="kb-view"
+        role="tabpanel"
+        aria-labelledby="kb-tab-chat"
+      >
+        <main class="kb-main">
+          <div id="kb-log" class="kb-log" role="log" aria-label="Переписка"></div>
+          <div id="kb-attachments" class="kb-attachments" aria-label="Вложения"></div>
+          <form id="kb-form" class="kb-form">
+            <label class="kb-sr" for="kb-input">Сообщение</label>
+            <input
+              type="file"
+              id="kb-files"
+              class="kb-file-input"
+              multiple
+              accept="image/*,audio/*,text/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.zip,.7z,.rar,.epub"
+            />
+            <div class="kb-compose">
+              <textarea id="kb-input" class="kb-input" rows="3" placeholder="Текст сообщения…"></textarea>
+              <div class="kb-compose-actions">
+                <button type="button" id="kb-attach" class="kb-btn kb-btn-secondary" title="Файлы">
+                  Вложения
+                </button>
+                <button type="submit" class="kb-btn kb-btn-primary" id="kb-send">Отправить</button>
+              </div>
             </div>
+          </form>
+        </main>
+      </div>
+
+      <div
+        id="kb-view-settings"
+        class="kb-view kb-view--hidden"
+        role="tabpanel"
+        aria-labelledby="kb-tab-settings"
+        hidden
+      >
+        <div class="kb-settings">
+          <h2 class="kb-settings-h">Подключение</h2>
+          <p class="kb-settings-p">
+            Страница и API с одного хоста (без CORS): запросы идут на <code>/v1/…</code>.
+          </p>
+          <dl class="kb-settings-dl">
+            <dt>Модель</dt>
+            <dd id="kb-st-model">—</dd>
+            <dt>Сервер</dt>
+            <dd id="kb-st-health">—</dd>
+            <dt>Эндпоинты</dt>
+            <dd>
+              <code>GET /v1/models</code>,
+              <code>POST /v1/chat/completions</code>,
+              <code>GET /v1/web/sessions</code> …
+            </dd>
+          </dl>
+
+          <h2 class="kb-settings-h">Сессия в браузере</h2>
+          <p class="kb-settings-p">
+            Идентификатор в <code>localStorage</code> связывает вкладку с файлом истории на сервере
+            (<code>api:&lt;uuid&gt;</code>).
+          </p>
+          <div class="kb-settings-row">
+            <code id="kb-st-session" class="kb-settings-code"></code>
+            <button type="button" id="kb-copy-session" class="kb-btn kb-btn-secondary">
+              Копировать
+            </button>
           </div>
-        </form>
-      </main>
+
+          <h2 class="kb-settings-h">Вложения</h2>
+          <p class="kb-settings-p">
+            Загрузки из чата пишутся в рабочий каталог агента:
+            <code>uploads/web/&lt;session_id&gt;/</code>
+            (UTF-8 для текста, бинарники как есть).
+          </p>
+        </div>
+      </div>
     </div>
   </div>
   <script src="/static/app.js" defer></script>
