@@ -17,6 +17,7 @@
 - Режимы запуска: `gateway`, `agent`, `serve`.
 - Каналы: `telegram`, `vk`, `email`.
 - Команды: `/start`, `/help`, `/new`, `/clear_memory`, `/id`, `/link`, `/tts`, `/reg`, `/regcode`, `/status`, `/restart`.
+- Голосовые ответы в VK/Telegram включаются **только** командой **`/tts on`** у каждого пользователя (глобальных флагов в `config.json` нет).
 - Встроенная модель доступа:
   - первый пользователь становится владельцем;
   - остальные проходят регистрацию (`/reg`) и подтверждение владельцем.
@@ -42,6 +43,15 @@ python3 -m venv .venv
 python -m pip install --upgrade pip
 pip install -e ".[dev,api]"
 ```
+
+**Скрипт установки** (то же самое + опционально `krabobot onboard`):
+
+```bash
+bash scripts/install.sh
+# справка: bash scripts/install.sh --help
+```
+
+Windows (PowerShell из корня репозитория): `.\scripts\install.ps1`
 
 Пакеты **`numpy`** и **`sherpa-onnx`** (локальные STT/TTS) входят в обычную зависимость `pip install -e .` — extras `[stt]` / `[tts]` не нужны.
 
@@ -70,17 +80,19 @@ krabobot --help
 
 ## Базовая структура конфига
 
+Провайдер задаётся в `agents.defaults.provider`. Удобный вариант — **`custom`**: один блок с ключом и OpenAI-compatible `apiBase`, без отдельного имени вида ProxyAPI/OpenRouter в структуре.
+
 ```json
 {
   "agents": {
     "defaults": {
       "workspace": "~/.krabobot/workspace",
       "model": "gpt-5.4-nano",
-      "provider": "proxyapi"
+      "provider": "custom"
     }
   },
   "providers": {
-    "proxyapi": {
+    "custom": {
       "apiKey": "YOUR_API_KEY",
       "apiBase": "https://api.proxyapi.ru/openai/v1",
       "useMaxCompletionTokens": true
@@ -252,16 +264,13 @@ krabobot --help
 
 Поддерживаются OpenAI-compatible:
 
-- `custom`
-- `openrouter`
-- `proxyapi`
-- `gptunnel`
-- `ollama`
+- **`custom`** — любой совместимый endpoint (ключ и `apiBase` в блоке `providers.custom`).
+- **`openrouter`**, **`proxyapi`**, **`gptunnel`**, **`ollama`** — готовые слоты в `providers.<имя>`; удобны, когда не хотите класть базовый URL в `custom`.
 
-Если провайдер требует `max_completion_tokens`:
+Для моделей через ProxyAPI можно оставаться на **`provider: custom`**, указав их `apiBase`; при необходимости включите семантику **`max_completion_tokens`**:
 
 ```json
-"proxyapi": {
+"custom": {
   "apiKey": "...",
   "apiBase": "https://api.proxyapi.ru/openai/v1",
   "useMaxCompletionTokens": true

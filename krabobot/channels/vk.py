@@ -35,7 +35,6 @@ class VKConfig(Base):
     enabled: bool = False
     token: str = ""
     reaction_id: int = Field(default=10, alias="reactionId")
-    tts_enabled: bool = False
     transcribe_voice: bool = True
     transcribe_audio: bool = False
 
@@ -483,7 +482,7 @@ class VKChannel(BaseChannel):
         failed_details: list[str] = []
 
         if not (msg.media or []):
-            wants_tts = bool(msg.metadata.get("_tts_enabled_for_user", self.config.tts_enabled))
+            wants_tts = msg.metadata.get("_tts_enabled_for_user") is True
             if wants_tts and not bool(msg.metadata.get("_skip_tts")) and msg.content and msg.content != "[empty message]":
                 tts_path = await self.synthesize_speech(self._vk_plain_text(msg.content))
                 if tts_path:

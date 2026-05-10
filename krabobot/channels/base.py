@@ -121,8 +121,12 @@ class BaseChannel(ABC):
         if not clean_text:
             return None
         provider = (
-            (self._tts_config.provider if self._tts_config else os.getenv("TTS_PROVIDER", "gtts"))
-            or "gtts"
+            (
+                self._tts_config.provider
+                if self._tts_config
+                else os.getenv("TTS_PROVIDER", "sherpa_onnx")
+            )
+            or "sherpa_onnx"
         ).strip().lower()
         if provider in {"sherpa", "sherpa_onnx", "sherpa-onnx"}:
             path = await self._synthesize_sherpa_onnx(clean_text)

@@ -74,4 +74,11 @@ def _migrate_config(data: dict) -> dict:
     exec_cfg = tools.get("exec", {})
     if "restrictToWorkspace" in exec_cfg and "restrictToWorkspace" not in tools:
         tools["restrictToWorkspace"] = exec_cfg.pop("restrictToWorkspace")
+    channels = data.get("channels")
+    if isinstance(channels, dict):
+        for section in ("vk", "telegram"):
+            blob = channels.get(section)
+            if isinstance(blob, dict):
+                blob.pop("ttsEnabled", None)
+                blob.pop("tts_enabled", None)
     return data

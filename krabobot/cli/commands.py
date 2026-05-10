@@ -2,6 +2,7 @@
 
 import asyncio
 from contextlib import contextmanager, nullcontext
+from datetime import UTC, datetime
 
 import os
 import select
@@ -341,6 +342,172 @@ def onboard(
     console.print("\n[dim]Want chat channels? See: https://github.com/andretisch/krabobot[/dim]")
 
 
+# ============================================================================
+# Backup / Restore
+# ============================================================================
+
+
+@app.command()
+def backup(
+    output: str | None = typer.Option(
+        None,
+        "-o",
+        "--output",
+        help="Write .tar.gz here (default: krabobot-backup-<timestamp>.tar.gz in cwd)",
+    ),
+    config: str | None = typer.Option(None, "-c", "--config", help="Path to config.json"),
+    config_only: bool = typer.Option(
+        False,
+        "--config-only",
+        help="Pack only config.json (no workspace)",
+    ),
+    full: bool = typer.Option(
+        False,
+        "--full",
+        help="Include everything: workspace + media + models + history (archive can be very large)",
+    ),
+    with_media: bool = typer.Option(False, "--with-media", help="Include data dir media/"),
+    with_models: bool = typer.Option(
+        False,
+        "--with-models",
+        help="Include data dir models/ (sherpa weights; can be very large)",
+    ),
+    with_history: bool = typer.Option(False, "--with-history", help="Include CLI history/"),
+):
+    """Create a gzipped tar backup of config and (by default) the agent workspace."""
+    from krabobot.cli.backup import create_archive
+    from krabobot.config.loader import get_config_path, set_config_path
+
+    if full and config_only:
+        console.print("[red]Нельзя использовать --full вместе с --config-only.[/red]")
+        raise typer.Exit(1)
+
+    if full:
+        with_media = True
+        with_models = True
+        with_history = True
+        config_only = False
+
+    if config:
+        config_path = Path(config).expanduser().resolve()
+        set_config_path(config_path)
+        console.print(f"[dim]Using config: {config_path}[/dim]")
+    else:
+        config_path = get_config_path()
+
+    if not config_path.is_file():
+        console.print(f"[red]No config at {config_path}. Run krabobot onboard first.[/red]")
+        raise typer.Exit(1)
+
+    if output:
+        dest = Path(output).expanduser().resolve()
+    else:
+        stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+        dest = Path.cwd() / f"krabobot-backup-{stamp}.tar.gz"
+
+    if full or with_models:
+        console.print("[yellow]Архив может быть очень большим (модели sherpa и пр.).[/yellow]")
+
+    try:
+        _, manifest = create_archive(
+            dest,
+            config_path=config_path,
+            include_workspace=not config_only,
+            include_media=with_media,
+            include_models=with_models,
+            include_history=with_history,
+        )
+    except FileNotFoundError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[green]✓[/green] Backup written to [cyan]{dest}[/cyan]")
+    console.print(f"[dim]Contains: {', '.join(manifest.get('entries', []))}[/dim]")
+
+
+@app.command()
+def restore(
+    archive: Path,
+    config: str | None = typer.Option(None, "-c", "--config", help="Target config.json path"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show plan only, change nothing"),
+    yes: bool = typer.Option(False, "-y", "--yes", help="Apply without confirmation"),
+    config_only: bool = typer.Option(
+        False,
+        "--config-only",
+        help="Restore only config.json from the archive",
+    ),
+    replace_workspace: bool = typer.Option(
+        False,
+        "--replace-workspace",
+        help="Delete existing workspace dir before unpacking (full replace for workspace only)",
+    ),
+    full: bool = typer.Option(
+        False,
+        "--full",
+        help=(
+            "For each component present in archive: delete destination dir first "
+            "(workspace, media, models, history — same spirit as backup --full)"
+        ),
+    ),
+):
+    """Restore from a tarball created by ``krabobot backup``."""
+    from krabobot.cli.backup import restore_archive
+    from krabobot.config.loader import get_config_path, set_config_path
+
+    arch = archive.expanduser().resolve()
+
+    if full and config_only:
+        console.print("[red]Нельзя использовать --full вместе с --config-only.[/red]")
+        raise typer.Exit(1)
+
+    if config:
+        config_path = Path(config).expanduser().resolve()
+        set_config_path(config_path)
+        console.print(f"[dim]Target config: {config_path}[/dim]")
+    else:
+        config_path = get_config_path()
+
+    if dry_run:
+        console.print("[dim]Dry run — no files will be modified.[/dim]")
+        do_apply = False
+    elif yes:
+        do_apply = True
+    else:
+        if full:
+            console.print(
+                "[red bold]--full[/red bold]: удаляются каталоги на диске (workspace/media/models/history "
+                "— только те, что реально восстанавливаются из архива), затем распаковка."
+            )
+        console.print("[yellow]This overwrites files under your config workspace and optional data dirs.[/yellow]")
+        do_apply = typer.confirm("Apply restore?", default=False)
+        if not do_apply:
+            raise typer.Exit(0)
+
+    try:
+        actions = restore_archive(
+            arch,
+            config_path=config_path,
+            dry_run=dry_run,
+            apply=do_apply,
+            config_only=config_only,
+            replace_workspace=replace_workspace,
+            full=full,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+    for line in actions:
+        console.print(f"  [dim]{line}[/dim]")
+
+    if dry_run:
+        console.print("\n[dim]Run without --dry-run and pass -y to apply.[/dim]")
+    elif do_apply:
+        console.print(
+            f"\n[green]✓[/green] Restore applied. Restart [cyan]krabobot gateway[/cyan] if it is running."
+        )
+
+
 def _merge_missing_defaults(existing: Any, defaults: Any) -> Any:
     """Recursively fill in missing values from defaults without overwriting user config."""
     if not isinstance(existing, dict) or not isinstance(defaults, dict):
@@ -670,10 +837,24 @@ def gateway(
             )
             if should_notify:
                 from krabobot.bus.events import OutboundMessage
+
+                notify_ch = (job.payload.channel or "cli").strip().lower()
+                notify_meta: dict[str, Any] = {"_tts_enabled_for_user": False}
+                nid = await agent.user_resolver.lookup(notify_ch, str(job.payload.to))
+                if nid:
+                    try:
+                        notify_meta["_tts_enabled_for_user"] = await agent.user_resolver.get_tts_enabled(
+                            nid,
+                            default=False,
+                        )
+                    except Exception:
+                        notify_meta["_tts_enabled_for_user"] = False
+
                 await bus.publish_outbound(OutboundMessage(
                     channel=job.payload.channel or "cli",
                     chat_id=job.payload.to,
                     content=response,
+                    metadata=notify_meta,
                 ))
         return response
     cron.on_job = on_cron_job

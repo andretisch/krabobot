@@ -16,6 +16,7 @@ def _make_loop(tmp_path: Path) -> AgentLoop:
     bus = MessageBus()
     provider = MagicMock()
     provider.get_default_model.return_value = "test-model"
+    provider.generation.max_tokens = 8192
     return AgentLoop(bus=bus, provider=provider, workspace=tmp_path, model="test-model")
 
 
@@ -37,12 +38,13 @@ class TestMessageToolSuppressLogic:
         loop.tools.get_definitions = MagicMock(return_value=[])
 
         sent: list[OutboundMessage] = []
-        mt = loop.tools.get("message")
+        msg = InboundMessage(channel="feishu", sender_id="user1", chat_id="chat123", content="Send")
+        runtime = await loop._runtime_for_message(msg)
+        mt = runtime.tools.get("message")
         if isinstance(mt, MessageTool):
             mt.set_send_callback(AsyncMock(side_effect=lambda m: sent.append(m)))
 
-        msg = InboundMessage(channel="feishu", sender_id="user1", chat_id="chat123", content="Send")
-        result = await loop._process_message(msg)
+        result = await loop._process_message(msg, runtime=runtime)
 
         assert len(sent) == 1
         assert result is None  # suppressed
@@ -62,12 +64,13 @@ class TestMessageToolSuppressLogic:
         loop.tools.get_definitions = MagicMock(return_value=[])
 
         sent: list[OutboundMessage] = []
-        mt = loop.tools.get("message")
+        msg = InboundMessage(channel="feishu", sender_id="user1", chat_id="chat123", content="Send email")
+        runtime = await loop._runtime_for_message(msg)
+        mt = runtime.tools.get("message")
         if isinstance(mt, MessageTool):
             mt.set_send_callback(AsyncMock(side_effect=lambda m: sent.append(m)))
 
-        msg = InboundMessage(channel="feishu", sender_id="user1", chat_id="chat123", content="Send email")
-        result = await loop._process_message(msg)
+        result = await loop._process_message(msg, runtime=runtime)
 
         assert len(sent) == 1
         assert sent[0].channel == "email"
@@ -107,7 +110,11 @@ class TestMessageToolSuppressLogic:
         async def on_progress(content: str, *, tool_hint: bool = False) -> None:
             progress.append((content, tool_hint))
 
-        final_content, _, _ = await loop._run_agent_loop([], on_progress=on_progress)
+        final_content, _, _ = await loop._run_agent_loop(
+            loop._default_runtime,
+            [],
+            on_progress=on_progress,
+        )
 
         assert final_content == "Done"
         assert progress == [

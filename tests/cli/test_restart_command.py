@@ -240,7 +240,8 @@ class TestRestartCommand:
         response = await loop._process_message(msg)
 
         assert response is not None
-        assert "TTS для вашего пользователя выключен" in response.content
+        assert "выключен" in response.content
+        assert "только для этого пользователя" in response.content
         assert response.metadata.get("render_as") == "text"
         assert response.metadata.get("_skip_tts") is True
 

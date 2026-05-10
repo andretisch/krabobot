@@ -26,6 +26,30 @@ def test_load_config_keeps_max_tokens_and_ignores_legacy_memory_window(tmp_path)
     assert not hasattr(config.agents.defaults, "memory_window")
 
 
+def test_migration_strips_deprecated_channel_tts_flags(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "channels": {
+                    "vk": {"enabled": False, "token": "", "ttsEnabled": True},
+                    "telegram": {
+                        "enabled": False,
+                        "token": "",
+                        "tts_enabled": True,
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    cfg = load_config(config_path)
+    save_config(cfg, config_path)
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "ttsEnabled" not in saved["channels"]["vk"]
+    assert "tts_enabled" not in saved["channels"]["telegram"]
+
+
 def test_save_config_writes_context_window_tokens_but_not_memory_window(tmp_path) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(

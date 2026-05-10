@@ -160,7 +160,7 @@ class ToolsConfig(Base):
 class TTSConfig(Base):
     """Global text-to-speech configuration."""
 
-    provider: str = "gtts"  # gtts or sherpa_onnx
+    provider: str = "sherpa_onnx"  # sherpa_onnx (default) or gtts (fallback, optional)
     language: str = "ru"
     auto_download_models: bool = True
     sherpa_speed: float = Field(default=1.0, ge=0.5, le=2.0)

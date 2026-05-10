@@ -272,7 +272,10 @@ async def cmd_tts(ctx: CommandContext) -> OutboundMessage:
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
-            content=f"TTS для вашего пользователя {state}. Используйте `/tts on` или `/tts off`.",
+            content=(
+                f"TTS только для этого пользователя: сейчас {state}. "
+                "Измените: `/tts on` или `/tts off`."
+            ),
             metadata={"render_as": "text"},
         )
     if arg in {"on", "off"}:

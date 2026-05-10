@@ -326,7 +326,9 @@ class AgentLoop:
             ))
         runtime.tools.register(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
         runtime.tools.register(WebFetchTool(proxy=self.web_proxy))
-        runtime.tools.register(MessageTool(send_callback=self._send_tool_message))
+        runtime.tools.register(
+            MessageTool(send_callback=self._send_tool_message, user_resolver=self.user_resolver)
+        )
         runtime.tools.register(SpawnTool(manager=runtime.subagents))
         if self.cron_service:
             runtime.tools.register(
@@ -447,7 +449,7 @@ class AgentLoop:
                     if name == "spawn":
                         tool.set_context(channel, chat_id, user_id)
                     elif name == "message":
-                        tool.set_context(channel, chat_id, message_id)
+                        tool.set_context(channel, chat_id, message_id, user_id=user_id)
                     else:
                         tool.set_context(channel, chat_id, sid)
 

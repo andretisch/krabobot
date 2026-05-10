@@ -186,7 +186,6 @@ class TelegramConfig(Base):
     # Telegram distinguishes short voice notes (voice) from uploaded audio files (audio), e.g. dictaphone.
     transcribe_voice: bool = True
     transcribe_audio: bool = False
-    tts_enabled: bool = False
     # /start greeting template. If empty, the built-in default greeting is used.
     # Supported placeholders: {first_name}, {username}.
     welcome_message: str = ""
@@ -414,7 +413,7 @@ class TelegramChannel(BaseChannel):
                 )
 
         if not (msg.media or []):
-            wants_tts = bool(msg.metadata.get("_tts_enabled_for_user", self.config.tts_enabled))
+            wants_tts = msg.metadata.get("_tts_enabled_for_user") is True
             if wants_tts and not bool(msg.metadata.get("_skip_tts")) and msg.content and msg.content != "[empty message]":
                 tts_path = await self.synthesize_speech(msg.content)
                 if tts_path:
