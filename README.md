@@ -1,3 +1,5 @@
+![](https://raw.githubusercontent.com/andretisch/krabobot/refs/heads/main/133a0f87b-9f20-4de3-8238-3b946b16f3f9.png)
+
 # krabobot
 
 `krabobot` — локальный многоканальный AI-бот с акцентом на:
