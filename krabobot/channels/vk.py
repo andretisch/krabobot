@@ -367,14 +367,36 @@ class VKChannel(BaseChannel):
         self._running = True
         self.bot = Bot(token=self.config.token)
 
+        # vkbottle's BaseFramework.run_polling() calls LoopWrapper.run() (blocking) when
+        # loop_wrapper.is_running is False — that raises inside asyncio.run(gateway).
+        # If run() raises after scheduling polling via add_task(), long-poll keeps running while
+        # start() logs an error (half-broken state). Bind early so run_polling only awaits polling().
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and loop.is_running():
+            self.bot.loop_wrapper.loop = loop
+            self.bot.loop_wrapper._running = True
+
         @self.bot.on.message()
         async def _on_message(message: Message) -> None:
             if not self._running:
                 return
+            # Do not block vkbottle's router on STT / bus publish — run as a sibling task.
+            asyncio.create_task(
+                self._handle_vk_update(message),
+                name="krabobot-vk-inbound",
+            )
 
-            sender_id = str(getattr(message, "from_id", ""))
-            chat_id = str(getattr(message, "peer_id", ""))
+        await self.bot.run_polling()
 
+    async def _handle_vk_update(self, message: Message) -> None:
+        """Download attachments, optionally STT, then forward to the bus."""
+        sender_id = str(getattr(message, "from_id", ""))
+        chat_id = str(getattr(message, "peer_id", ""))
+
+        try:
             content = getattr(message, "text", "") or ""
             media, voice_paths, audio_paths = await self._extract_attachments(message)
             selected_for_stt: str | None = None
@@ -383,7 +405,14 @@ class VKChannel(BaseChannel):
             elif self.config.transcribe_audio and audio_paths:
                 selected_for_stt = audio_paths[0]
             if selected_for_stt:
+                logger.info("VK STT starting peer={} file={}", chat_id, selected_for_stt)
                 transcription = await self.transcribe_audio(selected_for_stt)
+                logger.info(
+                    "VK STT finished peer={} ok={} chars={}",
+                    chat_id,
+                    bool((transcription or "").strip()),
+                    len(transcription or ""),
+                )
                 if transcription:
                     content = (f"{content}\n" if content else "") + f"[transcription: {transcription}]"
                 else:
@@ -403,6 +432,8 @@ class VKChannel(BaseChannel):
                 content = "[empty message]"
 
             async def _typing_and_reaction() -> None:
+                if not self.bot:
+                    return
                 try:
                     if self.config.reaction_id > 0 and getattr(message, "conversation_message_id", None):
                         await self.bot.api.request(
@@ -432,9 +463,8 @@ class VKChannel(BaseChannel):
                     "conversation_message_id": getattr(message, "conversation_message_id", None),
                 },
             )
-
-        # vkbottle requires awaiting run_polling() inside an active event loop.
-        await self.bot.run_polling()
+        except Exception as e:
+            logger.exception("VK inbound handling failed peer={}: {}", chat_id, e)
 
     async def stop(self) -> None:
         self._running = False

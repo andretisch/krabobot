@@ -644,11 +644,15 @@ def gateway(
         if isinstance(cron_tool, CronTool):
             cron_token = cron_tool.set_cron_context(True)
         try:
+            # Must use the author's channel account id; default "user" fails registration checks
+            # when an owner already exists (_ensure_identity leaves user_id unset).
+            cron_sender = job.payload.from_sender_id or job.payload.to or "user"
             resp = await agent.process_direct(
                 reminder_note,
                 session_key=f"cron:{job.id}",
                 channel=job.payload.channel or "cli",
                 chat_id=job.payload.to or "direct",
+                sender_id=cron_sender,
             )
         finally:
             if isinstance(cron_tool, CronTool) and cron_token is not None:

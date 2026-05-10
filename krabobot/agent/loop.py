@@ -70,6 +70,7 @@ class _LoopHook(AgentHook):
         channel: str = "cli",
         chat_id: str = "direct",
         message_id: str | None = None,
+        sender_id: str = "",
     ) -> None:
         self._loop = agent_loop
         self._runtime = runtime
@@ -79,6 +80,7 @@ class _LoopHook(AgentHook):
         self._channel = channel
         self._chat_id = chat_id
         self._message_id = message_id
+        self._sender_id = sender_id
         self._stream_buf = ""
 
     def wants_streaming(self) -> bool:
@@ -112,7 +114,14 @@ class _LoopHook(AgentHook):
         for tc in context.tool_calls:
             args_str = json.dumps(tc.arguments, ensure_ascii=False)
             logger.info("Tool call: {}({})", tc.name, args_str[:200])
-        self._loop._set_tool_context(self._runtime, self._channel, self._chat_id, self._message_id, user_id=self._runtime.user_id)
+        self._loop._set_tool_context(
+            self._runtime,
+            self._channel,
+            self._chat_id,
+            self._message_id,
+            user_id=self._runtime.user_id,
+            sender_id=self._sender_id,
+        )
 
     def finalize_content(self, context: AgentHookContext, content: str | None) -> str | None:
         return self._loop._strip_think(content)
@@ -428,15 +437,19 @@ class AgentLoop:
         chat_id: str,
         message_id: str | None = None,
         user_id: str | None = None,
+        sender_id: str | None = None,
     ) -> None:
         """Update context for all tools that need routing info."""
+        sid = sender_id or ""
         for name in ("message", "spawn", "cron"):
             if tool := runtime.tools.get(name):
                 if hasattr(tool, "set_context"):
                     if name == "spawn":
                         tool.set_context(channel, chat_id, user_id)
+                    elif name == "message":
+                        tool.set_context(channel, chat_id, message_id)
                     else:
-                        tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))
+                        tool.set_context(channel, chat_id, sid)
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -478,6 +491,7 @@ class AgentLoop:
         channel: str = "cli",
         chat_id: str = "direct",
         message_id: str | None = None,
+        sender_id: str = "",
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop.
 
@@ -495,6 +509,7 @@ class AgentLoop:
             channel=channel,
             chat_id=chat_id,
             message_id=message_id,
+            sender_id=sender_id,
         )
         hook: AgentHook = (
             _LoopHookChain(loop_hook, self._extra_hooks)
@@ -653,7 +668,14 @@ class AgentLoop:
             key = f"{channel}:{chat_id}"
             session = runtime.sessions.get_or_create(key)
             await runtime.memory_consolidator.maybe_consolidate_by_tokens(session)
-            self._set_tool_context(runtime, channel, chat_id, msg.metadata.get("message_id"), user_id=runtime.user_id)
+            self._set_tool_context(
+                runtime,
+                channel,
+                chat_id,
+                msg.metadata.get("message_id"),
+                user_id=runtime.user_id,
+                sender_id=msg.sender_id,
+            )
             history = session.get_history(max_messages=0)
             current_role = "assistant" if msg.sender_id == "subagent" else "user"
             messages = runtime.context.build_messages(
@@ -662,8 +684,12 @@ class AgentLoop:
                 current_role=current_role,
             )
             final_content, _, all_msgs = await self._run_agent_loop(
-                runtime, messages, channel=channel, chat_id=chat_id,
+                runtime,
+                messages,
+                channel=channel,
+                chat_id=chat_id,
                 message_id=msg.metadata.get("message_id"),
+                sender_id=msg.sender_id,
             )
             self._save_turn(session, all_msgs, 1 + len(history))
             runtime.sessions.save(session)
@@ -696,7 +722,14 @@ class AgentLoop:
 
         await runtime.memory_consolidator.maybe_consolidate_by_tokens(session)
 
-        self._set_tool_context(runtime, msg.channel, msg.chat_id, msg.metadata.get("message_id"), user_id=runtime.user_id)
+        self._set_tool_context(
+            runtime,
+            msg.channel,
+            msg.chat_id,
+            msg.metadata.get("message_id"),
+            user_id=runtime.user_id,
+            sender_id=msg.sender_id,
+        )
         if message_tool := runtime.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
@@ -732,8 +765,10 @@ class AgentLoop:
             on_progress=on_progress or _bus_progress,
             on_stream=on_stream,
             on_stream_end=on_stream_end,
-            channel=msg.channel, chat_id=msg.chat_id,
+            channel=msg.channel,
+            chat_id=msg.chat_id,
             message_id=msg.metadata.get("message_id"),
+            sender_id=msg.sender_id,
         )
 
         if final_content is None:

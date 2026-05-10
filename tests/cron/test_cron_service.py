@@ -33,6 +33,28 @@ def test_add_job_accepts_valid_timezone(tmp_path) -> None:
     assert job.state.next_run_at_ms is not None
 
 
+def test_add_job_persists_from_sender_id(tmp_path) -> None:
+    store_path = tmp_path / "cron" / "jobs.json"
+    service = CronService(store_path)
+    job = service.add_job(
+        name="vk remind",
+        schedule=CronSchedule(kind="cron", expr="0 15 * * *"),
+        message="ping",
+        channel="vk",
+        to="12345",
+        from_sender_id="98765",
+    )
+    assert job.payload.from_sender_id == "98765"
+
+    raw = json.loads(store_path.read_text())
+    assert raw["jobs"][0]["payload"]["fromSenderId"] == "98765"
+
+    fresh = CronService(store_path)
+    reloaded = fresh.get_job(job.id)
+    assert reloaded is not None
+    assert reloaded.payload.from_sender_id == "98765"
+
+
 @pytest.mark.asyncio
 async def test_execute_job_records_run_history(tmp_path) -> None:
     store_path = tmp_path / "cron" / "jobs.json"

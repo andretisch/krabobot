@@ -27,6 +27,9 @@ class CronPayload:
     deliver: bool = False
     channel: str | None = None  # e.g. "telegram"
     to: str | None = None  # e.g. chat/user identifier
+    # Channel account id of whoever created the job (VK from_id, Telegram user id, …).
+    # Required so scheduled runs pass registration / multi-user identity checks.
+    from_sender_id: str | None = None
 
 
 @dataclass

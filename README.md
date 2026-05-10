@@ -43,6 +43,8 @@ python -m pip install --upgrade pip
 pip install -e ".[dev,api]"
 ```
 
+Пакеты **`numpy`** и **`sherpa-onnx`** (локальные STT/TTS) входят в обычную зависимость `pip install -e .` — extras `[stt]` / `[tts]` не нужны.
+
 ---
 
 ## Первый запуск
