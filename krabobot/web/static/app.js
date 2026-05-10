@@ -26,6 +26,41 @@
   let modelId = null;
   /** @type {object|null} */
   let kbCfgLastLoaded = null;
+  let kbMarkdownHooksInstalled = false;
+
+  function kbInitMarkdownLibs() {
+    if (kbMarkdownHooksInstalled) {
+      return;
+    }
+    if (typeof marked === "undefined" || typeof DOMPurify === "undefined") {
+      return;
+    }
+    marked.setOptions({ gfm: true, breaks: true });
+    DOMPurify.addHook("afterSanitizeAttributes", function (node) {
+      if (node.tagName === "A" && node.hasAttribute("href")) {
+        node.setAttribute("target", "_blank");
+        node.setAttribute("rel", "noopener noreferrer");
+      }
+    });
+    kbMarkdownHooksInstalled = true;
+  }
+
+  /**
+   * @param {string} text
+   * @returns {string|null} sanitized HTML or null if libs missing / parse error
+   */
+  function kbAssistantMarkdownToHtml(text) {
+    kbInitMarkdownLibs();
+    if (typeof marked === "undefined" || typeof DOMPurify === "undefined") {
+      return null;
+    }
+    try {
+      const raw = marked.parse(String(text || ""), { async: false });
+      return DOMPurify.sanitize(raw);
+    } catch (_e) {
+      return null;
+    }
+  }
   /** @type {File[]} */
   let pendingFiles = [];
 
@@ -811,7 +846,18 @@
       kind === "error" ? "ошибка" : role === "user" ? "вы" : "ассистент";
     const body = document.createElement("div");
     body.className = "kb-msg-body";
-    body.textContent = text;
+    const s = String(text ?? "");
+    if (kind === "error" || role === "user") {
+      body.textContent = s;
+    } else {
+      const html = kbAssistantMarkdownToHtml(s);
+      if (html !== null) {
+        body.classList.add("kb-msg-body--md");
+        body.innerHTML = html;
+      } else {
+        body.textContent = s;
+      }
+    }
     wrap.appendChild(label);
     wrap.appendChild(body);
     logEl.appendChild(wrap);
