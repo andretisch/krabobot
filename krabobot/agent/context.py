@@ -126,7 +126,7 @@ IMPORTANT: To send files (images, documents, audio, video) to the user, you MUST
     def build_messages(
         self,
         history: list[dict[str, Any]],
-        current_message: str,
+        current_message: str | list[dict[str, Any]],
         skill_names: list[str] | None = None,
         media: list[str] | None = None,
         channel: str | None = None,
@@ -135,7 +135,12 @@ IMPORTANT: To send files (images, documents, audio, video) to the user, you MUST
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
         runtime_ctx = self._build_runtime_context(channel, chat_id, self.timezone)
-        user_content = self._build_user_content(current_message, media)
+        if isinstance(current_message, list):
+            user_content: str | list[dict[str, Any]] = list(current_message)
+            if not user_content:
+                user_content = [{"type": "text", "text": "(empty)"}]
+        else:
+            user_content = self._build_user_content(current_message, media)
 
         # Merge runtime context and user content into a single user message
         # to avoid consecutive same-role messages that some providers reject.

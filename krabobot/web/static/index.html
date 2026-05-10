@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>krabobot — чат</title>
+  <link rel="stylesheet" href="/static/chat.css" />
+</head>
+<body>
+  <div class="kb-layout">
+    <aside class="kb-sidebar" aria-label="Диалоги">
+      <div class="kb-sidebar-head">
+        <h2 class="kb-sidebar-title">Диалоги</h2>
+        <button type="button" id="kb-new-session" class="kb-btn kb-btn-secondary kb-btn-block">
+          Новый диалог
+        </button>
+        <button type="button" id="kb-refresh-sessions" class="kb-btn kb-btn-secondary kb-btn-block">
+          Обновить список
+        </button>
+      </div>
+      <ul id="kb-session-list" class="kb-session-list"></ul>
+    </aside>
+    <div class="kb-panel">
+      <header class="kb-top">
+        <h1>krabobot</h1>
+        <p class="kb-sub">
+          Локально: <code>/v1/chat/completions</code>, сессии и история на сервере в workspace.
+        </p>
+        <div class="kb-toolbar">
+          <span id="kb-status" class="kb-status" aria-live="polite"></span>
+        </div>
+      </header>
+      <main class="kb-main">
+        <div id="kb-log" class="kb-log" role="log" aria-label="Переписка"></div>
+        <div id="kb-attachments" class="kb-attachments" aria-label="Вложения"></div>
+        <form id="kb-form" class="kb-form">
+          <label class="kb-sr" for="kb-input">Сообщение</label>
+          <input
+            type="file"
+            id="kb-files"
+            class="kb-file-input"
+            multiple
+            accept="image/*,audio/*,text/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.zip,.7z,.rar,.epub"
+          />
+          <div class="kb-compose">
+            <textarea id="kb-input" class="kb-input" rows="3" placeholder="Текст сообщения…"></textarea>
+            <div class="kb-compose-actions">
+              <button type="button" id="kb-attach" class="kb-btn kb-btn-secondary" title="Файлы">
+                Вложения
+              </button>
+              <button type="submit" class="kb-btn kb-btn-primary" id="kb-send">Отправить</button>
+            </div>
+          </div>
+        </form>
+      </main>
+    </div>
+  </div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

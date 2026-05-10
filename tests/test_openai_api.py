@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
+
+from krabobot.session.manager import SessionManager
 
 from krabobot.api.server import (
     API_CHAT_ID,
@@ -16,6 +19,7 @@ from krabobot.api.server import (
     _error_json,
     create_app,
     handle_chat_completions,
+    web_static_dir,
 )
 
 try:
@@ -28,22 +32,28 @@ except ImportError:
 pytest_plugins = ("pytest_asyncio",)
 
 
-def _make_mock_agent(response_text: str = "mock response") -> MagicMock:
+def _make_mock_agent(response_text: str = "mock response", workspace: Path | None = None) -> MagicMock:
     agent = MagicMock()
     agent.process_direct = AsyncMock(return_value=response_text)
     agent._connect_mcp = AsyncMock()
     agent.close_mcp = AsyncMock()
+    ws = workspace if workspace is not None else Path("/tmp/krabobot_api_test_ws")
+    agent.session_manager_for_api = AsyncMock(return_value=SessionManager(ws))
     return agent
 
 
 @pytest.fixture
-def mock_agent():
-    return _make_mock_agent()
+def mock_agent(tmp_path):
+    return _make_mock_agent(workspace=tmp_path)
 
 
 @pytest.fixture
 def app(mock_agent):
     return create_app(mock_agent, model_name="test-model", request_timeout=10.0)
+
+
+def _attach_workspace(agent: MagicMock, workspace: Path) -> None:
+    agent.session_manager_for_api = AsyncMock(return_value=SessionManager(workspace))
 
 
 @pytest_asyncio.fixture
@@ -194,18 +204,20 @@ async def test_successful_request_uses_fixed_api_session(aiohttp_client, mock_ag
     assert body["model"] == "test-model"
     mock_agent.process_direct.assert_called_once_with(
         content="hello",
+        media=None,
         session_key=API_SESSION_KEY,
         channel="api",
         chat_id=API_CHAT_ID,
+        sender_id="default",
     )
 
 
 @pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
 @pytest.mark.asyncio
-async def test_followup_requests_share_same_session_key(aiohttp_client) -> None:
+async def test_followup_requests_share_same_session_key(aiohttp_client, tmp_path) -> None:
     call_log: list[str] = []
 
-    async def fake_process(content, session_key="", channel="", chat_id=""):
+    async def fake_process(content, session_key="", channel="", chat_id="", **kwargs):
         call_log.append(session_key)
         return f"reply to {content}"
 
@@ -213,6 +225,7 @@ async def test_followup_requests_share_same_session_key(aiohttp_client) -> None:
     agent.process_direct = fake_process
     agent._connect_mcp = AsyncMock()
     agent.close_mcp = AsyncMock()
+    _attach_workspace(agent, tmp_path)
 
     app = create_app(agent, model_name="m")
     client = await aiohttp_client(app)
@@ -233,10 +246,10 @@ async def test_followup_requests_share_same_session_key(aiohttp_client) -> None:
 
 @pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
 @pytest.mark.asyncio
-async def test_fixed_session_requests_are_serialized(aiohttp_client) -> None:
+async def test_fixed_session_requests_are_serialized(aiohttp_client, tmp_path) -> None:
     order: list[str] = []
 
-    async def slow_process(content, session_key="", channel="", chat_id=""):
+    async def slow_process(content, session_key="", channel="", chat_id="", **kwargs):
         order.append(f"start:{content}")
         await asyncio.sleep(0.1)
         order.append(f"end:{content}")
@@ -246,6 +259,7 @@ async def test_fixed_session_requests_are_serialized(aiohttp_client) -> None:
     agent.process_direct = slow_process
     agent._connect_mcp = AsyncMock()
     agent.close_mcp = AsyncMock()
+    _attach_workspace(agent, tmp_path)
 
     app = create_app(agent, model_name="m")
     client = await aiohttp_client(app)
@@ -289,6 +303,18 @@ async def test_health_endpoint(aiohttp_client, app) -> None:
 
 @pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
 @pytest.mark.asyncio
+async def test_root_serves_bundled_chat_ui(aiohttp_client, app) -> None:
+    if not web_static_dir().is_dir() or not (web_static_dir() / "index.html").is_file():
+        pytest.skip("bundled web UI not present")
+    client = await aiohttp_client(app)
+    resp = await client.get("/")
+    assert resp.status == 200
+    text = await resp.text()
+    assert "<html" in text.lower()
+
+
+@pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
+@pytest.mark.asyncio
 async def test_multimodal_content_extracts_text(aiohttp_client, mock_agent) -> None:
     app = create_app(mock_agent, model_name="m")
     client = await aiohttp_client(app)
@@ -300,27 +326,34 @@ async def test_multimodal_content_extracts_text(aiohttp_client, mock_agent) -> N
                     "role": "user",
                     "content": [
                         {"type": "text", "text": "describe this"},
-                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": (
+                                    "data:image/png;base64,"
+                                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+                                    "AAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+                                )
+                            },
+                        },
                     ],
                 }
             ]
         },
     )
     assert resp.status == 200
-    mock_agent.process_direct.assert_called_once_with(
-        content="describe this",
-        session_key=API_SESSION_KEY,
-        channel="api",
-        chat_id=API_CHAT_ID,
-    )
+    kw = mock_agent.process_direct.call_args.kwargs
+    assert kw["content"] == "describe this"
+    assert kw.get("media") and len(kw["media"]) == 1
+    assert Path(kw["media"][0]).is_file()
 
 
 @pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
 @pytest.mark.asyncio
-async def test_empty_response_retry_then_success(aiohttp_client) -> None:
+async def test_empty_response_retry_then_success(aiohttp_client, tmp_path) -> None:
     call_count = 0
 
-    async def sometimes_empty(content, session_key="", channel="", chat_id=""):
+    async def sometimes_empty(content, session_key="", channel="", chat_id="", **kwargs):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -331,6 +364,7 @@ async def test_empty_response_retry_then_success(aiohttp_client) -> None:
     agent.process_direct = sometimes_empty
     agent._connect_mcp = AsyncMock()
     agent.close_mcp = AsyncMock()
+    _attach_workspace(agent, tmp_path)
 
     app = create_app(agent, model_name="m")
     client = await aiohttp_client(app)
@@ -346,10 +380,10 @@ async def test_empty_response_retry_then_success(aiohttp_client) -> None:
 
 @pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
 @pytest.mark.asyncio
-async def test_empty_response_falls_back(aiohttp_client) -> None:
+async def test_empty_response_falls_back(aiohttp_client, tmp_path) -> None:
     call_count = 0
 
-    async def always_empty(content, session_key="", channel="", chat_id=""):
+    async def always_empty(content, session_key="", channel="", chat_id="", **kwargs):
         nonlocal call_count
         call_count += 1
         return ""
@@ -358,6 +392,7 @@ async def test_empty_response_falls_back(aiohttp_client) -> None:
     agent.process_direct = always_empty
     agent._connect_mcp = AsyncMock()
     agent.close_mcp = AsyncMock()
+    _attach_workspace(agent, tmp_path)
 
     app = create_app(agent, model_name="m")
     client = await aiohttp_client(app)
@@ -369,3 +404,56 @@ async def test_empty_response_falls_back(aiohttp_client) -> None:
     body = await resp.json()
     assert body["choices"][0]["message"]["content"] == "I've completed processing but have no response to give."
     assert call_count == 2
+
+
+@pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
+@pytest.mark.asyncio
+async def test_web_sessions_list_uses_agent_session_manager(aiohttp_client) -> None:
+    sm = MagicMock()
+    sm.list_sessions.return_value = [
+        {
+            "key": "api:aa-bb-cc",
+            "updated_at": "2026-01-02T12:00:00",
+            "created_at": "2026-01-01T10:00:00",
+        },
+    ]
+    sess = MagicMock()
+    sess.messages = [{"role": "user", "content": "hello there"}]
+    sm.get_or_create.return_value = sess
+
+    agent = _make_mock_agent()
+    agent.session_manager_for_api = AsyncMock(return_value=sm)
+
+    app = create_app(agent, model_name="m")
+    client = await aiohttp_client(app)
+    resp = await client.get("/v1/web/sessions")
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["object"] == "list"
+    assert len(body["data"]) == 1
+    assert body["data"][0]["id"] == "aa-bb-cc"
+    assert "hello" in body["data"][0]["preview"]
+
+
+@pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
+@pytest.mark.asyncio
+async def test_web_session_delete_and_messages(aiohttp_client) -> None:
+    sm = MagicMock()
+    sm.list_sessions.return_value = []
+    sm.get_or_create.return_value = MagicMock(messages=[])
+    sm.delete_session.return_value = True
+
+    agent = _make_mock_agent()
+    agent.session_manager_for_api = AsyncMock(return_value=sm)
+
+    app = create_app(agent, model_name="m")
+    client = await aiohttp_client(app)
+
+    resp = await client.delete("/v1/web/sessions/xyz")
+    assert resp.status == 200
+    sm.delete_session.assert_called_once_with("api:xyz")
+
+    resp2 = await client.get("/v1/web/sessions/xyz/messages")
+    assert resp2.status == 200
+    body = await resp2.json()
+    assert body["data"] == []

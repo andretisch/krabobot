@@ -427,6 +427,11 @@ class AgentLoop:
             return
         owner_id = await self.user_resolver.get_owner_user_id()
         if owner_id:
+            # OpenAI-compatible HTTP API (krabobot serve + static web UI): same host as the
+            # deployment is treated as the owner; link session id for is_registered().
+            if msg.channel == "api":
+                msg.user_id = owner_id
+                await self.user_resolver.link_account(owner_id, msg.channel, msg.sender_id)
             return
         first_user = await self.user_resolver.resolve_or_create(msg.channel, msg.sender_id)
         await self.user_resolver.ensure_owner(first_user)
@@ -651,6 +656,27 @@ class AgentLoop:
         self._running = False
         logger.info("Agent loop stopping")
 
+    @staticmethod
+    def _user_content_plaintext(content: Any) -> str:
+        """Extract plaintext from a user message (for commands / logging)."""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") in ("text", "input_text"):
+                    parts.append(str(block.get("text", "")))
+            return "\n".join(parts)
+        return ""
+
+    async def session_manager_for_api(self, session_id: str | None = None) -> SessionManager:
+        """Session store used for HTTP API / web UI (owner workspace)."""
+        sid = str(session_id or "default")
+        msg = InboundMessage(channel="api", sender_id=sid, chat_id="default", content="")
+        await self._ensure_identity(msg)
+        runtime = await self._runtime_for_message(msg)
+        return runtime.sessions
+
     async def _process_message(
         self,
         msg: InboundMessage,
@@ -699,14 +725,15 @@ class AgentLoop:
             return OutboundMessage(channel=channel, chat_id=chat_id,
                                   content=final_content or "Background task completed.")
 
-        preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
+        plain_prev = self._user_content_plaintext(msg.content)
+        preview = plain_prev[:80] + "..." if len(plain_prev) > 80 else plain_prev
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
 
         key = session_key or msg.session_key
         session = runtime.sessions.get_or_create(key)
 
         # Slash commands
-        raw = msg.content.strip()
+        raw = self._user_content_plaintext(msg.content).strip()
         ctx = CommandContext(msg=msg, session=session, key=key, raw=raw, loop=self, runtime=runtime)
         if result := await self.commands.dispatch(ctx):
             return self._mark_command_response(result)
@@ -738,14 +765,24 @@ class AgentLoop:
 
         history = session.get_history(max_messages=0)
         linked_accounts = await self._linked_accounts_for_prompt(msg)
-        current_message = msg.content
+        current_message: str | list[dict[str, Any]] = msg.content
         if linked_accounts:
             links_block = (
                 "[Linked Accounts]\n"
                 f"user_id: {msg.user_id}\n"
                 f"accounts: {', '.join(linked_accounts)}"
             )
-            current_message = f"{links_block}\n\n{current_message}"
+            if isinstance(current_message, str):
+                current_message = f"{links_block}\n\n{current_message}"
+            else:
+                cm = list(current_message)
+                if cm and isinstance(cm[0], dict) and cm[0].get("type") in ("text", "input_text"):
+                    first = dict(cm[0])
+                    first["text"] = links_block + "\n\n" + str(first.get("text") or "")
+                    cm[0] = first
+                else:
+                    cm.insert(0, {"type": "text", "text": links_block})
+                current_message = cm
         initial_messages = runtime.context.build_messages(
             history=history,
             current_message=current_message,
@@ -868,6 +905,10 @@ class AgentLoop:
                 filtered.append(self._image_placeholder(block))
                 continue
 
+            if block.get("type") == "input_audio":
+                filtered.append({"type": "text", "text": "[audio]"})
+                continue
+
             if block.get("type") == "text" and isinstance(block.get("text"), str):
                 text = block["text"]
                 if truncate_text and len(text) > self._TOOL_RESULT_MAX_CHARS:
@@ -914,18 +955,25 @@ class AgentLoop:
 
     async def process_direct(
         self,
-        content: str,
+        content: str | list[dict[str, Any]],
         session_key: str = "cli:direct",
         channel: str = "cli",
         chat_id: str = "direct",
         sender_id: str = "user",
+        media: list[str] | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
         on_stream: Callable[[str], Awaitable[None]] | None = None,
         on_stream_end: Callable[..., Awaitable[None]] | None = None,
     ) -> OutboundMessage | None:
         """Process a message directly and return the outbound payload."""
         await self._connect_mcp()
-        msg = InboundMessage(channel=channel, sender_id=sender_id, chat_id=chat_id, content=content)
+        msg = InboundMessage(
+            channel=channel,
+            sender_id=sender_id,
+            chat_id=chat_id,
+            content=content,
+            media=list(media) if media else [],
+        )
         runtime = await self._runtime_for_message(msg)
         return await self._process_message(
             msg, runtime=runtime, session_key=session_key, on_progress=on_progress,

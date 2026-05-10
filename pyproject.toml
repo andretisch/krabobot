@@ -77,6 +77,7 @@ allow-direct-references = true
 [tool.hatch.build]
 include = [
     "krabobot/**/*.py",
+    "krabobot/web/static/**/*",
     "krabobot/templates/**/*.md",
     "krabobot/skills/**/*.md",
     "krabobot/skills/**/*.sh",

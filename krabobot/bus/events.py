@@ -12,7 +12,7 @@ class InboundMessage:
     channel: str  # telegram, vk, email, etc.
     sender_id: str  # User identifier
     chat_id: str  # Chat/channel identifier
-    content: str  # Message text
+    content: str | list[dict[str, Any]]  # Plain text or OpenAI-style content blocks
     timestamp: datetime = field(default_factory=datetime.now)
     media: list[str] = field(default_factory=list)  # Media URLs
     metadata: dict[str, Any] = field(default_factory=dict)  # Channel-specific data

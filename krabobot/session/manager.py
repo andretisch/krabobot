@@ -238,6 +238,29 @@ class SessionManager:
         """Remove a session from the in-memory cache."""
         self._cache.pop(key, None)
 
+    def delete_session(self, key: str) -> bool:
+        """Delete a session file and drop it from cache. Returns True if a file was removed."""
+        self.invalidate(key)
+        path = self._get_session_path(key)
+        if path.exists():
+            try:
+                path.unlink()
+                logger.info("Deleted session file {}", path)
+                return True
+            except OSError as e:
+                logger.warning("Failed to delete session {}: {}", key, e)
+                return False
+        legacy_path = self._get_legacy_session_path(key)
+        if legacy_path.exists():
+            try:
+                legacy_path.unlink()
+                logger.info("Deleted legacy session file {}", legacy_path)
+                return True
+            except OSError as e:
+                logger.warning("Failed to delete legacy session {}: {}", key, e)
+                return False
+        return False
+
     def list_sessions(self) -> list[dict[str, Any]]:
         """
         List all sessions.

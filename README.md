@@ -72,6 +72,8 @@ krabobot serve
 krabobot --help
 ```
 
+После `krabobot serve` в браузере откройте `http://127.0.0.1:<порт>/` (порт из `config.api`) — веб-чат к тому же API без CORS.
+
 Основной конфиг:
 
 - `~/.krabobot/config.json`

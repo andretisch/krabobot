@@ -1,0 +1,326 @@
+/* Minimal layout for local krabobot web chat */
+:root {
+  --bg: #0f1419;
+  --surface: #1a2332;
+  --border: #2d3a4d;
+  --text: #e6edf3;
+  --muted: #8b9cb3;
+  --accent: #3d8bfd;
+  --user: #238636;
+  --assistant: #2d333b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+.kb-layout {
+  display: flex;
+  min-height: 100vh;
+  align-items: stretch;
+}
+
+.kb-sidebar {
+  width: 280px;
+  min-width: 260px;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  padding: 0.75rem;
+  gap: 0.5rem;
+}
+
+.kb-sidebar-head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.kb-sidebar-title {
+  margin: 0;
+  font-size: 0.95rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.kb-btn-block {
+  width: 100%;
+}
+
+.kb-session-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1;
+  max-height: calc(100vh - 11rem);
+}
+
+.kb-sess {
+  display: flex;
+  align-items: stretch;
+  gap: 0.25rem;
+  margin-bottom: 0.35rem;
+}
+
+.kb-sess--active .kb-sess-btn {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.kb-sess-btn {
+  flex: 1;
+  text-align: left;
+  padding: 0.45rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.78rem;
+  cursor: pointer;
+  line-height: 1.25;
+  overflow: hidden;
+}
+
+.kb-sess-del {
+  flex-shrink: 0;
+  width: 1.75rem;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.kb-sess-del:hover {
+  color: #f85149;
+  border-color: #f85149;
+}
+
+.kb-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.kb-top {
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.kb-top h1 {
+  margin: 0 0 0.35rem;
+  font-size: 1.25rem;
+}
+
+.kb-sub {
+  margin: 0 0 0.75rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.kb-sub code {
+  font-size: 0.8rem;
+  background: var(--bg);
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+}
+
+.kb-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.kb-status {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.kb-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  max-width: 48rem;
+  margin: 0 auto;
+  width: 100%;
+  padding: 1rem;
+  gap: 0.75rem;
+}
+
+.kb-log {
+  flex: 1;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem;
+  background: var(--surface);
+  min-height: 12rem;
+  max-height: calc(100vh - 16rem);
+}
+
+.kb-msg {
+  margin-bottom: 0.75rem;
+  padding: 0.6rem 0.85rem;
+  border-radius: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.95rem;
+  line-height: 1.45;
+}
+
+.kb-msg--user {
+  background: rgba(35, 134, 54, 0.2);
+  border-left: 3px solid var(--user);
+}
+
+.kb-msg--assistant {
+  background: var(--assistant);
+  border-left: 3px solid var(--accent);
+}
+
+.kb-msg--error {
+  background: rgba(248, 81, 73, 0.15);
+  border-left: 3px solid #f85149;
+  color: #ffa198;
+}
+
+.kb-msg-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: 0.25rem;
+}
+
+.kb-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.kb-attachments {
+  min-height: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.kb-attach-tag {
+  font-size: 0.75rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.2rem 0.45rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.kb-attach-tag button {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 0.2rem;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.kb-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.kb-compose {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.kb-compose-actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.kb-input {
+  flex: 1;
+  min-width: 12rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  resize: vertical;
+  font-family: inherit;
+  font-size: 0.95rem;
+}
+
+.kb-btn {
+  padding: 0.55rem 1rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  font-size: 0.9rem;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.kb-btn-primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.kb-btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.kb-btn-secondary {
+  background: transparent;
+  color: var(--text);
+}
+
+.kb-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+
+@media (max-width: 768px) {
+  .kb-layout {
+    flex-direction: column;
+  }
+  .kb-sidebar {
+    width: 100%;
+    min-width: unset;
+    max-height: 40vh;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+  .kb-session-list {
+    max-height: 28vh;
+  }
+}
