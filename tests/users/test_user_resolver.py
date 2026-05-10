@@ -50,6 +50,17 @@ async def test_accounts_for_user_returns_all_linked_accounts(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_unlink_account_removes_mapping(tmp_path: Path):
+    resolver = UserResolver(tmp_path)
+    user = await resolver.resolve_or_create("api", "sess-1")
+    assert await resolver.lookup("api", "sess-1") == user
+
+    assert await resolver.unlink_account("api", "sess-1") is True
+    assert await resolver.lookup("api", "sess-1") is None
+    assert await resolver.unlink_account("api", "sess-1") is False
+
+
+@pytest.mark.asyncio
 async def test_tts_preference_roundtrip(tmp_path: Path):
     resolver = UserResolver(tmp_path)
     user = await resolver.resolve_or_create("telegram", "42")

@@ -188,7 +188,13 @@ class TestRestartCommand:
     async def test_id_command_includes_all_linked_accounts(self):
         loop, _bus = _make_loop()
         loop.user_resolver.accounts_for_user = AsyncMock(
-            return_value=["telegram:123|alice", "vk:85554821", "email:alice@example.com"]
+            return_value=[
+                "telegram:123|alice",
+                "vk:85554821",
+                "email:alice@example.com",
+                "api:2013ee55-3cb2-47ff-8bb5-12d1a8aced26",
+                "api:default",
+            ]
         )
         msg = InboundMessage(
             channel="telegram",
@@ -205,6 +211,27 @@ class TestRestartCommand:
         assert "- telegram: 123|alice" in response.content
         assert "- vk: 85554821" in response.content
         assert "- email: alice@example.com" in response.content
+        assert "api:" not in response.content
+
+    @pytest.mark.asyncio
+    async def test_id_command_omits_linked_section_when_only_api(self):
+        loop, _bus = _make_loop()
+        loop.user_resolver.accounts_for_user = AsyncMock(
+            return_value=["api:aa-bb-cc", "api:default"],
+        )
+        msg = InboundMessage(
+            channel="telegram",
+            sender_id="123|alice",
+            chat_id="-1001",
+            content="/id",
+            user_id="u-1",
+        )
+
+        response = await loop._process_message(msg)
+
+        assert response is not None
+        assert "Привязанные каналы:" not in response.content
+        assert "api:" not in response.content
 
     @pytest.mark.asyncio
     async def test_link_command_with_code_works_without_user_id(self):

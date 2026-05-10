@@ -195,15 +195,19 @@ async def cmd_id(ctx: CommandContext) -> OutboundMessage:
     if msg.user_id:
         lines.append(f"- user_id: {msg.user_id}")
         linked_accounts = await ctx.loop.user_resolver.accounts_for_user(msg.user_id)
-        if linked_accounts:
+        visible: list[str] = []
+        for account in linked_accounts:
+            channel, sep, sender_id = account.partition(":")
+            if sep and channel == "api":
+                continue
+            if sep:
+                visible.append(f"- {channel}: {sender_id}")
+            else:
+                visible.append(f"- {account}")
+        if visible:
             lines.append("")
             lines.append("Привязанные каналы:")
-            for account in linked_accounts:
-                channel, sep, sender_id = account.partition(":")
-                if sep:
-                    lines.append(f"- {channel}: {sender_id}")
-                else:
-                    lines.append(f"- {account}")
+            lines.extend(visible)
     return OutboundMessage(
         channel=msg.channel,
         chat_id=msg.chat_id,

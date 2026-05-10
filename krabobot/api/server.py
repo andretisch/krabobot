@@ -525,6 +525,11 @@ async def handle_web_sessions_delete(request: web.Request) -> web.Response:
     locks.pop(key, None)
     if not ok:
         return _error_json(404, "Session not found")
+    try:
+        if await agent_loop.user_resolver.unlink_account("api", session_id):
+            logger.info("Removed user_links entry for {}", key)
+    except Exception:
+        logger.exception("Failed to unlink api account after web session delete")
     return web.json_response({"object": "session.deleted", "id": session_id, "ok": True})
 
 

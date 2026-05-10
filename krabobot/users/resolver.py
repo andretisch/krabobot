@@ -104,6 +104,20 @@ class UserResolver:
             self._save(db)
             logger.info("Linked account {} to user {}", account, user_id)
 
+    async def unlink_account(self, channel: str, sender_id: str) -> bool:
+        """Remove account mapping if present (e.g. web chat session deleted)."""
+        account = _account_key(channel, sender_id)
+        async with self._lock:
+            db = self._load()
+            accounts = db.get("accounts", {}) or {}
+            if account not in accounts:
+                return False
+            del accounts[account]
+            db["accounts"] = accounts
+            self._save(db)
+            logger.info("Unlinked account {}", account)
+            return True
+
     async def accounts_for_user(self, user_id: str) -> list[str]:
         """Return all account keys linked to a user id."""
         if not user_id:

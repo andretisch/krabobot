@@ -17,18 +17,31 @@
 </head>
 <body>
   <div id="kb-layout" class="kb-layout">
-    <aside class="kb-sidebar" aria-label="Диалоги" id="kb-sidebar">
-      <div class="kb-sidebar-head">
-        <h2 class="kb-sidebar-title">Диалоги</h2>
-        <button type="button" id="kb-new-session" class="kb-btn kb-btn-secondary kb-btn-block">
-          Новый диалог
-        </button>
-        <button type="button" id="kb-refresh-sessions" class="kb-btn kb-btn-secondary kb-btn-block">
-          Обновить список
-        </button>
-      </div>
-      <ul id="kb-session-list" class="kb-session-list"></ul>
-    </aside>
+    <div class="kb-sidebar-wrap" id="kb-sidebar-wrap">
+      <aside class="kb-sidebar" aria-label="Диалоги" id="kb-sidebar">
+        <div class="kb-sidebar-head">
+          <h2 class="kb-sidebar-title">Диалоги</h2>
+          <button type="button" id="kb-new-session" class="kb-btn kb-btn-secondary kb-btn-block">
+            Новый диалог
+          </button>
+          <button type="button" id="kb-refresh-sessions" class="kb-btn kb-btn-secondary kb-btn-block">
+            Обновить список
+          </button>
+        </div>
+        <ul id="kb-session-list" class="kb-session-list"></ul>
+      </aside>
+      <button
+        type="button"
+        id="kb-sidebar-toggle"
+        class="kb-sidebar-toggle"
+        aria-expanded="true"
+        aria-controls="kb-sidebar"
+        aria-label="Свернуть список диалогов"
+        title="Свернуть список диалогов"
+      >
+        <span class="kb-sidebar-toggle-chevron" aria-hidden="true">‹</span>
+      </button>
+    </div>
     <div class="kb-panel">
       <header class="kb-top">
         <div class="kb-top-inner">
@@ -93,7 +106,6 @@
           <div class="kb-log-wrap">
             <div id="kb-log" class="kb-log" role="log" aria-label="Переписка"></div>
           </div>
-          <div id="kb-attachments" class="kb-attachments" aria-label="Вложения"></div>
           <form id="kb-form" class="kb-form">
             <label class="kb-sr" for="kb-input">Сообщение</label>
             <input
@@ -105,11 +117,57 @@
             />
             <div class="kb-compose">
               <textarea id="kb-input" class="kb-input" rows="3" placeholder="Текст сообщения…"></textarea>
-              <div class="kb-compose-actions">
-                <button type="button" id="kb-attach" class="kb-btn kb-btn-secondary" title="Файлы">
-                  Вложения
-                </button>
-                <button type="submit" class="kb-btn kb-btn-primary" id="kb-send">Отправить</button>
+              <div class="kb-compose-footer">
+                <div id="kb-attachments" class="kb-attachments" aria-label="Вложения"></div>
+                <div class="kb-compose-actions">
+                  <div class="kb-cmd-menu-wrap">
+                    <button
+                      type="button"
+                      id="kb-cmd-menu-btn"
+                      class="kb-btn kb-btn-secondary kb-btn-icon"
+                      aria-haspopup="true"
+                      aria-expanded="false"
+                      aria-controls="kb-cmd-dropdown"
+                      title="Команды бота"
+                      aria-label="Команды бота"
+                    >
+                      <span class="kb-cmd-menu-glyph" aria-hidden="true">⋮</span>
+                    </button>
+                    <div
+                      id="kb-cmd-dropdown"
+                      class="kb-cmd-dropdown"
+                      role="menu"
+                      aria-label="Команды"
+                      hidden
+                    ></div>
+                  </div>
+                  <button
+                    type="button"
+                    id="kb-attach"
+                    class="kb-btn kb-btn-secondary kb-btn-icon"
+                    title="Вложения"
+                    aria-label="Прикрепить файлы"
+                  >
+                    <svg
+                      class="kb-icon-paperclip"
+                      xmlns="http://www.w3.org/2000/svg"
+                      width="20"
+                      height="20"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      aria-hidden="true"
+                    >
+                      <path
+                        d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"
+                      />
+                    </svg>
+                  </button>
+                  <button type="submit" class="kb-btn kb-btn-primary" id="kb-send">Отправить</button>
+                </div>
               </div>
             </div>
           </form>

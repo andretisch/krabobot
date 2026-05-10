@@ -445,6 +445,7 @@ async def test_web_session_delete_and_messages(aiohttp_client) -> None:
 
     agent = _make_mock_agent()
     agent.session_manager_for_api = AsyncMock(return_value=sm)
+    agent.user_resolver.unlink_account = AsyncMock(return_value=True)
 
     app = create_app(agent, model_name="m")
     client = await aiohttp_client(app)
@@ -452,6 +453,7 @@ async def test_web_session_delete_and_messages(aiohttp_client) -> None:
     resp = await client.delete("/v1/web/sessions/xyz")
     assert resp.status == 200
     sm.delete_session.assert_called_once_with("api:xyz")
+    agent.user_resolver.unlink_account.assert_awaited_once_with("api", "xyz")
 
     resp2 = await client.get("/v1/web/sessions/xyz/messages")
     assert resp2.status == 200

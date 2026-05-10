@@ -22,6 +22,30 @@
   const viewChat = document.getElementById("kb-view-chat");
   const viewSettings = document.getElementById("kb-view-settings");
   const copySessionBtn = document.getElementById("kb-copy-session");
+  const cmdMenuBtn = document.getElementById("kb-cmd-menu-btn");
+  const cmdMenuDropdown = document.getElementById("kb-cmd-dropdown");
+  const layoutEl = document.getElementById("kb-layout");
+  const sidebarEl = document.getElementById("kb-sidebar");
+  const sidebarToggle = document.getElementById("kb-sidebar-toggle");
+
+  const SIDEBAR_COLLAPSED_KEY = "krabobot_web_sidebar_collapsed";
+
+  /** @type {{ cmd: string, label: string, hint: string }[]} */
+  const KB_CMD_MENU_ITEMS = [
+    { cmd: "/help", label: "/help", hint: "Список команд" },
+    { cmd: "/start", label: "/start", hint: "Начало работы и доступ" },
+    { cmd: "/id", label: "/id", hint: "Ваши ID и привязки (без веб-сессий)" },
+    { cmd: "/link", label: "/link", hint: "Код привязки другого канала" },
+    { cmd: "/new", label: "/new", hint: "Новый диалог на сервере" },
+    { cmd: "/clear_memory", label: "/clear_memory", hint: "Очистить память (с архивом)" },
+    { cmd: "/tts status", label: "/tts status", hint: "Статус голосовых ответов (VK/TG)" },
+    { cmd: "/tts on", label: "/tts on", hint: "Включить TTS" },
+    { cmd: "/tts off", label: "/tts off", hint: "Выключить TTS" },
+    { cmd: "/reg", label: "/reg", hint: "Регистрация" },
+    { cmd: "/stop", label: "/stop", hint: "Остановить текущую задачу" },
+    { cmd: "/status", label: "/status", hint: "Статус бота (владелец)" },
+    { cmd: "/restart", label: "/restart", hint: "Перезапуск (владелец)" },
+  ];
 
   let modelId = null;
   /** @type {object|null} */
@@ -761,6 +785,28 @@
     }
   }
 
+  function closeCmdMenu() {
+    if (cmdMenuDropdown) {
+      cmdMenuDropdown.hidden = true;
+    }
+    if (cmdMenuBtn) {
+      cmdMenuBtn.setAttribute("aria-expanded", "false");
+    }
+  }
+
+  function toggleCmdMenu() {
+    if (!cmdMenuDropdown || !cmdMenuBtn) {
+      return;
+    }
+    closeMenu();
+    if (cmdMenuDropdown.hidden) {
+      cmdMenuDropdown.hidden = false;
+      cmdMenuBtn.setAttribute("aria-expanded", "true");
+    } else {
+      closeCmdMenu();
+    }
+  }
+
   function closeMenu() {
     if (menuDropdown) {
       menuDropdown.hidden = true;
@@ -784,6 +830,7 @@
       return;
     }
     if (menuDropdown.hidden) {
+      closeCmdMenu();
       openMenu();
     } else {
       closeMenu();
@@ -805,6 +852,7 @@
       refreshSettingsPanel();
     }
     closeMenu();
+    closeCmdMenu();
   }
 
   async function refreshSettingsPanel() {
@@ -1008,8 +1056,66 @@
     return Array.isArray(data.data) ? data.data : [];
   }
 
+  /** @param {{ id?: string, updated_at?: string, created_at?: string }} row */
+  function kbFormatSessionListLabel(row) {
+    const ts = row.updated_at || row.created_at;
+    if (ts) {
+      const d = new Date(ts);
+      if (!Number.isNaN(d.getTime())) {
+        return d.toLocaleString("ru-RU", {
+          day: "2-digit",
+          month: "2-digit",
+          year: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        });
+      }
+      const s = String(ts);
+      return s.length > 19 ? s.slice(0, 19).replace("T", " ") : s.replace("T", " ");
+    }
+    return "—";
+  }
+
+  function applySidebarCollapsed(collapsed) {
+    if (!layoutEl || !sidebarToggle || !sidebarEl) {
+      return;
+    }
+    layoutEl.classList.toggle("kb-layout--sidebar-collapsed", collapsed);
+    sidebarToggle.setAttribute("aria-expanded", String(!collapsed));
+    const expand = collapsed ? "Развернуть список диалогов" : "Свернуть список диалогов";
+    sidebarToggle.setAttribute("aria-label", expand);
+    sidebarToggle.title = expand;
+    sidebarEl.setAttribute("aria-hidden", collapsed ? "true" : "false");
+    try {
+      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? "1" : "0");
+    } catch (_e) {
+      /* ignore */
+    }
+  }
+
+  if (layoutEl && sidebarToggle && sidebarEl) {
+    try {
+      if (localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1") {
+        applySidebarCollapsed(true);
+      }
+    } catch (_e) {
+      /* ignore */
+    }
+    sidebarToggle.addEventListener("click", () => {
+      applySidebarCollapsed(
+        !layoutEl.classList.contains("kb-layout--sidebar-collapsed"),
+      );
+    });
+  }
+
   function renderSessionList(rows, currentId) {
     sessionListEl.innerHTML = "";
+    const labelCounts = {};
+    for (const row of rows) {
+      const l = kbFormatSessionListLabel(row);
+      labelCounts[l] = (labelCounts[l] || 0) + 1;
+    }
     for (const row of rows) {
       const id = row.id;
       const li = document.createElement("li");
@@ -1017,12 +1123,15 @@
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "kb-sess-btn";
-      const prev = (row.preview || "").trim() || "—";
-      const when = row.updated_at
-        ? String(row.updated_at).slice(0, 16).replace("T", " ")
-        : "";
-      btn.textContent = prev.slice(0, 52) + (prev.length > 52 ? "…" : "");
-      btn.title = when + "\n" + id;
+      let label = kbFormatSessionListLabel(row);
+      if (labelCounts[label] > 1) {
+        label = label + " · " + String(id || "").slice(0, 8);
+      }
+      btn.textContent = label;
+      const preview = (row.preview || "").trim();
+      btn.title = String(id || "") + (preview ? "\n" + preview.slice(0, 220) : "");
+      const ariaPrev = preview ? ". Последнее: " + preview.slice(0, 100) : "";
+      btn.setAttribute("aria-label", "Открыть диалог " + label + ariaPrev);
       btn.addEventListener("click", async () => {
         setSessionId(id);
         await refreshSessions();
@@ -1111,6 +1220,58 @@
     return content;
   }
 
+  async function postChatTurn(displayText, apiText, filesSnapshot) {
+    appendMessage("user", displayText);
+    sendBtn.disabled = true;
+    setStatus("Запрос…");
+    try {
+      const reply = await sendMessage(apiText, filesSnapshot);
+      appendMessage("assistant", reply);
+      setStatus("");
+      await refreshSessions();
+    } catch (err) {
+      appendMessage("assistant", String(err.message || err), "error");
+      setStatus("");
+    } finally {
+      sendBtn.disabled = false;
+      inputEl.focus();
+    }
+  }
+
+  function populateCmdMenu() {
+    if (!cmdMenuDropdown) {
+      return;
+    }
+    cmdMenuDropdown.innerHTML = "";
+    for (const item of KB_CMD_MENU_ITEMS) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "kb-cmd-dropdown-item";
+      b.setAttribute("role", "menuitem");
+      const lab = document.createElement("span");
+      lab.className = "kb-cmd-item-label";
+      lab.textContent = item.label;
+      const hint = document.createElement("span");
+      hint.className = "kb-cmd-item-hint";
+      hint.textContent = item.hint;
+      b.appendChild(lab);
+      b.appendChild(hint);
+      b.addEventListener("click", async function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const cmd = item.cmd;
+        closeCmdMenu();
+        if (!modelId) {
+          return;
+        }
+        await postChatTurn(cmd, cmd, []);
+      });
+      cmdMenuDropdown.appendChild(b);
+    }
+  }
+
+  populateCmdMenu();
+
   formEl.addEventListener("submit", async (e) => {
     e.preventDefault();
     const text = inputEl.value.trim();
@@ -1127,23 +1288,8 @@
       (filesSnapshot.length
         ? "\n" + filesSnapshot.map((f) => "📎 " + f.name).join("\n")
         : "");
-    appendMessage("user", userVisible || "(вложения)");
     inputEl.value = "";
-    sendBtn.disabled = true;
-    setStatus("Запрос…");
-
-    try {
-      const reply = await sendMessage(text, filesSnapshot);
-      appendMessage("assistant", reply);
-      setStatus("");
-      await refreshSessions();
-    } catch (err) {
-      appendMessage("assistant", String(err.message || err), "error");
-      setStatus("");
-    } finally {
-      sendBtn.disabled = false;
-      inputEl.focus();
-    }
+    await postChatTurn(userVisible || "(вложения)", text, filesSnapshot);
   });
 
   newSessionBtn.addEventListener("click", async () => {
@@ -1166,6 +1312,7 @@
 
   document.addEventListener("click", () => {
     closeMenu();
+    closeCmdMenu();
   });
 
   if (menuDropdown) {
@@ -1174,9 +1321,22 @@
     });
   }
 
+  if (cmdMenuBtn) {
+    cmdMenuBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleCmdMenu();
+    });
+  }
+  if (cmdMenuDropdown) {
+    cmdMenuDropdown.addEventListener("click", (e) => {
+      e.stopPropagation();
+    });
+  }
+
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       closeMenu();
+      closeCmdMenu();
     }
   });
 

@@ -21,8 +21,14 @@
   box-sizing: border-box;
 }
 
+html {
+  height: 100%;
+}
+
 body {
   margin: 0;
+  height: 100%;
+  overflow: hidden;
   font-family: "Nunito", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   background: var(--bg-page);
   background-image: radial-gradient(
@@ -31,18 +37,78 @@ body {
     transparent 55%
   );
   color: var(--text);
-  min-height: 100vh;
 }
 
 .kb-layout {
   display: flex;
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
+  max-height: 100vh;
+  max-height: 100dvh;
+  overflow: hidden;
   align-items: stretch;
+}
+
+.kb-sidebar-wrap {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  flex-shrink: 0;
+  min-height: 0;
+  max-height: 100%;
+  min-width: calc(280px + 1.5rem);
+  transition: min-width 0.24s ease;
+}
+
+.kb-layout--sidebar-collapsed .kb-sidebar-wrap {
+  min-width: 1.5rem;
+}
+
+.kb-sidebar-toggle {
+  width: 1.5rem;
+  min-width: 1.5rem;
+  flex-shrink: 0;
+  align-self: stretch;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-right: 1px solid var(--border-soft);
+  background: linear-gradient(90deg, var(--surface) 0%, var(--bg-page) 100%);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: inset -1px 0 0 rgba(0, 51, 102, 0.04);
+  transition: background 0.15s ease;
+}
+
+.kb-sidebar-toggle:hover {
+  background: rgba(0, 123, 255, 0.08);
+}
+
+.kb-sidebar-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.kb-sidebar-toggle-chevron {
+  display: block;
+  font-size: 1.35rem;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--navy);
+  user-select: none;
+  transition: transform 0.2s ease;
+}
+
+.kb-layout--sidebar-collapsed .kb-sidebar-toggle-chevron {
+  transform: scaleX(-1);
 }
 
 .kb-sidebar {
   width: 280px;
-  min-width: 260px;
+  min-width: 280px;
+  min-height: 0;
   border-right: 1px solid var(--border-soft);
   background: var(--surface);
   box-shadow: 2px 0 12px rgba(0, 51, 102, 0.06);
@@ -50,6 +116,24 @@ body {
   flex-direction: column;
   padding: 0.75rem;
   gap: 0.5rem;
+  overflow: hidden;
+  transition:
+    width 0.24s ease,
+    min-width 0.24s ease,
+    opacity 0.2s ease,
+    padding 0.24s ease,
+    border-width 0.24s ease;
+}
+
+.kb-layout--sidebar-collapsed .kb-sidebar {
+  width: 0;
+  min-width: 0;
+  padding-left: 0;
+  padding-right: 0;
+  opacity: 0;
+  pointer-events: none;
+  border-right-width: 0;
+  box-shadow: none;
 }
 
 .kb-sidebar-head {
@@ -75,7 +159,7 @@ body {
   padding: 0;
   overflow-y: auto;
   flex: 1;
-  max-height: calc(100vh - 11rem);
+  min-height: 0;
 }
 
 .kb-sess {
@@ -104,6 +188,7 @@ body {
   line-height: 1.25;
   overflow: hidden;
   font-family: inherit;
+  font-variant-numeric: tabular-nums;
 }
 
 .kb-sess-btn:hover {
@@ -132,10 +217,11 @@ body {
 
 .kb-panel {
   flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  min-width: 0;
   min-height: 0;
+  overflow: hidden;
 }
 
 /* Область под шапкой: вся правая колонка — подложка логотипа на всю ширину/высоту */
@@ -196,6 +282,13 @@ body {
 
 .kb-view--hidden {
   display: none !important;
+}
+
+/* Настройки: длинная страница прокручивается внутри колонки, не у body */
+#kb-view-settings:not(.kb-view--hidden) {
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
 }
 
 .kb-settings {
@@ -670,14 +763,14 @@ body {
   padding: 1rem;
   gap: 0.75rem;
   min-height: 0;
+  overflow: hidden;
 }
 
 .kb-log-wrap {
   flex: 1;
   display: flex;
   flex-direction: column;
-  min-height: 12rem;
-  max-height: calc(100vh - 16rem);
+  min-height: 0;
   position: relative;
   border: 1px solid var(--border-soft);
   border-radius: 12px;
@@ -879,10 +972,24 @@ body {
   pointer-events: none;
 }
 
+.kb-compose-footer {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-end;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
 .kb-attachments {
+  flex: 1 1 10rem;
+  min-width: 0;
   min-height: 0;
+  max-height: 4.5rem;
+  overflow-x: hidden;
+  overflow-y: auto;
   display: flex;
   flex-wrap: wrap;
+  align-content: flex-end;
   gap: 0.35rem;
 }
 
@@ -916,6 +1023,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
+  flex-shrink: 0;
 }
 
 .kb-compose {
@@ -925,15 +1033,85 @@ body {
 }
 
 .kb-compose-actions {
+  flex: 0 0 auto;
   display: flex;
   gap: 0.5rem;
   justify-content: flex-end;
   flex-wrap: wrap;
+  align-items: center;
+}
+
+.kb-cmd-menu-wrap {
+  position: relative;
+}
+
+.kb-cmd-menu-glyph {
+  display: block;
+  font-size: 1.15rem;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: 0;
+  color: var(--navy);
+  transform: translateY(-1px);
+}
+
+.kb-cmd-dropdown {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 0.35rem);
+  z-index: 60;
+  min-width: 15.5rem;
+  max-width: min(22rem, 92vw);
+  max-height: min(70vh, 22rem);
+  overflow-y: auto;
+  padding: 0.35rem;
+  border-radius: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  box-shadow: 0 8px 28px rgba(0, 26, 51, 0.18);
+}
+
+.kb-cmd-dropdown-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.12rem;
+  width: 100%;
+  margin: 0;
+  padding: 0.45rem 0.55rem;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.kb-cmd-dropdown-item:hover,
+.kb-cmd-dropdown-item:focus-visible {
+  background: rgba(0, 123, 255, 0.08);
+  outline: none;
+}
+
+.kb-cmd-item-label {
+  font-size: 0.82rem;
+  font-weight: 700;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  color: var(--navy);
+}
+
+.kb-cmd-item-hint {
+  font-size: 0.72rem;
+  color: var(--muted);
+  line-height: 1.25;
 }
 
 .kb-input {
   flex: 1;
   min-width: 12rem;
+  max-height: min(14rem, 35vh);
   padding: 0.65rem 0.8rem;
   border-radius: 10px;
   border: 1px solid var(--border);
@@ -993,6 +1171,19 @@ body {
 .kb-btn-secondary:hover {
   border-color: var(--accent);
   background: rgba(0, 123, 255, 0.06);
+}
+
+.kb-btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.5rem 0.6rem;
+  min-width: 2.65rem;
+}
+
+.kb-btn-icon .kb-icon-paperclip {
+  display: block;
+  flex-shrink: 0;
 }
 
 .kb-sr {
