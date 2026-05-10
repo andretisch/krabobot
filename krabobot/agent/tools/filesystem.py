@@ -70,7 +70,8 @@ class ReadFileTool(_FsTool):
     def description(self) -> str:
         return (
             "Read the contents of a file. Returns numbered lines. "
-            "Use offset and limit to paginate through large files."
+            "Use offset and limit to paginate through large files. "
+            "For images (PNG, JPEG, GIF, …) returns multimodal blocks you can SEE — read screenshots and diagrams visually, not only as filenames."
         )
 
     @property

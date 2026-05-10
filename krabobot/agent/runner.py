@@ -17,6 +17,51 @@ _DEFAULT_MAX_ITERATIONS_MESSAGE = (
 )
 _DEFAULT_ERROR_MESSAGE = "Sorry, I encountered an error calling the AI model."
 
+# OpenAI Chat Completions tool messages only allow string or *text* parts — not image_url.
+# Tools that return native image blocks (read_file, web_fetch) must attach pixels via a bridge user message.
+_TOOL_VISION_BRIDGE_HEAD = (
+    "[Служебно: зрение модели] Сообщения role=tool выше — только подтверждение вызова. "
+    "Ниже в этом сообщении переданы реальные пиксели из инструментов (image_url). "
+    "Опиши и отвечай по ним напрямую — не утверждай, что ты «не видишь файл на диске»."
+)
+
+
+def _tool_result_contains_vision_media(result: Any) -> bool:
+    if not isinstance(result, list):
+        return False
+    return any(
+        isinstance(b, dict) and b.get("type") == "image_url"
+        for b in result
+    )
+
+
+def _strip_block_meta(block: dict[str, Any]) -> dict[str, Any]:
+    if "_meta" in block:
+        return {k: v for k, v in block.items() if k != "_meta"}
+    return dict(block)
+
+
+def _vision_bridge_user_content_from_results(
+    tool_calls: list[ToolCallRequest],
+    results: list[Any],
+) -> list[dict[str, Any]] | None:
+    parts: list[dict[str, Any]] = []
+    for tc, result in zip(tool_calls, results):
+        if not _tool_result_contains_vision_media(result):
+            continue
+        if not isinstance(result, list):
+            continue
+        parts.append({
+            "type": "text",
+            "text": f"[Инструмент `{tc.name}` вернул изображение ниже.]",
+        })
+        for b in result:
+            if isinstance(b, dict):
+                parts.append(_strip_block_meta(b))
+    if not parts:
+        return None
+    return [{"type": "text", "text": _TOOL_VISION_BRIDGE_HEAD}, *parts]
+
 
 @dataclass(slots=True)
 class AgentRunSpec:
@@ -125,13 +170,30 @@ class AgentRunner:
                     context.stop_reason = stop_reason
                     await hook.after_iteration(context)
                     break
+                vision_user = _vision_bridge_user_content_from_results(
+                    response.tool_calls,
+                    results,
+                )
                 for tool_call, result in zip(response.tool_calls, results):
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "name": tool_call.name,
-                        "content": result,
-                    })
+                    if _tool_result_contains_vision_media(result):
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "name": tool_call.name,
+                            "content": (
+                                f"[{tool_call.name}] Визуальный вывод (изображение) — "
+                                "пиксели в следующем сообщении пользователя (служебный мост для API)."
+                            ),
+                        })
+                    else:
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "name": tool_call.name,
+                            "content": result,
+                        })
+                if vision_user:
+                    messages.append({"role": "user", "content": vision_user})
                 await hook.after_iteration(context)
                 continue
 

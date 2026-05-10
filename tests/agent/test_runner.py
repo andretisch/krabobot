@@ -334,3 +334,55 @@ async def test_subagent_max_iterations_announces_existing_fallback(tmp_path, mon
     args = mgr._announce_result.await_args.args
     assert args[3] == "Task completed but no final response was generated."
     assert args[5] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_runner_read_file_image_adds_user_vision_bridge():
+    """Tool role cannot carry image_url on OpenAI Chat Completions — bridge user message."""
+    from krabobot.agent.runner import AgentRunSpec, AgentRunner
+
+    img_block = {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64,QUJDRA=="},
+        "_meta": {"path": "/tmp/x.png"},
+    }
+    provider = MagicMock()
+    captured: list[dict] = []
+    n = {"v": 0}
+
+    async def chat_with_retry(*, messages, **kwargs):
+        n["v"] += 1
+        if n["v"] == 1:
+            return LLMResponse(
+                content="",
+                tool_calls=[ToolCallRequest(id="call_1", name="read_file", arguments={"path": "x.png"})],
+                usage={},
+            )
+        captured.extend(messages)
+        return LLMResponse(content="described", tool_calls=[], usage={})
+
+    provider.chat_with_retry = chat_with_retry
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    tools.execute = AsyncMock(return_value=[img_block, {"type": "text", "text": "(Image file: x.png)"}])
+
+    runner = AgentRunner(provider)
+    result = await runner.run(AgentRunSpec(
+        initial_messages=[{"role": "system", "content": "s"}, {"role": "user", "content": "go"}],
+        tools=tools,
+        model="test-model",
+        max_iterations=3,
+    ))
+
+    assert result.final_content == "described"
+    tool_msgs = [m for m in captured if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1
+    assert isinstance(tool_msgs[0].get("content"), str)
+    assert "мост" in tool_msgs[0]["content"] or "мост для API" in tool_msgs[0]["content"]
+    bridge = [m for m in captured if m.get("role") == "user" and m != captured[0]]
+    assert bridge, "expected extra user message with vision payload"
+    ucontent = bridge[-1].get("content")
+    assert isinstance(ucontent, list)
+    types = [p.get("type") for p in ucontent if isinstance(p, dict)]
+    assert "image_url" in types
+    assert all("_meta" not in p for p in ucontent if isinstance(p, dict) and p.get("type") == "image_url")

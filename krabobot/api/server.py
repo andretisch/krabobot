@@ -18,7 +18,14 @@ from urllib.parse import unquote
 
 from aiohttp import web
 from loguru import logger
+from pydantic import ValidationError
 
+from krabobot.api.web_config import (
+    build_web_config_payload,
+    list_config_backups,
+    restore_backup,
+    save_web_config_sections,
+)
 from krabobot.utils.helpers import ensure_dir, safe_filename
 
 
@@ -548,6 +555,113 @@ async def handle_web_session_messages(request: web.Request) -> web.Response:
     return web.json_response({"object": "list", "data": out})
 
 
+async def handle_web_config(_request: web.Request) -> web.Response:
+    """GET /v1/web/config — redacted config for the settings UI."""
+    try:
+        payload = build_web_config_payload()
+    except FileNotFoundError as e:
+        return web.json_response(
+            {"error": {"message": str(e), "type": "not_found", "code": 404}},
+            status=404,
+        )
+    except Exception:
+        logger.exception("Failed to build web config payload")
+        return _error_json(500, "Internal server error", err_type="server_error")
+    return web.json_response(payload)
+
+
+async def handle_web_config_put(request: web.Request) -> web.Response:
+    """PUT /v1/web/config — merge UI sections into config.json (backup before write)."""
+    try:
+        raw = await request.json()
+    except Exception:
+        return _error_json(400, "Invalid JSON body")
+
+    if not isinstance(raw, dict):
+        return _error_json(400, "Expected a JSON object")
+
+    sections = {
+        "core": raw.get("core") if isinstance(raw.get("core"), dict) else {},
+        "channels": raw.get("channels") if isinstance(raw.get("channels"), dict) else {},
+        "other": raw.get("other") if isinstance(raw.get("other"), dict) else {},
+    }
+
+    try:
+        path_resolved, bak = save_web_config_sections(sections)
+    except FileNotFoundError as e:
+        return web.json_response(
+            {"error": {"message": str(e), "type": "not_found", "code": 404}},
+            status=404,
+        )
+    except ValidationError as e:
+        return web.json_response(
+            {
+                "error": {
+                    "message": "Configuration failed validation.",
+                    "type": "validation_error",
+                    "code": 422,
+                    "detail": e.errors(),
+                },
+            },
+            status=422,
+        )
+    except Exception:
+        logger.exception("Failed to save web config")
+        return _error_json(500, "Internal server error", err_type="server_error")
+
+    return web.json_response(
+        {
+            "ok": True,
+            "path": str(path_resolved),
+            "backupCreated": str(bak),
+        }
+    )
+
+
+async def handle_web_config_backups(_request: web.Request) -> web.Response:
+    """GET /v1/web/config/backups — list automatic config backups newest first."""
+    try:
+        data = list_config_backups()
+    except Exception:
+        logger.exception("Failed to list web config backups")
+        return _error_json(500, "Internal server error", err_type="server_error")
+    return web.json_response({"object": "list", "data": data})
+
+
+async def handle_web_config_restore(request: web.Request) -> web.Response:
+    """POST /v1/web/config/restore — restore config.json from a named backup."""
+    try:
+        raw = await request.json()
+    except Exception:
+        return _error_json(400, "Invalid JSON body")
+
+    if not isinstance(raw, dict):
+        return _error_json(400, "Expected a JSON object")
+
+    name = raw.get("backup") or raw.get("file") or ""
+    if not isinstance(name, str):
+        return _error_json(400, "backup must be a string")
+
+    try:
+        cfg_path, pre_restore_backup = restore_backup(name.strip())
+    except ValueError as e:
+        return _error_json(400, str(e))
+    except FileNotFoundError:
+        return _error_json(404, "Backup not found")
+    except Exception:
+        logger.exception("Failed to restore web config from backup")
+        return _error_json(500, "Internal server error", err_type="server_error")
+
+    return web.json_response(
+        {
+            "ok": True,
+            "path": str(cfg_path),
+            "restoredFrom": name.strip(),
+            "previousBackedUpAs": str(pre_restore_backup),
+        }
+    )
+
+
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
@@ -576,4 +690,8 @@ def create_app(agent_loop, model_name: str = "krabobot", request_timeout: float 
     app.router.add_get("/v1/web/sessions", handle_web_sessions_list)
     app.router.add_delete("/v1/web/sessions/{session_id}", handle_web_sessions_delete)
     app.router.add_get("/v1/web/sessions/{session_id}/messages", handle_web_session_messages)
+    app.router.add_get("/v1/web/config", handle_web_config)
+    app.router.add_put("/v1/web/config", handle_web_config_put)
+    app.router.add_get("/v1/web/config/backups", handle_web_config_backups)
+    app.router.add_post("/v1/web/config/restore", handle_web_config_restore)
     return app

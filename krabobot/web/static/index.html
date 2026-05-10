@@ -3,7 +3,16 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>krabobot — чат</title>
+  <meta name="theme-color" content="#003366" />
+  <title>крабобот — чат</title>
+  <link rel="icon" type="image/png" href="/static/favicon.png" sizes="any" />
+  <link rel="apple-touch-icon" href="/static/favicon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Nunito:wght@500;600;700&display=swap"
+    rel="stylesheet"
+  />
   <link rel="stylesheet" href="/static/chat.css" />
 </head>
 <body>
@@ -22,45 +31,68 @@
     </aside>
     <div class="kb-panel">
       <header class="kb-top">
-        <h1>krabobot</h1>
-        <p class="kb-sub">
-          Локально: тот же origin, что и <code>krabobot serve</code>.
-        </p>
-        <nav class="kb-tabs" role="tablist" aria-label="Разделы">
-          <button
-            type="button"
-            id="kb-tab-chat"
-            class="kb-tab kb-tab--active"
-            role="tab"
-            aria-selected="true"
-            aria-controls="kb-view-chat"
-          >
-            Чат
-          </button>
-          <button
-            type="button"
-            id="kb-tab-settings"
-            class="kb-tab"
-            role="tab"
-            aria-selected="false"
-            aria-controls="kb-view-settings"
-          >
-            Настройки
-          </button>
-        </nav>
-        <div class="kb-toolbar">
-          <span id="kb-status" class="kb-status" aria-live="polite"></span>
+        <div class="kb-top-inner">
+          <div class="kb-menu-wrap">
+            <button
+              type="button"
+              id="kb-menu-btn"
+              class="kb-menu-btn"
+              aria-expanded="false"
+              aria-haspopup="true"
+              aria-controls="kb-menu-dropdown"
+              aria-label="Меню"
+            >
+              <span class="kb-menu-burger" aria-hidden="true"></span>
+            </button>
+            <div
+              id="kb-menu-dropdown"
+              class="kb-dropdown"
+              role="menu"
+              aria-label="Разделы"
+              hidden
+            >
+              <button
+                type="button"
+                id="kb-nav-chat"
+                class="kb-dropdown-item kb-dropdown-item--active"
+                role="menuitem"
+              >
+                Чат
+              </button>
+              <button
+                type="button"
+                id="kb-nav-settings"
+                class="kb-dropdown-item"
+                role="menuitem"
+              >
+                Настройки
+              </button>
+            </div>
+          </div>
+          <div class="kb-brand">
+            <h1 class="kb-sr">крабобот — чат</h1>
+            <span class="kb-brand-word" aria-hidden="true"
+              ><span class="kb-brand-cr">крабобот</span><span class="kb-brand-domain">.рф</span></span
+            >
+          </div>
+          <div class="kb-toolbar">
+            <span id="kb-status" class="kb-status" aria-live="polite"></span>
+          </div>
         </div>
       </header>
 
-      <div
-        id="kb-view-chat"
-        class="kb-view"
-        role="tabpanel"
-        aria-labelledby="kb-tab-chat"
-      >
-        <main class="kb-main">
-          <div id="kb-log" class="kb-log" role="log" aria-label="Переписка"></div>
+      <div class="kb-panel-stage">
+        <div class="kb-chat-backdrop" aria-hidden="true"></div>
+        <div
+          id="kb-view-chat"
+          class="kb-view kb-view-chat"
+          role="region"
+          aria-label="Чат"
+        >
+          <main class="kb-main">
+          <div class="kb-log-wrap">
+            <div id="kb-log" class="kb-log" role="log" aria-label="Переписка"></div>
+          </div>
           <div id="kb-attachments" class="kb-attachments" aria-label="Вложения"></div>
           <form id="kb-form" class="kb-form">
             <label class="kb-sr" for="kb-input">Сообщение</label>
@@ -82,52 +114,94 @@
             </div>
           </form>
         </main>
-      </div>
+        </div>
 
-      <div
-        id="kb-view-settings"
-        class="kb-view kb-view--hidden"
-        role="tabpanel"
-        aria-labelledby="kb-tab-settings"
-        hidden
-      >
-        <div class="kb-settings">
-          <h2 class="kb-settings-h">Подключение</h2>
+        <div
+          id="kb-view-settings"
+          class="kb-view kb-view--hidden"
+          role="region"
+          aria-label="Настройки"
+          hidden
+        >
+        <div class="kb-settings kb-settings--wide">
+          <p id="kb-cfg-note" class="kb-settings-p kb-cfg-note">
+            Ниже тот же <code>config.json</code>, который использует запущенный
+            <code>krabobot serve</code> (ключ <code>-c</code>). Нажмите «Сохранить» —
+            перед записью файл автоматически копируется в бэкап; секретные поля пусть
+            остаются пустыми, если не хотите их менять. Локальный веб-сервер обычно без
+            пароля — не открывайте порт наружу.
+          </p>
+
+          <div class="kb-cfg-toolbar" id="kb-cfg-toolbar">
+            <button type="button" id="kb-cfg-save" class="kb-btn kb-btn-primary">
+              Сохранить в config.json
+            </button>
+            <button type="button" id="kb-cfg-reload" class="kb-btn kb-btn-secondary">
+              Перечитать
+            </button>
+            <label class="kb-cfg-toolbar-backup"
+              >Откат:
+              <select id="kb-cfg-backups" class="kb-cfg-select kb-cfg-select--inline">
+                <option value="">— выберите бэкап —</option>
+              </select>
+            </label>
+            <button type="button" id="kb-cfg-restore" class="kb-btn kb-btn-secondary">
+              Восстановить выбранный бэкап
+            </button>
+          </div>
+
+          <div id="kb-cfg-ok" class="kb-cfg-banner kb-cfg-banner--ok" hidden></div>
+          <div id="kb-cfg-error" class="kb-cfg-banner kb-cfg-banner--err" hidden></div>
+          <div id="kb-cfg-root" hidden>
+            <section class="kb-cfg-section" aria-labelledby="kb-cfg-h-main">
+              <h2 id="kb-cfg-h-main" class="kb-cfg-section-h">Основные настройки</h2>
+              <p class="kb-settings-p">
+                Файл:
+                <code id="kb-cfg-path" class="kb-settings-code"></code>
+              </p>
+              <div id="kb-cfg-main" class="kb-cfg-stack"></div>
+            </section>
+
+            <section class="kb-cfg-section" aria-labelledby="kb-cfg-h-ch">
+              <h2 id="kb-cfg-h-ch" class="kb-cfg-section-h">Каналы</h2>
+              <div id="kb-cfg-channels" class="kb-cfg-stack"></div>
+            </section>
+
+            <section class="kb-cfg-section" aria-labelledby="kb-cfg-h-rest">
+              <h2 id="kb-cfg-h-rest" class="kb-cfg-section-h">Остальное</h2>
+              <div id="kb-cfg-other" class="kb-cfg-stack"></div>
+            </section>
+          </div>
+
+          <h2 class="kb-settings-h">Веб-чат</h2>
           <p class="kb-settings-p">
-            Страница и API с одного хоста (без CORS): запросы идут на <code>/v1/…</code>.
+            Запросы с этой страницы идут на тот же хост, без CORS (<code>/v1/…</code>).
           </p>
           <dl class="kb-settings-dl">
-            <dt>Модель</dt>
+            <dt>Модель (сессия API)</dt>
             <dd id="kb-st-model">—</dd>
             <dt>Сервер</dt>
             <dd id="kb-st-health">—</dd>
-            <dt>Эндпоинты</dt>
+            <dt>Сессия в браузере</dt>
             <dd>
-              <code>GET /v1/models</code>,
-              <code>POST /v1/chat/completions</code>,
-              <code>GET /v1/web/sessions</code> …
+              <span class="kb-settings-p"
+                >Идентификатор в <code>localStorage</code> —
+                <code>api:&lt;uuid&gt;</code>.</span
+              >
             </dd>
           </dl>
-
-          <h2 class="kb-settings-h">Сессия в браузере</h2>
-          <p class="kb-settings-p">
-            Идентификатор в <code>localStorage</code> связывает вкладку с файлом истории на сервере
-            (<code>api:&lt;uuid&gt;</code>).
-          </p>
           <div class="kb-settings-row">
             <code id="kb-st-session" class="kb-settings-code"></code>
             <button type="button" id="kb-copy-session" class="kb-btn kb-btn-secondary">
               Копировать
             </button>
           </div>
-
-          <h2 class="kb-settings-h">Вложения</h2>
           <p class="kb-settings-p">
-            Загрузки из чата пишутся в рабочий каталог агента:
-            <code>uploads/web/&lt;session_id&gt;/</code>
-            (UTF-8 для текста, бинарники как есть).
+            Вложения из чата сохраняются в
+            <code>uploads/web/&lt;session_id&gt;/</code> рабочего каталога агента.
           </p>
         </div>
+      </div>
       </div>
     </div>
   </div>
