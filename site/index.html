@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Крабобот — локальный многоканальный AI-ассистент для Telegram, VK и Email с русской речью и локальным STT/TTS." />
+  <meta name="theme-color" content="#003366" />
+  <title>Крабобот — локальный AI-ассистент</title>
+  <link rel="icon" type="image/png" href="assets/favicon.png" sizes="any" />
+  <link rel="apple-touch-icon" href="assets/favicon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <header class="site-header" id="top">
+    <div class="site-wrap site-header__inner">
+      <a class="site-brand" href="#top" aria-label="Крабобот — на главную">
+        <img src="assets/krabobot-logo.png" alt="" class="site-brand__logo" width="214" height="48" />
+      </a>
+      <button type="button" class="site-nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="site-nav">
+        <span class="site-nav-toggle__bar"></span>
+        <span class="site-nav-toggle__bar"></span>
+        <span class="site-nav-toggle__bar"></span>
+        <span class="visually-hidden">Меню</span>
+      </button>
+      <nav class="site-nav" id="site-nav" aria-label="Основная навигация">
+        <a href="#features">Возможности</a>
+        <a href="#channels">Каналы</a>
+        <a href="#start">Старт</a>
+        <a class="site-nav__cta" href="https://github.com/andretisch/krabobot" target="_blank" rel="noopener noreferrer">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="site-wrap hero__grid">
+        <div class="hero__content">
+          <p class="hero__badge">Локальный · многоканальный · open source</p>
+          <h1 class="hero__title">
+            Ваш AI-ассистент
+            <span class="hero__title-accent">на русском</span>
+            в Telegram, VK и почте
+          </h1>
+          <p class="hero__lead">
+            <strong>krabobot</strong> — персональный бот, который работает у вас на машине:
+            единый профиль между мессенджерами, контроль доступа, память по пользователям
+            и голосовые ответы через локальные модели <code>sherpa-onnx</code>.
+          </p>
+          <div class="hero__actions">
+            <a class="btn btn--primary" href="#start">Быстрый старт</a>
+            <a class="btn btn--ghost" href="https://github.com/andretisch/krabobot" target="_blank" rel="noopener noreferrer">Исходный код</a>
+          </div>
+        </div>
+        <div class="hero__visual" aria-hidden="true">
+          <div class="hero-card">
+            <div class="hero-card__head">
+              <span class="hero-card__dot"></span>
+              <span class="hero-card__dot"></span>
+              <span class="hero-card__dot"></span>
+            </div>
+            <div class="hero-card__body">
+              <p class="hero-card__line hero-card__line--user">Привет! Напомни, что умеешь?</p>
+              <p class="hero-card__line hero-card__line--bot">
+                <span class="hero-card__crab">🦀</span>
+                Отвечаю в Telegram и VK, помню контекст, могу озвучить ответ — включи <code>/tts on</code>.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="features">
+      <div class="site-wrap">
+        <header class="section__head">
+          <h2>Возможности</h2>
+          <p>Всё, что заложено в проект сегодня — без облачной привязки к одному чату.</p>
+        </header>
+        <ul class="features" id="features-grid"></ul>
+      </div>
+    </section>
+
+    <section class="section section--alt" id="channels">
+      <div class="site-wrap">
+        <header class="section__head">
+          <h2>Каналы связи</h2>
+          <p>Один агент — несколько точек входа. Аккаунты связываются командой <code>/link</code>.</p>
+        </header>
+        <ul class="channels" id="channels-grid"></ul>
+      </div>
+    </section>
+
+    <section class="section" id="access">
+      <div class="site-wrap access">
+        <div class="access__text">
+          <h2>Доступ и безопасность</h2>
+          <p>
+            Первый пользователь становится <strong>владельцем</strong>. Остальные регистрируются через
+            <code>/reg</code> и ждут подтверждения. Владелец управляет заявками и может выдавать одноразовые коды
+            <code>/regcode create</code>.
+          </p>
+          <ul class="access__list">
+            <li>Персональный workspace и память на каждого пользователя</li>
+            <li>Команды <code>/status</code> и <code>/restart</code> — только для владельца</li>
+            <li>Голосовые ответы включаются индивидуально: <code>/tts on</code></li>
+          </ul>
+        </div>
+        <div class="access__commands" aria-label="Основные команды">
+          <h3 class="access__commands-title">Команды</h3>
+          <dl class="cmd-list" id="cmd-list"></dl>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section--alt" id="start">
+      <div class="site-wrap start">
+        <header class="section__head">
+          <h2>Быстрый старт</h2>
+          <p>Python 3.11+, Linux / macOS / Windows. Установка из репозитория.</p>
+        </header>
+        <pre class="code-block" tabindex="0"><code id="install-snippet"></code></pre>
+        <p class="start__hint">
+          После <code>krabobot serve</code> откройте веб-чат на <code>http://127.0.0.1:&lt;порт&gt;/</code>
+          и настройте <code>config.json</code> во вкладке «Настройки».
+        </p>
+        <div class="modes">
+          <article class="mode-card">
+            <h3>gateway</h3>
+            <p>Долгоживущий процесс: каналы + агент в одном.</p>
+          </article>
+          <article class="mode-card">
+            <h3>agent</h3>
+            <p>Интерактивный CLI-чат для отладки и личного использования.</p>
+          </article>
+          <article class="mode-card">
+            <h3>serve</h3>
+            <p>HTTP API и веб-интерфейс чата к тому же агенту.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="site-wrap site-footer__inner">
+      <p>Крабобот · MIT · <span id="year"></span></p>
+      <p>
+        <a href="https://github.com/andretisch/krabobot" target="_blank" rel="noopener noreferrer">GitHub</a>
+        ·
+        <a href="https://крабобот.рф">крабобот.рф</a>
+      </p>
+    </div>
+  </footer>
+
+  <script src="js/main.js" defer></script>
+</body>
+</html>
