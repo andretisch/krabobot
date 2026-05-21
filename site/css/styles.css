@@ -14,7 +14,7 @@
   --assistant-bg: #e8f0fb;
   --shadow: 0 8px 32px rgba(0, 51, 102, 0.1);
   --radius: 14px;
-  --header-h: 4rem;
+  --header-h: 6.5rem;
 }
 
 *,
@@ -113,7 +113,7 @@ code {
 
 .site-brand__logo {
   display: block;
-  height: 3rem;
+  height: 6rem;
   width: auto;
   border-radius: 8px;
 }
