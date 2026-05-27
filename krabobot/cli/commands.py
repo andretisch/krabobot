@@ -35,7 +35,7 @@ from rich.text import Text
 
 from krabobot import __logo__, __version__
 from krabobot.cli.stream import StreamRenderer, ThinkingSpinner
-from krabobot.config.paths import get_workspace_path, is_default_workspace
+from krabobot.config.paths import get_workspace_path
 from krabobot.config.schema import Config
 from krabobot.utils.helpers import sync_workspace_templates
 
@@ -628,18 +628,6 @@ def _warn_deprecated_config_keys(config_path: Path | None) -> None:
         )
 
 
-def _migrate_cron_store(config: "Config") -> None:
-    """One-time migration: move legacy global cron store into the workspace."""
-    from krabobot.config.paths import get_cron_dir
-
-    legacy_path = get_cron_dir() / "jobs.json"
-    new_path = config.workspace_path / "cron" / "jobs.json"
-    if legacy_path.is_file() and not new_path.exists():
-        new_path.parent.mkdir(parents=True, exist_ok=True)
-        import shutil
-        shutil.move(str(legacy_path), str(new_path))
-
-
 # ============================================================================
 # OpenAI-Compatible API Server
 # ============================================================================
@@ -765,11 +753,6 @@ def gateway(
     provider = _make_provider(config)
     session_manager = SessionManager(config.workspace_path)
 
-    # Preserve existing single-workspace installs, but keep custom workspaces clean.
-    if is_default_workspace(config.workspace_path):
-        _migrate_cron_store(config)
-
-    # Create cron service with workspace-scoped store
     cron_store_path = config.workspace_path / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
 
@@ -991,11 +974,6 @@ def agent(
     bus = MessageBus()
     provider = _make_provider(config)
 
-    # Preserve existing single-workspace installs, but keep custom workspaces clean.
-    if is_default_workspace(config.workspace_path):
-        _migrate_cron_store(config)
-
-    # Create cron service with workspace-scoped store
     cron_store_path = config.workspace_path / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
 
