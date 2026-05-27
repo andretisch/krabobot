@@ -89,6 +89,67 @@ krabobot --help
 
 ---
 
+## Каталог `~/.krabobot`
+
+При `krabobot onboard` создаётся домашний каталог экземпляра. Если конфиг задан через `-c /path/to/config.json`, служебные каталоги `logs/` и `media/` создаются **рядом с этим файлом**. Путь `history/cli_history` всегда в `~/.krabobot/history/` (общий для CLI на машине).
+
+### Дерево
+
+```
+~/.krabobot/
+├── config.json                 # Настройки (провайдер, каналы, workspace, tools)
+├── config.backup.*.json        # Резервные копии config (веб-настройки)
+├── logs/                       # Логи процесса
+├── media/                      # Временные вложения с каналов
+│   ├── telegram/
+│   ├── vk/
+│   └── email/
+├── models/                     # Модели sherpa-onnx (STT/TTS)
+│   ├── stt/
+│   └── tts/
+├── history/
+│   └── cli_history             # История ввода в `krabobot agent`
+└── workspace/                  # Рабочая область (agents.defaults.workspace)
+    ├── AGENTS.md, SOUL.md, USER.md, TOOLS.md, HEARTBEAT.md
+    ├── memory/
+    │   ├── MEMORY.md           # Долговременная память (в контекст LLM)
+    │   └── HISTORY.md          # Журнал (по запросу через инструменты)
+    ├── skills/<имя>/SKILL.md   # Пользовательские skills
+    ├── sessions/*.jsonl        # История диалогов по channel:chat_id
+    ├── cron/jobs.json          # Запланированные задания
+    ├── identity/user_links.json
+    └── users/<user_id>/        # Изолированный workspace каждого пользователя
+```
+
+Корневых `cron/` и `sessions/` **нет** — cron и сессии только внутри `workspace/` (или `users/<id>/`).
+
+### Обновление со старых версий
+
+Если остались файлы из ранних установок:
+
+```bash
+# cron (если был ~/.krabobot/cron/jobs.json)
+mkdir -p ~/.krabobot/workspace/cron
+mv ~/.krabobot/cron/jobs.json ~/.krabobot/workspace/cron/ 2>/dev/null || true
+
+# сессии (если был ~/.krabobot/sessions/*.jsonl)
+mkdir -p ~/.krabobot/workspace/sessions
+mv ~/.krabobot/sessions/*.jsonl ~/.krabobot/workspace/sessions/ 2>/dev/null || true
+```
+
+Пустые каталоги `~/.krabobot/cron/` и `~/.krabobot/sessions/` после переноса можно удалить.
+
+### Контекст LLM (кратко)
+
+| Постоянно в system prompt | В каждом запросе | По запросу (read_file и т.д.) |
+|---------------------------|------------------|-------------------------------|
+| Идентичность, bootstrap (`AGENTS.md` …), `MEMORY.md`, skills с `always: true`, каталог skills (XML) | Время, канал, chat_id, хвост `sessions/*.jsonl` | Полные `SKILL.md`, `HISTORY.md`, файлы workspace |
+| | | `HEARTBEAT.md` читает только heartbeat-сервис |
+
+Каналы, MCP и провайдер задаются в `config.json`, в промпт целиком не копируются.
+
+---
+
 ## Базовая структура конфига
 
 Провайдер задаётся в `agents.defaults.provider`. Удобный вариант — **`custom`**: один блок с ключом и OpenAI-compatible `apiBase`, без отдельного имени вида ProxyAPI/OpenRouter в структуре.
