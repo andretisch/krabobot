@@ -588,6 +588,68 @@ code {
   color: #fff;
 }
 
+.donate__form {
+  max-width: 32rem;
+  margin-inline: auto;
+  padding: 1.75rem 1.5rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.donate__title {
+  margin: 0 0 0.5rem;
+  font-size: 1.5rem;
+  font-weight: 800;
+  color: var(--navy);
+}
+
+.donate__lead {
+  margin: 0 0 1.25rem;
+  font-size: 0.98rem;
+  color: var(--muted);
+}
+
+.donate__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem 1rem;
+}
+
+.donate__label {
+  flex: 1 1 100%;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.donate__input {
+  flex: 1 1 6rem;
+  min-width: 5rem;
+  max-width: 8rem;
+  padding: 0.65rem 0.85rem;
+  font: inherit;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--bg-page);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.donate__input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-color: var(--accent);
+}
+
+.donate__submit {
+  flex: 1 1 auto;
+  border: none;
+  cursor: pointer;
+}
+
 /* Responsive */
 @media (max-width: 900px) {
   .hero__grid {
