@@ -91,7 +91,7 @@ krabobot --help
 
 ## Каталог `~/.krabobot`
 
-При `krabobot onboard` и первом запуске создаётся домашний каталог экземпляра. Если конфиг лежит не в `~/.krabobot/config.json`, а, например, задан через `krabobot serve -c /path/to/config.json`, то **служебные** каталоги (`logs/`, `media/`, устаревший `cron/`) создаются **рядом с этим файлом конфигурации**. Пути `history/` и устаревший `sessions/` в корне `~/.krabobot` остаются общими для машины.
+При `krabobot onboard` создаётся домашний каталог экземпляра. Если конфиг задан через `-c /path/to/config.json`, каталоги `logs/` и `media/` создаются **рядом с этим файлом**. История CLI (`history/cli_history`) всегда в `~/.krabobot/history/`.
 
 ### Дерево файлов и папок
 
@@ -109,27 +109,27 @@ krabobot --help
 │   └── tts/
 ├── history/
 │   └── cli_history             # История ввода в `krabobot agent` (readline)
-├── cron/                       # Устаревшее хранилище cron (миграция в workspace)
-├── sessions/                   # Устаревшие глобальные сессии (миграция в workspace)
-└── workspace/                  # Рабочая область агента (путь из agents.defaults.workspace)
-    ├── AGENTS.md               # Инструкции агента (шаблон при onboard)
-    ├── SOUL.md                 # «Характер» и стиль ответов
-    ├── USER.md                 # О пользователе / предпочтениях
+└── workspace/                  # Рабочая область (agents.defaults.workspace)
+    ├── AGENTS.md               # Инструкции агенту (шаблон при onboard)
+    ├── SOUL.md                 # Стиль и «характер» ответов
+    ├── USER.md                 # О пользователе и предпочтениях
     ├── TOOLS.md                # Заметки по инструментам и окружению
-    ├── HEARTBEAT.md            # Периодические задачи для heartbeat-сервиса
+    ├── HEARTBEAT.md            # Периодические задачи (heartbeat-сервис)
     ├── memory/
-    │   ├── MEMORY.md           # Долговременная память (факты между сессиями)
-    │   └── HISTORY.md          # Журнал событий (поиск grep/read_file)
-    ├── skills/                 # Пользовательские skills (перекрывают встроенные)
+    │   ├── MEMORY.md           # Долговременная память (в контекст LLM)
+    │   └── HISTORY.md          # Журнал событий (поиск через инструменты)
+    ├── skills/                 # Пользовательские skills
     │   └── <имя-скилла>/SKILL.md
     ├── sessions/               # История диалогов: <канал>_<chat_id>.jsonl
     ├── cron/
-    │   └── jobs.json           # Запланированные задания (напоминания, cron tool)
+    │   └── jobs.json           # Запланированные задания (cron tool)
     ├── identity/
-    │   └── user_links.json     # Аккаунты, owner, регистрация, /link, TTS на пользователя
-    └── users/                  # Изолированные workspace зарегистрированных пользователей
+    │   └── user_links.json     # Аккаунты, owner, /reg, /link, TTS на пользователя
+    └── users/                  # Изолированный workspace каждого user_id
         └── <user_id>/          # Та же структура (memory, sessions, skills, …)
 ```
+
+Cron и сессии хранятся **только** в `workspace/` (или в `users/<user_id>/`), не в корне `~/.krabobot/`.
 
 ### Назначение ключевых частей
 
@@ -138,10 +138,11 @@ krabobot --help
 | `config.json` | Единственный источник настроек: LLM, каналы, API, MCP, heartbeat, STT/TTS. |
 | `workspace/` | Файлы, которые агент читает и правит; корень для `read_file` / `write_file` (если не включён `restrictToWorkspace`). |
 | `workspace/identity/` | Связка Telegram/VK/Email/web в одного пользователя, владелец, очередь `/reg`, коды `/link` и `/regcode`. |
-| `workspace/users/<id>/` | Отдельная память, сессии и skills для каждого внутреннего `user_id` (мультипользовательский режим). |
+| `workspace/users/<id>/` | Отдельная память, сессии и skills для каждого внутреннего `user_id`. |
 | `workspace/sessions/*.jsonl` | Полная переписка по чату; в LLM уходит только «хвост» после консолидации. |
 | `workspace/memory/MEMORY.md` | Сжатые факты; подмешиваются в system prompt каждый запрос. |
 | `workspace/memory/HISTORY.md` | Подробный лог; в промпт **не** входит, только по запросу через инструменты. |
+| `workspace/cron/jobs.json` | Напоминания и расписание. |
 | `models/` | Кэш весов sherpa-onnx; скачиваются при `autoDownloadModels: true`. |
 | `media/` | Скачанные голосовые, фото и вложения с каналов перед обработкой. |
 | `history/cli_history` | Удобство CLI, к агенту не относится. |
@@ -180,6 +181,17 @@ krabobot --help
 **Консолидация памяти:** когда история не помещается в окно контекста, старые сообщения из `sessions/*.jsonl` суммаризуются в `MEMORY.md` / `HISTORY.md`; сами строки JSONL при этом не удаляются, меняется только смещение `last_consolidated`.
 
 Пользовательские skills кладите в `~/.krabobot/workspace/skills/<имя>/SKILL.md` (или в `users/<id>/skills/`). Имя каталога с тем же именем **перекрывает** встроенный skill из пакета.
+
+### Обновление со старых версий
+
+Если после апгрейда остались каталоги `~/.krabobot/cron/` или `~/.krabobot/sessions/` (старые раскладки до workspace):
+
+```bash
+mkdir -p ~/.krabobot/workspace/cron ~/.krabobot/workspace/sessions
+mv ~/.krabobot/cron/jobs.json ~/.krabobot/workspace/cron/ 2>/dev/null || true
+mv ~/.krabobot/sessions/*.jsonl ~/.krabobot/workspace/sessions/ 2>/dev/null || true
+rmdir ~/.krabobot/cron ~/.krabobot/sessions 2>/dev/null || true
+```
 
 ---
 

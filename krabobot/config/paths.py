@@ -24,11 +24,6 @@ def get_media_dir(channel: str | None = None) -> Path:
     return ensure_dir(base / channel) if channel else base
 
 
-def get_cron_dir() -> Path:
-    """Return the cron storage directory."""
-    return get_runtime_subdir("cron")
-
-
 def get_logs_dir() -> Path:
     """Return the logs directory."""
     return get_runtime_subdir("logs")
@@ -51,7 +46,3 @@ def get_cli_history_path() -> Path:
     """Return the shared CLI history file path."""
     return Path.home() / ".krabobot" / "history" / "cli_history"
 
-
-def get_legacy_sessions_dir() -> Path:
-    """Return the legacy global session directory used for migration fallback."""
-    return Path.home() / ".krabobot" / "sessions"
