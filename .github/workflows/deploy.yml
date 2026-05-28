@@ -21,7 +21,7 @@ jobs:
           server: ${{ secrets.BEGET_FTP_HOST }}
           username: ${{ secrets.BEGET_FTP_USER }}
           password: ${{ secrets.BEGET_FTP_PASS }}
-          protocol: ftps # обязательно ftps, а не ftp (безопаснее)
+          protocol: ftp
           port: 21
           local-dir: ./site/
           server-dir: / # укажите корень сайта в панели Beget
