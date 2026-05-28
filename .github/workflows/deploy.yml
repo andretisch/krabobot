@@ -1,0 +1,33 @@
+name: Deploy Site to Beget
+
+on:
+  push:
+    branches: [ main ] # замените на master, если у вас основная ветка называется так
+
+jobs:
+  deploy:
+    # Деплоим ТОЛЬКО если в сообщении коммита есть фраза "Обновление сайта"
+    if: ${{ contains(github.event.head_commit.message, 'Обновление сайта') }}
+    
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Upload site folder to Beget
+        uses: SamKirkland/FTP-Deploy-Action@4.3.4
+        with:
+          server: ${{ secrets.BEGET_FTP_HOST }}
+          username: ${{ secrets.BEGET_FTP_USER }}
+          password: ${{ secrets.BEGET_FTP_PASS }}
+          protocol: ftps # обязательно ftps, а не ftp (безопаснее)
+          port: 21
+          local-dir: ./site/
+          server-dir: / # укажите корень сайта в панели Beget
+          exclude: |
+            **/.git*
+            **/.github*
+            **/node_modules/**
+          delete-removed: false # удалит на хостинге файлы, которых больше нет в папке site
+          dry-run: false
