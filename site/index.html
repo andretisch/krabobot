@@ -150,25 +150,30 @@
           method="POST"
           action="https://yoomoney.ru/quickpay/confirm.xml"
         >
-          <h2 class="donate__title">Пожертвовать на развитие проекта</h2>
-          <p class="donate__lead">
-            Поддержите разработку krabobot — оплата через ЮMoney, сумму можно изменить.
-          </p>
+          <header class="donate__head">
+            <h2 class="donate__title">Пожертвовать на развитие проекта</h2>
+            <p class="donate__lead">
+              Поддержите разработку krabobot — оплата через ЮMoney, сумму можно изменить.
+            </p>
+          </header>
           <input type="hidden" name="receiver" value="41001279130944" />
           <input type="hidden" name="label" value="крабобот.рф" />
           <input type="hidden" name="quickpay-form" value="button" />
-          <div class="donate__row">
-            <label class="donate__label" for="donate-sum">Сумма, ₽</label>
-            <input
-              class="donate__input"
-              id="donate-sum"
-              name="sum"
-              type="number"
-              min="1"
-              step="1"
-              value="500"
-              required
-            />
+          <div class="donate__controls">
+            <div class="donate__field">
+              <label class="donate__label" for="donate-sum">Сумма, ₽</label>
+              <input
+                class="donate__input"
+                id="donate-sum"
+                name="sum"
+                type="number"
+                min="1"
+                step="1"
+                value="500"
+                inputmode="numeric"
+                required
+              />
+            </div>
             <button class="btn btn--primary donate__submit" type="submit">Пожертвовать</button>
           </div>
         </form>
