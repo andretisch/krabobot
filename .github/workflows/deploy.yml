@@ -16,7 +16,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Upload site folder to Beget
-        uses: SamKirkland/FTP-Deploy-Action@4.3.4
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.6
         with:
           server: ${{ secrets.BEGET_FTP_HOST }}
           username: ${{ secrets.BEGET_FTP_USER }}
