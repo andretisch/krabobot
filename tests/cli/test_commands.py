@@ -255,14 +255,18 @@ def test_config_defaults_use_ollama_without_api_key():
 
 
 def test_make_provider_accepts_default_ollama_config_without_api_key():
+    from krabobot.providers.ollama_provider import OllamaProvider, resolve_ollama_connection
+
     config = Config()
 
-    with patch("krabobot.providers.openai_compat_provider.AsyncOpenAI") as mock_async_openai:
+    with patch(
+        "krabobot.providers.ollama_provider.resolve_ollama_connection",
+        return_value=resolve_ollama_connection(None, None, probe=lambda: True),
+    ):
         provider = _make_provider(config)
 
-    kwargs = mock_async_openai.call_args.kwargs
-    assert kwargs["api_key"] == "no-key"
-    assert kwargs["base_url"] == "http://localhost:11434/v1"
+    assert isinstance(provider, OllamaProvider)
+    assert provider.api_base == "http://localhost:11434"
     assert provider.get_default_model() == "gemma4:cloud"
 
 

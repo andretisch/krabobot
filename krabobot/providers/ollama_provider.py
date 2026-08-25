@@ -1,19 +1,24 @@
-"""Native Ollama HTTP provider for Ollama Cloud (https://ollama.com)."""
+"""Ollama provider with auto local/cloud detection via the official ollama client."""
 
 from __future__ import annotations
 
-import json
 import os
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 import json_repair
+from ollama import AsyncClient
 
 from krabobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
 _ALLOWED_MSG_KEYS = frozenset({"role", "content", "tool_calls", "tool_call_id", "name"})
+
+LOCAL_OLLAMA_HOST = "http://localhost:11434"
+CLOUD_OLLAMA_HOST = "https://ollama.com"
+PROBE_TIMEOUT = 1.5
 
 
 def is_ollama_cloud_base(api_base: str | None) -> bool:
@@ -24,9 +29,12 @@ def is_ollama_cloud_base(api_base: str | None) -> bool:
     return host == "ollama.com" or host.endswith(".ollama.com")
 
 
-def normalize_ollama_base(api_base: str) -> str:
-    """Strip trailing slashes from an Ollama host URL."""
-    return api_base.rstrip("/")
+def normalize_ollama_host(api_base: str) -> str:
+    """Normalize an Ollama host URL for the native client (no /v1 suffix)."""
+    base = api_base.strip().rstrip("/")
+    if base.endswith("/v1"):
+        base = base[:-3].rstrip("/")
+    return base
 
 
 def resolve_ollama_api_key(api_key: str | None) -> str | None:
@@ -37,20 +45,88 @@ def resolve_ollama_api_key(api_key: str | None) -> str | None:
     return env_key.strip() if env_key and env_key.strip() else None
 
 
+def probe_local_ollama(
+    host: str = LOCAL_OLLAMA_HOST,
+    timeout: float = PROBE_TIMEOUT,
+) -> bool:
+    """Return True when a local Ollama daemon responds on /api/tags."""
+    url = f"{normalize_ollama_host(host)}/api/tags"
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            response = client.get(url)
+            return response.status_code == 200
+    except Exception:
+        return False
+
+
+@dataclass(frozen=True)
+class OllamaConnection:
+    """Resolved Ollama endpoint (explicit config or auto-detected)."""
+
+    host: str
+    api_key: str | None
+    is_cloud: bool
+    auto_detected: bool
+
+
+def resolve_ollama_connection(
+    explicit_api_base: str | None,
+    api_key: str | None,
+    *,
+    probe: Callable[[], bool] | None = None,
+) -> OllamaConnection:
+    """Resolve Ollama host: explicit apiBase wins, else probe local then cloud."""
+    resolved_key = resolve_ollama_api_key(api_key)
+
+    if explicit_api_base and explicit_api_base.strip():
+        host = normalize_ollama_host(explicit_api_base)
+        is_cloud = is_ollama_cloud_base(host)
+        return OllamaConnection(
+            host=host,
+            api_key=resolved_key if is_cloud else None,
+            is_cloud=is_cloud,
+            auto_detected=False,
+        )
+
+    probe_fn = probe or probe_local_ollama
+    if probe_fn():
+        return OllamaConnection(
+            host=LOCAL_OLLAMA_HOST,
+            api_key=None,
+            is_cloud=False,
+            auto_detected=True,
+        )
+
+    return OllamaConnection(
+        host=CLOUD_OLLAMA_HOST,
+        api_key=resolved_key,
+        is_cloud=True,
+        auto_detected=True,
+    )
+
+
 class OllamaProvider(LLMProvider):
-    """Direct Ollama HTTP API (/api/chat) for Ollama Cloud."""
+    """Ollama chat via the official ollama Python client (local or cloud)."""
 
     def __init__(
         self,
-        api_key: str,
-        api_base: str = "https://ollama.com",
+        api_key: str | None = None,
+        api_base: str = LOCAL_OLLAMA_HOST,
         default_model: str = "gemma4:cloud",
         timeout: float = 120.0,
     ):
-        super().__init__(api_key=api_key, api_base=normalize_ollama_base(api_base))
+        host = normalize_ollama_host(api_base)
+        super().__init__(api_key=api_key, api_base=host)
         self.default_model = default_model
         self._timeout = timeout
-        self._headers = {"Authorization": f"Bearer {api_key}"}
+        headers: dict[str, str] = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        self._client = AsyncClient(
+            host=host,
+            headers=headers or None,
+            timeout=timeout,
+        )
 
     @staticmethod
     def _to_ollama_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -91,7 +167,7 @@ class OllamaProvider(LLMProvider):
             converted.append(clean)
         return converted
 
-    def _build_body(
+    def _build_chat_kwargs(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
@@ -104,7 +180,7 @@ class OllamaProvider(LLMProvider):
             self._sanitize_empty_content(messages),
             _ALLOWED_MSG_KEYS,
         )
-        body: dict[str, Any] = {
+        kwargs: dict[str, Any] = {
             "model": model or self.default_model,
             "messages": self._to_ollama_messages(sanitized),
             "stream": stream,
@@ -114,8 +190,16 @@ class OllamaProvider(LLMProvider):
             },
         }
         if tools:
-            body["tools"] = tools
-        return body
+            kwargs["tools"] = tools
+        return kwargs
+
+    @staticmethod
+    def _payload_from_response(payload: Any) -> dict[str, Any]:
+        if isinstance(payload, dict):
+            return payload
+        if hasattr(payload, "model_dump"):
+            return payload.model_dump()
+        return dict(payload)
 
     @staticmethod
     def _parse_tool_calls(raw_tool_calls: list[Any]) -> list[ToolCallRequest]:
@@ -178,15 +262,10 @@ class OllamaProvider(LLMProvider):
         tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:
         del reasoning_effort, tool_choice  # not supported on native Ollama API yet
-        body = self._build_body(messages, tools, model, max_tokens, temperature, stream=False)
-        url = f"{self.api_base}/api/chat"
+        kwargs = self._build_chat_kwargs(messages, tools, model, max_tokens, temperature, stream=False)
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                response = await client.post(url, json=body, headers=self._headers)
-                response.raise_for_status()
-                payload = response.json()
-            if not isinstance(payload, dict):
-                return LLMResponse(content="Error: invalid Ollama response.", finish_reason="error")
+            response = await self._client.chat(**kwargs)
+            payload = self._payload_from_response(response)
             return self._parse_response(payload)
         except Exception as exc:
             return self._handle_error(exc)
@@ -203,47 +282,36 @@ class OllamaProvider(LLMProvider):
         on_content_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
         del reasoning_effort, tool_choice
-        body = self._build_body(messages, tools, model, max_tokens, temperature, stream=True)
-        url = f"{self.api_base}/api/chat"
+        kwargs = self._build_chat_kwargs(messages, tools, model, max_tokens, temperature, stream=True)
         content_parts: list[str] = []
         tool_calls: list[ToolCallRequest] = []
         usage: dict[str, int] = {}
 
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                async with client.stream("POST", url, json=body, headers=self._headers) as response:
-                    response.raise_for_status()
-                    async for line in response.aiter_lines():
-                        if not line:
-                            continue
-                        try:
-                            chunk = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        if not isinstance(chunk, dict):
-                            continue
+            stream = await self._client.chat(**kwargs)
+            async for chunk in stream:
+                payload = self._payload_from_response(chunk)
+                message = payload.get("message") or {}
+                delta = message.get("content")
+                if isinstance(delta, str) and delta:
+                    content_parts.append(delta)
+                    if on_content_delta:
+                        await on_content_delta(delta)
 
-                        message = chunk.get("message") or {}
-                        delta = message.get("content")
-                        if isinstance(delta, str) and delta:
-                            content_parts.append(delta)
-                            if on_content_delta:
-                                await on_content_delta(delta)
+                raw_tool_calls = message.get("tool_calls") or []
+                if raw_tool_calls:
+                    tool_calls = self._parse_tool_calls(raw_tool_calls)
 
-                        raw_tool_calls = message.get("tool_calls") or []
-                        if raw_tool_calls:
-                            tool_calls = self._parse_tool_calls(raw_tool_calls)
-
-                        prompt_tokens = chunk.get("prompt_eval_count")
-                        completion_tokens = chunk.get("eval_count")
-                        if prompt_tokens is not None or completion_tokens is not None:
-                            prompt = int(prompt_tokens or 0)
-                            completion = int(completion_tokens or 0)
-                            usage = {
-                                "prompt_tokens": prompt,
-                                "completion_tokens": completion,
-                                "total_tokens": prompt + completion,
-                            }
+                prompt_tokens = payload.get("prompt_eval_count")
+                completion_tokens = payload.get("eval_count")
+                if prompt_tokens is not None or completion_tokens is not None:
+                    prompt = int(prompt_tokens or 0)
+                    completion = int(completion_tokens or 0)
+                    usage = {
+                        "prompt_tokens": prompt,
+                        "completion_tokens": completion,
+                        "total_tokens": prompt + completion,
+                    }
 
             finish_reason = "tool_calls" if tool_calls else "stop"
             return LLMResponse(

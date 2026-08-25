@@ -59,21 +59,25 @@ Windows (PowerShell из корня репозитория): `.\scripts\install.
 
 ## Первый запуск
 
-По умолчанию после `krabobot onboard` используется **Ollama** на `localhost:11434` и модель **`gemma4:cloud`**. Локально облачные модели Ollama можно запускать через установленный Ollama и `ollama signin`. Альтернатива — прямой доступ к **Ollama Cloud API** без локального демона:
+По умолчанию после `krabobot onboard` используется **Ollama** и модель **`gemma4:cloud`**. Krabobot **сам определяет**, куда подключаться:
+
+1. Если на `localhost:11434` отвечает локальный Ollama — используется он (ключ не нужен).
+2. Если локального демона нет — запросы идут в **Ollama Cloud** (`https://ollama.com`); нужен API-ключ в `providers.ollama.apiKey` или переменная `OLLAMA_API_KEY`.
+
+Явный `providers.ollama.apiBase` в `config.json` отключает автоопределение (например, удалённый Ollama или только cloud).
 
 ```json
 {
   "agents": { "defaults": { "provider": "ollama", "model": "gemma4:cloud" } },
   "providers": {
     "ollama": {
-      "apiKey": "YOUR_OLLAMA_API_KEY",
-      "apiBase": "https://ollama.com"
+      "apiKey": "YOUR_OLLAMA_API_KEY"
     }
   }
 }
 ```
 
-Ключ создаётся на [ollama.com/settings/keys](https://ollama.com/settings/keys) или через переменную окружения `OLLAMA_API_KEY`. Локальный Ollama (`http://localhost:11434/v1`) по-прежнему работает без ключа.
+Ключ создаётся на [ollama.com/settings/keys](https://ollama.com/settings/keys). Для облачных моделей через локальный Ollama достаточно `ollama signin`.
 
 ```bash
 krabobot onboard

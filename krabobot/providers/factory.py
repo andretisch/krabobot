@@ -14,11 +14,7 @@ def make_provider(config: Config) -> LLMProvider:
     from dataclasses import replace
 
     from krabobot.providers.base import GenerationSettings
-    from krabobot.providers.ollama_provider import (
-        OllamaProvider,
-        is_ollama_cloud_base,
-        resolve_ollama_api_key,
-    )
+    from krabobot.providers.ollama_provider import OllamaProvider, resolve_ollama_connection
     from krabobot.providers.openai_compat_provider import OpenAICompatProvider
     from krabobot.providers.registry import find_by_name
 
@@ -29,19 +25,24 @@ def make_provider(config: Config) -> LLMProvider:
     if spec and p and getattr(p, "use_max_completion_tokens", False):
         spec = replace(spec, supports_max_completion_tokens=True)
     backend = spec.backend if spec else "openai_compat"
-    api_base = config.get_api_base(model)
-    ollama_cloud = spec and spec.name == "ollama" and is_ollama_cloud_base(api_base)
 
-    if ollama_cloud:
-        api_key = resolve_ollama_api_key(p.api_key if p else None)
-        if not api_key:
-            raise ValueError("Ollama Cloud requires apiKey or OLLAMA_API_KEY.")
+    if spec and spec.name == "ollama":
+        conn = resolve_ollama_connection(
+            p.api_base if p else None,
+            p.api_key if p else None,
+        )
+        if conn.is_cloud and not conn.api_key:
+            raise ValueError(
+                "No local Ollama found. Install Ollama (https://ollama.com) "
+                "or set OLLAMA_API_KEY / providers.ollama.apiKey for cloud access."
+            )
         provider: LLMProvider = OllamaProvider(
-            api_key=api_key,
-            api_base=api_base or "https://ollama.com",
+            api_key=conn.api_key,
+            api_base=conn.host,
             default_model=model,
         )
     else:
+        api_base = config.get_api_base(model)
         if backend == "openai_compat" and not model.startswith("bedrock/"):
             needs_key = not (p and p.api_key)
             exempt = spec and (spec.is_oauth or spec.is_direct or spec.is_local)

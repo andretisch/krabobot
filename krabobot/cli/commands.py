@@ -339,8 +339,9 @@ def onboard(
         console.print(f"  1. Chat: [cyan]{agent_cmd}[/cyan]")
         console.print(f"  2. Start gateway: [cyan]{gateway_cmd}[/cyan]")
     else:
-        console.print("  1. Install [bold]Ollama[/bold] (https://ollama.com) if not already running")
-        console.print("     Cloud model gemma4:cloud needs: [cyan]ollama signin[/cyan]")
+        console.print("  1. Install [bold]Ollama[/bold] (https://ollama.com) — local daemon is tried first")
+        console.print("     Without local Ollama, set [cyan]OLLAMA_API_KEY[/cyan] or providers.ollama.apiKey")
+        console.print("     Cloud models via local Ollama: [cyan]ollama signin[/cyan]")
         console.print(f"  2. Chat: [cyan]{agent_cmd}[/cyan]")
     console.print("\n[dim]Want chat channels? See: https://github.com/andretisch/krabobot[/dim]")
 
