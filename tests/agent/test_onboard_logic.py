@@ -357,8 +357,8 @@ class TestProviderChannelInfo:
         names = _get_provider_names()
         assert isinstance(names, dict)
         assert len(names) > 0
-        # Should include common providers
-        assert "openai" in names or "anthropic" in names
+        # Should include built-in providers from registry
+        assert "ollama" in names
         assert "openai_codex" not in names
         assert "github_copilot" not in names
 

@@ -32,10 +32,8 @@ class AgentDefaults(Base):
     """Default agent configuration."""
 
     workspace: str = "~/.krabobot/workspace"
-    model: str = "anthropic/claude-opus-4-5"
-    provider: str = (
-        "auto"  # Provider name (e.g. "anthropic", "openrouter") or "auto" for auto-detection
-    )
+    model: str = "gemma4:cloud"
+    provider: str = "ollama"  # Provider name (e.g. "openrouter") or "auto" for auto-detection
     max_tokens: int = 8192
     context_window_tokens: int = 65_536
     temperature: float = 0.1
@@ -281,14 +279,20 @@ class Config(BaseSettings):
         from krabobot.providers.registry import find_by_name
 
         p, name = self._match_provider(model)
+        base: str | None = None
         if p and p.api_base:
-            return p.api_base
-        # Only gateways get a default api_base here. Standard providers
-        # resolve their base URL from the registry in the provider constructor.
-        if name:
+            base = p.api_base
+        elif name:
             spec = find_by_name(name)
             if spec and (spec.is_gateway or spec.is_local) and spec.default_api_base:
-                return spec.default_api_base
-        return None
+                base = spec.default_api_base
+        if base and name:
+            spec = find_by_name(name)
+            default = spec.default_api_base.rstrip("/") if spec and spec.default_api_base else ""
+            if spec and spec.is_local and default.endswith("/v1"):
+                normalized = base.rstrip("/")
+                if not normalized.endswith("/v1"):
+                    base = f"{normalized}/v1"
+        return base
 
     model_config = ConfigDict(env_prefix="NANOBOT_", env_nested_delimiter="__")

@@ -27,6 +27,7 @@
   const layoutEl = document.getElementById("kb-layout");
   const sidebarEl = document.getElementById("kb-sidebar");
   const sidebarToggle = document.getElementById("kb-sidebar-toggle");
+  const sidebarExpand = document.getElementById("kb-sidebar-expand");
 
   const SIDEBAR_COLLAPSED_KEY = "krabobot_web_sidebar_collapsed";
 
@@ -1111,14 +1112,21 @@
   }
 
   function applySidebarCollapsed(collapsed) {
-    if (!layoutEl || !sidebarToggle || !sidebarEl) {
+    if (!layoutEl || !sidebarEl) {
       return;
     }
     layoutEl.classList.toggle("kb-layout--sidebar-collapsed", collapsed);
-    sidebarToggle.setAttribute("aria-expanded", String(!collapsed));
     const expand = collapsed ? "Развернуть список диалогов" : "Свернуть список диалогов";
-    sidebarToggle.setAttribute("aria-label", expand);
-    sidebarToggle.title = expand;
+    if (sidebarToggle) {
+      sidebarToggle.setAttribute("aria-expanded", String(!collapsed));
+      sidebarToggle.setAttribute("aria-label", expand);
+      sidebarToggle.title = expand;
+      sidebarToggle.hidden = collapsed;
+    }
+    if (sidebarExpand) {
+      sidebarExpand.hidden = !collapsed;
+      sidebarExpand.setAttribute("aria-expanded", String(!collapsed));
+    }
     sidebarEl.setAttribute("aria-hidden", collapsed ? "true" : "false");
     try {
       localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? "1" : "0");
@@ -1127,7 +1135,7 @@
     }
   }
 
-  if (layoutEl && sidebarToggle && sidebarEl) {
+  if (layoutEl && sidebarEl) {
     try {
       if (localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1") {
         applySidebarCollapsed(true);
@@ -1135,11 +1143,16 @@
     } catch (_e) {
       /* ignore */
     }
-    sidebarToggle.addEventListener("click", () => {
-      applySidebarCollapsed(
-        !layoutEl.classList.contains("kb-layout--sidebar-collapsed"),
-      );
-    });
+    if (sidebarToggle) {
+      sidebarToggle.addEventListener("click", () => {
+        applySidebarCollapsed(true);
+      });
+    }
+    if (sidebarExpand) {
+      sidebarExpand.addEventListener("click", () => {
+        applySidebarCollapsed(false);
+      });
+    }
   }
 
   function renderSessionList(rows, currentId) {
@@ -1370,6 +1383,11 @@
     if (e.key === "Escape") {
       closeMenu();
       closeCmdMenu();
+      return;
+    }
+    if (e.key === "Enter" && !e.shiftKey && e.target === inputEl) {
+      e.preventDefault();
+      formEl.requestSubmit();
     }
   });
 

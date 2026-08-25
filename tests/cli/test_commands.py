@@ -66,6 +66,7 @@ def test_onboard_fresh_install(mock_paths):
     assert "Created config" in result.stdout
     assert "Created workspace" in result.stdout
     assert "krabobot is ready" in result.stdout
+    assert "Ollama" in result.stdout
     assert config_file.exists()
     assert (workspace_dir / "AGENTS.md").exists()
     assert (workspace_dir / "memory" / "MEMORY.md").exists()
@@ -198,15 +199,21 @@ def test_onboard_wizard_preserves_explicit_config_in_next_steps(tmp_path, monkey
     assert f"krabobot gateway --config {resolved_config}" in compact_output
 
 
+@pytest.mark.skip(reason="github_copilot provider removed from registry")
 def test_config_matches_github_copilot_codex_with_hyphen_prefix():
     config = Config()
+    config.agents.defaults.provider = "auto"
+    config.providers.ollama.api_base = None
     config.agents.defaults.model = "github-copilot/gpt-5.3-codex"
 
     assert config.get_provider_name() == "github_copilot"
 
 
+@pytest.mark.skip(reason="openai_codex provider removed from registry")
 def test_config_matches_openai_codex_with_hyphen_prefix():
     config = Config()
+    config.agents.defaults.provider = "auto"
+    config.providers.ollama.api_base = None
     config.agents.defaults.model = "openai-codex/gpt-5.1-codex"
 
     assert config.get_provider_name() == "openai_codex"
@@ -238,6 +245,41 @@ def test_config_explicit_ollama_provider_uses_default_localhost_api_base():
     assert config.get_api_base() == "http://localhost:11434/v1"
 
 
+def test_config_defaults_use_ollama_without_api_key():
+    config = Config()
+
+    assert config.agents.defaults.provider == "ollama"
+    assert config.agents.defaults.model == "gemma4:cloud"
+    assert config.get_provider_name() == "ollama"
+    assert config.get_api_base() == "http://localhost:11434/v1"
+
+
+def test_make_provider_accepts_default_ollama_config_without_api_key():
+    config = Config()
+
+    with patch("krabobot.providers.openai_compat_provider.AsyncOpenAI") as mock_async_openai:
+        provider = _make_provider(config)
+
+    kwargs = mock_async_openai.call_args.kwargs
+    assert kwargs["api_key"] == "no-key"
+    assert kwargs["base_url"] == "http://localhost:11434/v1"
+    assert provider.get_default_model() == "gemma4:cloud"
+
+
+def test_config_ollama_api_base_without_v1_suffix_is_normalized():
+    config = Config.model_validate(
+        {
+            "agents": {"defaults": {"provider": "ollama", "model": "gemma4:cloud"}},
+            "providers": {
+                "ollama": {"apiBase": "http://ollama-host:11434"},
+            },
+        }
+    )
+
+    assert config.get_api_base() == "http://ollama-host:11434/v1"
+
+
+@pytest.mark.skip(reason="volcengine_coding_plan provider removed from registry")
 def test_config_accepts_camel_case_explicit_provider_name_for_coding_plan():
     config = Config.model_validate(
         {
@@ -259,6 +301,7 @@ def test_config_accepts_camel_case_explicit_provider_name_for_coding_plan():
     assert config.get_api_base() == "https://ark.cn-beijing.volces.com/api/coding/v3"
 
 
+@pytest.mark.skip(reason="volcengine_coding_plan provider removed from registry")
 def test_find_by_name_accepts_camel_case_and_hyphen_aliases():
     assert find_by_name("volcengineCodingPlan") is not None
     assert find_by_name("volcengineCodingPlan").name == "volcengine_coding_plan"
@@ -293,6 +336,7 @@ def test_config_prefers_ollama_over_vllm_when_both_local_providers_configured():
     assert config.get_api_base() == "http://localhost:11434/v1"
 
 
+@pytest.mark.skip(reason="vllm provider removed from registry")
 def test_config_falls_back_to_vllm_when_ollama_not_configured():
     config = Config.model_validate(
         {

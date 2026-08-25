@@ -59,6 +59,8 @@ Windows (PowerShell из корня репозитория): `.\scripts\install.
 
 ## Первый запуск
 
+По умолчанию после `krabobot onboard` используется **Ollama** на `localhost:11434` и модель **`gemma4:cloud`**. Облачные модели Ollama требуют установленного Ollama и входа: `ollama signin`. Отдельный API-ключ в `config.json` не нужен.
+
 ```bash
 krabobot onboard
 krabobot gateway

@@ -282,6 +282,7 @@ def onboard(
             console.print("  [bold]N[/bold] = refresh config, keeping existing values and adding new fields")
             if typer.confirm("Overwrite?"):
                 config = _apply_workspace_override(Config())
+                _ensure_local_provider_defaults(config)
                 save_config(config, config_path)
                 console.print(f"[green]✓[/green] Config reset to defaults at {config_path}")
             else:
@@ -290,6 +291,7 @@ def onboard(
                 console.print(f"[green]✓[/green] Config refreshed at {config_path} (existing values preserved)")
     else:
         config = _apply_workspace_override(Config())
+        _ensure_local_provider_defaults(config)
         # In wizard mode, don't save yet - the wizard will handle saving if should_save=True
         if not wizard:
             save_config(config, config_path)
@@ -306,6 +308,7 @@ def onboard(
                 return
 
             config = result.config
+            _ensure_local_provider_defaults(config)
             save_config(config, config_path)
             console.print(f"[green]✓[/green] Config saved at {config_path}")
         except Exception as e:
@@ -336,8 +339,8 @@ def onboard(
         console.print(f"  1. Chat: [cyan]{agent_cmd}[/cyan]")
         console.print(f"  2. Start gateway: [cyan]{gateway_cmd}[/cyan]")
     else:
-        console.print(f"  1. Add your API key to [cyan]{config_path}[/cyan]")
-        console.print("     Get one at: https://openrouter.ai/keys")
+        console.print("  1. Install [bold]Ollama[/bold] (https://ollama.com) if not already running")
+        console.print("     Cloud model gemma4:cloud needs: [cyan]ollama signin[/cyan]")
         console.print(f"  2. Chat: [cyan]{agent_cmd}[/cyan]")
     console.print("\n[dim]Want chat channels? See: https://github.com/andretisch/krabobot[/dim]")
 
@@ -520,6 +523,18 @@ def _merge_missing_defaults(existing: Any, defaults: Any) -> Any:
         else:
             merged[key] = _merge_missing_defaults(merged[key], value)
     return merged
+
+
+def _ensure_local_provider_defaults(config: Config) -> None:
+    """Populate api_base for local providers when missing (clearer first-run config.json)."""
+    from krabobot.providers.registry import find_by_name
+
+    spec = find_by_name(config.agents.defaults.provider)
+    if not (spec and spec.is_local and spec.default_api_base):
+        return
+    provider_config = getattr(config.providers, spec.name, None)
+    if provider_config and not provider_config.api_base:
+        provider_config.api_base = spec.default_api_base
 
 
 def _onboard_channels(config_path: Path) -> None:

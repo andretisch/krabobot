@@ -24,4 +24,6 @@ nano.*.save
 .DS_Store
 uv.lock
 .cursor/
+# Cursor agent instructions
+AGENTS.md
 *.tar.gz
