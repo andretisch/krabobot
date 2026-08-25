@@ -122,6 +122,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         is_local=True,
         detect_by_base_keyword="11434",
         default_api_base="http://localhost:11434/v1",
+        # Cloud: set apiBase to https://ollama.com and apiKey (or OLLAMA_API_KEY).
     ),
 )
 

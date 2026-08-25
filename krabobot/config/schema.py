@@ -235,6 +235,8 @@ class Config(BaseSettings):
         # provider-specific keywords (for example plain "llama3.2" on Ollama).
         # Prefer providers whose detect_by_base_keyword matches the configured api_base
         # (e.g. Ollama's "11434" in "http://localhost:11434") over plain registry order.
+        from krabobot.providers.ollama_provider import is_ollama_cloud_base
+
         local_fallback: tuple[ProviderConfig, str] | None = None
         for spec in PROVIDERS:
             if not spec.is_local:
@@ -242,6 +244,8 @@ class Config(BaseSettings):
             p = getattr(self.providers, spec.name, None)
             if not (p and p.api_base):
                 continue
+            if spec.name == "ollama" and is_ollama_cloud_base(p.api_base):
+                return p, spec.name
             if spec.detect_by_base_keyword and spec.detect_by_base_keyword in p.api_base:
                 return p, spec.name
             if local_fallback is None:
@@ -287,9 +291,11 @@ class Config(BaseSettings):
             if spec and (spec.is_gateway or spec.is_local) and spec.default_api_base:
                 base = spec.default_api_base
         if base and name:
+            from krabobot.providers.ollama_provider import is_ollama_cloud_base
+
             spec = find_by_name(name)
             default = spec.default_api_base.rstrip("/") if spec and spec.default_api_base else ""
-            if spec and spec.is_local and default.endswith("/v1"):
+            if spec and spec.is_local and default.endswith("/v1") and not is_ollama_cloud_base(base):
                 normalized = base.rstrip("/")
                 if not normalized.endswith("/v1"):
                     base = f"{normalized}/v1"

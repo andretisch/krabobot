@@ -114,35 +114,6 @@ class Nanobot:
 
 def _make_provider(config: Any) -> Any:
     """Create the LLM provider from config (extracted from CLI)."""
-    from krabobot.providers.base import GenerationSettings
-    from krabobot.providers.registry import find_by_name
+    from krabobot.providers.factory import make_provider
 
-    model = config.agents.defaults.model
-    provider_name = config.get_provider_name(model)
-    p = config.get_provider(model)
-    spec = find_by_name(provider_name) if provider_name else None
-    backend = spec.backend if spec else "openai_compat"
-
-    if backend == "openai_compat" and not model.startswith("bedrock/"):
-        needs_key = not (p and p.api_key)
-        exempt = spec and (spec.is_oauth or spec.is_local or spec.is_direct)
-        if needs_key and not exempt:
-            raise ValueError(f"No API key configured for provider '{provider_name}'.")
-
-    from krabobot.providers.openai_compat_provider import OpenAICompatProvider
-
-    provider = OpenAICompatProvider(
-        api_key=p.api_key if p else None,
-        api_base=config.get_api_base(model),
-        default_model=model,
-        extra_headers=p.extra_headers if p else None,
-        spec=spec,
-    )
-
-    defaults = config.agents.defaults
-    provider.generation = GenerationSettings(
-        temperature=defaults.temperature,
-        max_tokens=defaults.max_tokens,
-        reasoning_effort=defaults.reasoning_effort,
-    )
-    return provider
+    return make_provider(config)

@@ -562,48 +562,16 @@ def _onboard_channels(config_path: Path) -> None:
 
 
 def _make_provider(config: Config):
-    """Create the appropriate LLM provider from config.
+    """Create the appropriate LLM provider from config."""
+    from krabobot.providers.factory import make_provider
 
-    Routing is driven by ``ProviderSpec.backend`` in the registry.
-    """
-    from dataclasses import replace
-
-    from krabobot.providers.base import GenerationSettings
-    from krabobot.providers.registry import find_by_name
-
-    model = config.agents.defaults.model
-    provider_name = config.get_provider_name(model)
-    p = config.get_provider(model)
-    spec = find_by_name(provider_name) if provider_name else None
-    if spec and p and getattr(p, "use_max_completion_tokens", False):
-        spec = replace(spec, supports_max_completion_tokens=True)
-    backend = spec.backend if spec else "openai_compat"
-
-    # --- validation ---
-    if backend == "openai_compat" and not model.startswith("bedrock/"):
-        needs_key = not (p and p.api_key)
-        exempt = spec and (spec.is_oauth or spec.is_local or spec.is_direct)
-        if needs_key and not exempt:
-            console.print("[red]Error: No API key configured.[/red]")
+    try:
+        return make_provider(config)
+    except ValueError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        if "API key" in str(exc):
             console.print("Set one in ~/.krabobot/config.json under providers section")
-            raise typer.Exit(1)
-
-    from krabobot.providers.openai_compat_provider import OpenAICompatProvider
-    provider = OpenAICompatProvider(
-        api_key=p.api_key if p else None,
-        api_base=config.get_api_base(model),
-        default_model=model,
-        extra_headers=p.extra_headers if p else None,
-        spec=spec,
-    )
-
-    defaults = config.agents.defaults
-    provider.generation = GenerationSettings(
-        temperature=defaults.temperature,
-        max_tokens=defaults.max_tokens,
-        reasoning_effort=defaults.reasoning_effort,
-    )
-    return provider
+        raise typer.Exit(1) from exc
 
 
 def _load_runtime_config(config: str | None = None, workspace: str | None = None) -> Config:
