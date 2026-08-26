@@ -64,7 +64,7 @@ Windows (PowerShell из корня репозитория): `.\scripts\install.
 1. Если на `localhost:11434` отвечает локальный Ollama — используется он (ключ не нужен).
 2. Если локального демона нет — запросы идут в **Ollama Cloud** (`https://ollama.com`); нужен API-ключ в `providers.ollama.apiKey` или переменная `OLLAMA_API_KEY`.
 
-Явный `providers.ollama.apiBase` в `config.json` отключает автоопределение (например, удалённый Ollama или только cloud).
+Явный `providers.ollama.apiBase` в `config.json` отключает автоопределение: `http://127.0.0.1:11434`, другой хост с демоном Ollama или `https://ollama.com` для только cloud.
 
 ```json
 {
@@ -77,7 +77,9 @@ Windows (PowerShell из корня репозитория): `.\scripts\install.
 }
 ```
 
-Ключ создаётся на [ollama.com/settings/keys](https://ollama.com/settings/keys). Для облачных моделей через локальный Ollama достаточно `ollama signin`.
+Ключ создаётся на [ollama.com/settings/keys](https://ollama.com/settings/keys). Облачные модели в Ollama помечаются суффиксом `-cloud` (например `gemma4:cloud`) и требуют аккаунта Ollama по [документации](https://github.com/ollama/ollama/blob/main/docs/api.md). Через локальный демон для cloud-моделей достаточно `ollama signin`; для прямого доступа к API cloud — ключ выше.
+
+Krabobot использует Python-пакет `ollama` (ставится с `pip install -e .`) как клиент к API; для локального режима по-прежнему нужен установленный и запущенный **демон** Ollama, а не только пакет из pip.
 
 ```bash
 krabobot onboard
