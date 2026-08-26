@@ -768,7 +768,7 @@ class AgentLoop:
         current_message: str | list[dict[str, Any]] = msg.content
         if linked_accounts:
             links_block = (
-                "[Linked Accounts]\n"
+                f"{self._LINKED_ACCOUNTS_TAG}\n"
                 f"user_id: {msg.user_id}\n"
                 f"accounts: {', '.join(linked_accounts)}"
             )
@@ -870,6 +870,24 @@ class AgentLoop:
             logger.warning("Failed to load TTS preference for {}: {}", msg.user_id, exc)
             return False
 
+    _LINKED_ACCOUNTS_TAG = "[Linked Accounts]"
+
+    @staticmethod
+    def _strip_linked_accounts(text: str) -> str:
+        """Remove linked-accounts prefix injected for the LLM from persisted user text."""
+        if not text.startswith(AgentLoop._LINKED_ACCOUNTS_TAG):
+            return text
+        parts = text.split("\n\n", 1)
+        return parts[1] if len(parts) > 1 else ""
+
+    @staticmethod
+    def _clean_user_text_for_persist(text: str) -> str:
+        """Strip runtime and linked-account prefixes before writing user messages to session."""
+        if text.startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
+            parts = text.split("\n\n", 1)
+            text = parts[1] if len(parts) > 1 else ""
+        return AgentLoop._strip_linked_accounts(text)
+
     @staticmethod
     def _image_placeholder(block: dict[str, Any]) -> dict[str, str]:
         """Convert an inline image block into a compact text placeholder."""
@@ -910,7 +928,9 @@ class AgentLoop:
                 continue
 
             if block.get("type") == "text" and isinstance(block.get("text"), str):
-                text = block["text"]
+                text = self._strip_linked_accounts(block["text"])
+                if not text.strip():
+                    continue
                 if truncate_text and len(text) > self._TOOL_RESULT_MAX_CHARS:
                     text = text[:self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
                 filtered.append({**block, "text": text})
@@ -937,14 +957,12 @@ class AgentLoop:
                         continue
                     entry["content"] = filtered
             elif role == "user":
-                if isinstance(content, str) and content.startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
-                    # Strip the runtime-context prefix, keep only the user text.
-                    parts = content.split("\n\n", 1)
-                    if len(parts) > 1 and parts[1].strip():
-                        entry["content"] = parts[1]
-                    else:
+                if isinstance(content, str):
+                    cleaned = self._clean_user_text_for_persist(content)
+                    if not cleaned.strip():
                         continue
-                if isinstance(content, list):
+                    entry["content"] = cleaned
+                elif isinstance(content, list):
                     filtered = self._sanitize_persisted_blocks(content, drop_runtime=True)
                     if not filtered:
                         continue

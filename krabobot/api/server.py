@@ -20,6 +20,8 @@ from aiohttp import web
 from loguru import logger
 from pydantic import ValidationError
 
+from krabobot.agent.context import ContextBuilder
+from krabobot.agent.loop import AgentLoop
 from krabobot.api.web_config import (
     build_web_config_payload,
     list_config_backups,
@@ -337,10 +339,18 @@ def _persist_web_uploads(
     return user_text, []
 
 
+def _strip_stored_user_text(text: str) -> str:
+    """Hide LLM-only prefixes from session history shown in the web UI."""
+    if text.startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
+        parts = text.split("\n\n", 1)
+        text = parts[1] if len(parts) > 1 else ""
+    return AgentLoop._strip_linked_accounts(text)
+
+
 def _ui_text_from_stored_content(content: Any) -> str:
     """Session history → plain text for the web UI."""
     if isinstance(content, str):
-        return content
+        return _strip_stored_user_text(content)
     if not isinstance(content, list):
         return str(content)
     lines: list[str] = []
@@ -349,7 +359,7 @@ def _ui_text_from_stored_content(content: Any) -> str:
             continue
         t = b.get("type")
         if t in ("text", "input_text"):
-            lines.append(str(b.get("text", "")))
+            lines.append(_strip_stored_user_text(str(b.get("text", ""))))
         elif t == "image_url":
             lines.append("[изображение]")
         elif t == "input_audio":

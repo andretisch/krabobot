@@ -27,3 +27,6 @@ uv.lock
 # Cursor agent instructions
 AGENTS.md
 *.tar.gz
+
+# Local blog drafts
+blog/

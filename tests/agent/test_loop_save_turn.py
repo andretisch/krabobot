@@ -72,3 +72,54 @@ def test_save_turn_keeps_tool_results_under_16k() -> None:
     )
 
     assert session.messages[0]["content"] == content
+
+
+def test_save_turn_strips_linked_accounts_from_string_user_message() -> None:
+    loop = _mk_loop()
+    session = Session(key="test:linked-str")
+    runtime = ContextBuilder._RUNTIME_CONTEXT_TAG + "\nCurrent Time: now (UTC)"
+    linked = (
+        "[Linked Accounts]\n"
+        "user_id: u1\n"
+        "accounts: telegram:123, vk:456"
+    )
+    user_text = "Hello from user"
+
+    loop._save_turn(
+        session,
+        [{"role": "user", "content": f"{runtime}\n\n{linked}\n\n{user_text}"}],
+        skip=0,
+    )
+    assert session.messages[0]["content"] == user_text
+
+
+def test_save_turn_strips_linked_accounts_from_multimodal_user_message() -> None:
+    loop = _mk_loop()
+    session = Session(key="test:linked-mm")
+    runtime = ContextBuilder._RUNTIME_CONTEXT_TAG + "\nCurrent Time: now (UTC)"
+    linked = (
+        "[Linked Accounts]\n"
+        "user_id: u1\n"
+        "accounts: telegram:123"
+    )
+    user_text = "What is in this photo?"
+
+    loop._save_turn(
+        session,
+        [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": runtime},
+                {
+                    "type": "text",
+                    "text": f"{linked}\n\n{user_text}",
+                },
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}, "_meta": {"path": "/media/photo.jpg"}},
+            ],
+        }],
+        skip=0,
+    )
+    assert session.messages[0]["content"] == [
+        {"type": "text", "text": user_text},
+        {"type": "text", "text": "[image: /media/photo.jpg]"},
+    ]
