@@ -45,7 +45,7 @@
     {
       icon: "🤖",
       title: "Любой LLM",
-      text: "OpenAI-compatible провайдеры: custom, OpenRouter, ProxyAPI, Ollama и другие из config.json.",
+      text: "По умолчанию Ollama (локально или cloud). Также OpenAI-compatible: custom, OpenRouter и другие из config.json.",
     },
   ];
 
