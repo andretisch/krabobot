@@ -7,11 +7,9 @@ import re
 from pathlib import Path
 from typing import Any
 
-from krabobot.utils.helpers import current_time_str
-
 from krabobot.agent.memory import MemoryStore
 from krabobot.agent.skills import SkillsLoader
-from krabobot.utils.helpers import build_assistant_message, detect_image_mime
+from krabobot.utils.helpers import build_assistant_message, current_time_str, detect_image_mime
 
 
 class ContextBuilder:
@@ -20,9 +18,16 @@ class ContextBuilder:
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
 
-    def __init__(self, workspace: Path, timezone: str | None = None):
+    def __init__(
+        self,
+        workspace: Path,
+        timezone: str | None = None,
+        *,
+        anonymize: bool = False,
+    ):
         self.workspace = workspace
         self.timezone = timezone
+        self.anonymize = anonymize
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
 
@@ -74,7 +79,7 @@ Skills with available="false" need dependencies installed first - you can try in
 - Use file tools when they are simpler or more reliable than shell commands.
 """
 
-        return f"""# krabobot 🦀
+        identity = f"""# krabobot 🦀
 
 You are krabobot, a helpful AI assistant.
 
@@ -100,6 +105,12 @@ Your workspace is at: {workspace_path}
 - You can see and analyze images. When the user sends photos or screenshots, describe, interpret, or answer questions about them directly.
 Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel.
 IMPORTANT: To send files (images, documents, audio, video) to the user, you MUST call the 'message' tool with the 'media' parameter. Do NOT use read_file to "send" a file — reading a file only shows its content to you, it does NOT deliver the file to the user. Example: message(content="Here is the file", media=["/path/to/file.png"])"""
+        if self.anonymize:
+            identity += (
+                "\n- Placeholders like [PHONE-00001] or [ORG-00002] are intentional PII "
+                "redactions; treat them as opaque IDs and never invent real values for them."
+            )
+        return identity
 
     @staticmethod
     def _build_runtime_context(

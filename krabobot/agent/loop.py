@@ -16,10 +16,10 @@ from loguru import logger
 from krabobot.agent.context import ContextBuilder
 from krabobot.agent.hook import AgentHook, AgentHookContext, CompositeHook
 from krabobot.agent.memory import MemoryConsolidator
-from krabobot.agent.runner import AgentRunSpec, AgentRunner
+from krabobot.agent.runner import AgentRunner, AgentRunSpec
+from krabobot.agent.skills import BUILTIN_SKILLS_DIR
 from krabobot.agent.subagent import SubagentManager
 from krabobot.agent.tools.cron import CronTool
-from krabobot.agent.skills import BUILTIN_SKILLS_DIR
 from krabobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from krabobot.agent.tools.message import MessageTool
 from krabobot.agent.tools.registry import ToolRegistry
@@ -27,8 +27,8 @@ from krabobot.agent.tools.shell import ExecTool
 from krabobot.agent.tools.spawn import SpawnTool
 from krabobot.agent.tools.web import WebFetchTool, WebSearchTool
 from krabobot.bus.events import InboundMessage, OutboundMessage
-from krabobot.command import CommandContext, CommandRouter, register_builtin_commands
 from krabobot.bus.queue import MessageBus
+from krabobot.command import CommandContext, CommandRouter, register_builtin_commands
 from krabobot.providers.base import LLMProvider
 from krabobot.session.manager import Session, SessionManager
 from krabobot.users import UserResolver
@@ -200,6 +200,7 @@ class AgentLoop:
         channels_config: ChannelsConfig | None = None,
         multi_user_config: Any | None = None,
         short_memory: bool = False,
+        anonymize: bool = True,
         timezone: str | None = None,
         hooks: list[AgentHook] | None = None,
     ):
@@ -218,6 +219,8 @@ class AgentLoop:
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
         self.short_memory = short_memory
+        self.anonymize = anonymize
+        self._turn_token_map = None
         self._start_time = time.time()
         self._last_usage: dict[str, int] = {}
         self._extra_hooks: list[AgentHook] = hooks or []
@@ -274,7 +277,7 @@ class AgentLoop:
         short_memory: bool,
         user_id: str | None,
     ) -> AgentRuntime:
-        context = ContextBuilder(workspace, timezone=self.timezone)
+        context = ContextBuilder(workspace, timezone=self.timezone, anonymize=self.anonymize)
         tools = ToolRegistry()
         subagents = SubagentManager(
             provider=self.provider,
@@ -341,6 +344,9 @@ class AgentLoop:
         This lets the tool report delivery blockers back to the model/user
         instead of silently queueing messages that channels will later skip.
         """
+        if self._turn_token_map is not None and isinstance(msg.content, str):
+            msg.content = self._turn_token_map.decode(msg.content)
+
         channel = (msg.channel or "").strip().lower()
         if channel in {"", "cli", "system"}:
             await self.bus.publish_outbound(msg)
@@ -507,6 +513,24 @@ class AgentLoop:
         ``resuming=True`` means tool calls follow (spinner should restart);
         ``resuming=False`` means this is the final response.
         """
+        from krabobot.agent.anonymize import TokenMap, anonymize_messages, decode_messages
+
+        messages = initial_messages
+        token_map: TokenMap | None = None
+        if self.anonymize:
+            token_map = TokenMap()
+            messages = anonymize_messages(initial_messages, token_map)
+            if token_map.token_to_original:
+                logger.info(
+                    "PII anonymize: masked {} span(s) toward LLM ({})",
+                    len(token_map.token_to_original),
+                    ", ".join(sorted({t.split("-")[0].strip("[]") for t in token_map.token_to_original})),
+                )
+            # Streaming would leak tokenized fragments before decode.
+            on_stream = None
+            on_stream_end = None
+            self._turn_token_map = token_map
+
         loop_hook = _LoopHook(
             self,
             runtime,
@@ -524,21 +548,32 @@ class AgentLoop:
             else loop_hook
         )
 
-        result = await self.runner.run(AgentRunSpec(
-            initial_messages=initial_messages,
-            tools=runtime.tools,
-            model=self.model,
-            max_iterations=self.max_iterations,
-            hook=hook,
-            error_message="Sorry, I encountered an error calling the AI model.",
-            concurrent_tools=True,
-        ))
+        try:
+            result = await self.runner.run(AgentRunSpec(
+                initial_messages=messages,
+                tools=runtime.tools,
+                model=self.model,
+                max_iterations=self.max_iterations,
+                hook=hook,
+                error_message="Sorry, I encountered an error calling the AI model.",
+                concurrent_tools=True,
+            ))
+        finally:
+            self._turn_token_map = None
+
         self._last_usage = result.usage
         if result.stop_reason == "max_iterations":
             logger.warning("Max iterations ({}) reached", self.max_iterations)
         elif result.stop_reason == "error":
             logger.error("LLM returned error: {}", (result.final_content or "")[:200])
-        return result.final_content, result.tools_used, result.messages
+
+        final_content = result.final_content
+        saved_messages = result.messages
+        if token_map is not None:
+            if final_content:
+                final_content = token_map.decode(final_content)
+            saved_messages = decode_messages(saved_messages, token_map)
+        return final_content, result.tools_used, saved_messages
 
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""

@@ -668,6 +668,8 @@ def serve(
         mcp_servers=runtime_config.tools.mcp_servers,
         channels_config=runtime_config.channels,
         multi_user_config=runtime_config.tools.multi_user,
+        short_memory=runtime_config.agents.defaults.short_memory,
+        anonymize=runtime_config.agents.defaults.anonymize,
         timezone=runtime_config.agents.defaults.timezone,
     )
 
@@ -758,6 +760,7 @@ def gateway(
         channels_config=config.channels,
         multi_user_config=config.tools.multi_user,
         short_memory=config.agents.defaults.short_memory,
+        anonymize=config.agents.defaults.anonymize,
         timezone=config.agents.defaults.timezone,
     )
 
@@ -982,6 +985,7 @@ def agent(
         channels_config=config.channels,
         multi_user_config=config.tools.multi_user,
         short_memory=config.agents.defaults.short_memory,
+        anonymize=config.agents.defaults.anonymize,
         timezone=config.agents.defaults.timezone,
     )
 

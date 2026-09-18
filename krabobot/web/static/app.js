@@ -139,13 +139,15 @@
     statusEl.textContent = text || "";
   }
 
-  const KB_CFG_AGENT_ORDER = ["model", "provider", "workspace"];
+  const KB_CFG_AGENT_ORDER = ["model", "provider", "workspace", "anonymize", "shortMemory"];
 
   /** @type {Record<string,string>} */
   const KB_CFG_HINTS = {
     sendProgress: "Стриминг текста ответа в канал",
     sendToolHints: "Показывать вызовы инструментов",
     sendMaxRetries: "Повторы доставки в канал",
+    anonymize: "Анонимизация PII перед отправкой в LLM",
+    shortMemory: "Краткая память (только отмеченные факты)",
   };
 
   /** @type {Record<string,string>} */

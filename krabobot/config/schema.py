@@ -39,6 +39,7 @@ class AgentDefaults(Base):
     temperature: float = 0.1
     max_tool_iterations: int = 40
     short_memory: bool = False  # If true, persist only user-marked important facts in concise form
+    anonymize: bool = True  # Mask PII toward the LLM only (session/UI keep plaintext)
     reasoning_effort: str | None = None  # low / medium / high - enables LLM thinking mode
     timezone: str = "UTC"  # IANA timezone, e.g. "Asia/Shanghai", "America/New_York"
 
