@@ -84,14 +84,16 @@ Krabobot использует Python-пакет `ollama` (ставится с `p
 
 ```bash
 krabobot onboard
-krabobot gateway
+krabobot serve
 ```
+
+`krabobot serve` поднимает HTTP API/веб-UI и тот же стек каналов, что и `krabobot gateway` (один общий AgentLoop). Для каналов без API по-прежнему можно запускать только `krabobot gateway`.
 
 Полезно:
 
 ```bash
 krabobot agent
-krabobot serve
+krabobot gateway
 krabobot --help
 ```
 
@@ -197,7 +199,7 @@ Cron и сессии хранятся **только** в `workspace/` (или �
 
 **Настраивается в `config.json`, не хранится в `.krabobot` как текст контекста:**
 
-- Каналы (`telegram`, `vk`, `email`) — подключаются при `krabobot gateway`.
+- Каналы (`telegram`, `vk`, `email`) — подключаются при `krabobot serve` или `krabobot gateway`.
 - MCP-серверы (`tools.mcpServers`) — ленивое подключение при первом сообщении, инструменты регистрируются в рантайме.
 - Провайдер LLM, STT/TTS, веб-поиск — влияют на поведение, но не копируются в промпт целиком.
 

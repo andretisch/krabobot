@@ -1,5 +1,6 @@
 import json
 import re
+import shutil
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,11 +17,6 @@ runner = CliRunner()
 
 class _StopGatewayError(RuntimeError):
     pass
-
-
-import shutil
-
-import pytest
 
 
 @pytest.fixture
@@ -627,8 +623,16 @@ def _patch_cli_command_runtime(
     if cron_service is not None:
         monkeypatch.setattr("krabobot.cron.service.CronService", cron_service)
 
-def _patch_serve_runtime(monkeypatch, config: Config, seen: dict[str, object]) -> None:
+def _patch_serve_runtime(
+    monkeypatch,
+    config: Config,
+    seen: dict[str, object],
+    *,
+    enabled_channels: list[str] | None = None,
+) -> None:
     pytest.importorskip("aiohttp")
+
+    from krabobot.cli.commands import _GatewayRuntime
 
     class _FakeApiApp:
         def __init__(self) -> None:
@@ -636,14 +640,55 @@ def _patch_serve_runtime(monkeypatch, config: Config, seen: dict[str, object]) -
             self.on_cleanup: list[object] = []
 
     class _FakeAgentLoop:
-        def __init__(self, **kwargs) -> None:
-            seen["workspace"] = kwargs["workspace"]
+        async def run(self) -> None:
+            seen["agent_run"] = True
 
-        async def _connect_mcp(self) -> None:
-            return None
+        def stop(self) -> None:
+            seen["agent_stop"] = True
 
         async def close_mcp(self) -> None:
             return None
+
+    class _FakeChannels:
+        def __init__(self) -> None:
+            self.enabled_channels = list(enabled_channels or [])
+
+        async def start_all(self) -> None:
+            seen["channels_started"] = list(self.enabled_channels)
+
+        async def stop_all(self) -> None:
+            seen["channels_stopped"] = True
+
+    class _FakeCron:
+        def status(self) -> dict[str, int]:
+            return {"jobs": 0}
+
+        async def start(self) -> None:
+            seen["cron_started"] = True
+
+        def stop(self) -> None:
+            return None
+
+    class _FakeHeartbeat:
+        async def start(self) -> None:
+            seen["heartbeat_started"] = True
+
+        def stop(self) -> None:
+            return None
+
+    def _fake_build(runtime_config: Config) -> _GatewayRuntime:
+        seen["workspace"] = runtime_config.workspace_path
+        agent = _FakeAgentLoop()
+        return _GatewayRuntime(
+            config=runtime_config,
+            bus=object(),
+            provider=object(),
+            session_manager=object(),
+            agent=agent,
+            cron=_FakeCron(),
+            channels=_FakeChannels(),
+            heartbeat=_FakeHeartbeat(),
+        )
 
     def _fake_create_app(agent_loop, model_name: str, request_timeout: float):
         seen["agent_loop"] = agent_loop
@@ -651,20 +696,37 @@ def _patch_serve_runtime(monkeypatch, config: Config, seen: dict[str, object]) -
         seen["request_timeout"] = request_timeout
         return _FakeApiApp()
 
-    def _fake_run_app(api_app, host: str, port: int, print):
-        seen["api_app"] = api_app
-        seen["host"] = host
-        seen["port"] = port
+    class _FakeRunner:
+        def __init__(self, api_app) -> None:
+            seen["api_app"] = api_app
 
-    _patch_cli_command_runtime(
-        monkeypatch,
-        config,
-        message_bus=lambda: object(),
-        session_manager=lambda _workspace: object(),
+        async def setup(self) -> None:
+            return None
+
+        async def cleanup(self) -> None:
+            seen["runner_cleanup"] = True
+
+    class _FakeSite:
+        def __init__(self, runner, host: str, port: int) -> None:
+            seen["host"] = host
+            seen["port"] = port
+
+        async def start(self) -> None:
+            seen["site_started"] = True
+
+    _patch_cli_command_runtime(monkeypatch, config)
+    monkeypatch.setattr(
+        "krabobot.stt.model_manager.ensure_sherpa_stt_model",
+        lambda *_a, **_k: None,
     )
-    monkeypatch.setattr("krabobot.agent.loop.AgentLoop", _FakeAgentLoop)
+    monkeypatch.setattr(
+        "krabobot.tts.model_manager.ensure_sherpa_tts_models",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr("krabobot.cli.commands._build_gateway_runtime", _fake_build)
     monkeypatch.setattr("krabobot.api.server.create_app", _fake_create_app)
-    monkeypatch.setattr("aiohttp.web.run_app", _fake_run_app)
+    monkeypatch.setattr("aiohttp.web.AppRunner", _FakeRunner)
+    monkeypatch.setattr("aiohttp.web.TCPSite", _FakeSite)
 
 
 def test_gateway_uses_workspace_from_config_by_default(monkeypatch, tmp_path: Path) -> None:
@@ -826,6 +888,45 @@ def test_serve_cli_options_override_api_config(monkeypatch, tmp_path: Path) -> N
     assert seen["host"] == "127.0.0.1"
     assert seen["port"] == 18901
     assert seen["request_timeout"] == 46.0
+
+
+def test_serve_starts_gateway_stack_when_email_enabled(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_file = _write_instance_config(tmp_path)
+    config = Config()
+    config.channels.email = {"enabled": True, "consentGranted": True}
+    seen: dict[str, object] = {}
+
+    _patch_serve_runtime(monkeypatch, config, seen, enabled_channels=["email"])
+
+    result = runner.invoke(app, ["serve", "--config", str(config_file)])
+
+    assert result.exit_code == 0
+    assert seen["agent_loop"] is not None
+    assert seen["agent_run"] is True
+    assert seen["channels_started"] == ["email"]
+    assert seen["cron_started"] is True
+    assert seen["heartbeat_started"] is True
+    assert seen["site_started"] is True
+    assert "Channels enabled: email" in result.stdout
+
+
+def test_serve_skips_channel_listeners_when_none_enabled(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_file = _write_instance_config(tmp_path)
+    config = Config()
+    seen: dict[str, object] = {}
+
+    _patch_serve_runtime(monkeypatch, config, seen, enabled_channels=[])
+
+    result = runner.invoke(app, ["serve", "--config", str(config_file)])
+
+    assert result.exit_code == 0
+    assert seen["channels_started"] == []
+    assert seen["site_started"] is True
+    assert "skipping channel listeners" in result.stdout
 
 
 def test_channels_login_requires_channel_name() -> None:

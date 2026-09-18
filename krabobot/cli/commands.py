@@ -1,13 +1,13 @@
 """CLI commands for krabobot."""
 
 import asyncio
-from contextlib import contextmanager, nullcontext
-from datetime import UTC, datetime
-
 import os
 import select
 import signal
 import sys
+from contextlib import nullcontext
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -508,7 +508,7 @@ def restore(
         console.print("\n[dim]Run without --dry-run and pass -y to apply.[/dim]")
     elif do_apply:
         console.print(
-            f"\n[green]✓[/green] Restore applied. Restart [cyan]krabobot gateway[/cyan] if it is running."
+            "\n[green]✓[/green] Restore applied. Restart [cyan]krabobot gateway[/cyan] if it is running."
         )
 
 
@@ -598,6 +598,7 @@ def _load_runtime_config(config: str | None = None, workspace: str | None = None
 def _warn_deprecated_config_keys(config_path: Path | None) -> None:
     """Hint users to remove obsolete keys from their config file."""
     import json
+
     from krabobot.config.loader import get_config_path
 
     path = config_path or get_config_path()
@@ -613,107 +614,26 @@ def _warn_deprecated_config_keys(config_path: Path | None) -> None:
 
 
 # ============================================================================
-# OpenAI-Compatible API Server
+# Shared gateway runtime (channels + cron + heartbeat + one AgentLoop)
 # ============================================================================
 
 
-@app.command()
-def serve(
-    port: int | None = typer.Option(None, "--port", "-p", help="API server port"),
-    host: str | None = typer.Option(None, "--host", "-H", help="Bind address"),
-    timeout: float | None = typer.Option(None, "--timeout", "-t", help="Per-request timeout (seconds)"),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show krabobot runtime logs"),
-    workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
-    config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
-):
-    """Start the OpenAI-compatible API server (/v1/chat/completions)."""
-    try:
-        from aiohttp import web  # noqa: F401
-    except ImportError:
-        console.print("[red]aiohttp is required. Install with: pip install 'krabobot-ai[api]'[/red]")
-        raise typer.Exit(1)
+@dataclass
+class _GatewayRuntime:
+    """Provider, agent, channels, cron, and heartbeat sharing one AgentLoop."""
 
-    from loguru import logger
-    from krabobot.agent.loop import AgentLoop
-    from krabobot.api.server import create_app
-    from krabobot.bus.queue import MessageBus
-    from krabobot.session.manager import SessionManager
-
-    if verbose:
-        logger.enable("krabobot")
-    else:
-        logger.disable("krabobot")
-
-    runtime_config = _load_runtime_config(config, workspace)
-    api_cfg = runtime_config.api
-    host = host if host is not None else api_cfg.host
-    port = port if port is not None else api_cfg.port
-    timeout = timeout if timeout is not None else api_cfg.timeout
-    sync_workspace_templates(runtime_config.workspace_path)
-    bus = MessageBus()
-    provider = _make_provider(runtime_config)
-    session_manager = SessionManager(runtime_config.workspace_path)
-    agent_loop = AgentLoop(
-        bus=bus,
-        provider=provider,
-        workspace=runtime_config.workspace_path,
-        model=runtime_config.agents.defaults.model,
-        max_iterations=runtime_config.agents.defaults.max_tool_iterations,
-        context_window_tokens=runtime_config.agents.defaults.context_window_tokens,
-        web_search_config=runtime_config.tools.web.search,
-        web_proxy=runtime_config.tools.web.proxy or None,
-        exec_config=runtime_config.tools.exec,
-        restrict_to_workspace=runtime_config.tools.restrict_to_workspace,
-        session_manager=session_manager,
-        mcp_servers=runtime_config.tools.mcp_servers,
-        channels_config=runtime_config.channels,
-        multi_user_config=runtime_config.tools.multi_user,
-        short_memory=runtime_config.agents.defaults.short_memory,
-        anonymize=runtime_config.agents.defaults.anonymize,
-        timezone=runtime_config.agents.defaults.timezone,
-    )
-
-    model_name = runtime_config.agents.defaults.model
-    console.print(f"{__logo__} Starting OpenAI-compatible API server")
-    console.print(f"  [cyan]Endpoint[/cyan] : http://{host}:{port}/v1/chat/completions")
-    console.print(f"  [cyan]Chat UI[/cyan]   : http://{host}:{port}/")
-    console.print(f"  [cyan]Model[/cyan]    : {model_name}")
-    console.print("  [cyan]Session[/cyan]  : api:default")
-    console.print(f"  [cyan]Timeout[/cyan]  : {timeout}s")
-    if host in {"0.0.0.0", "::"}:
-        console.print(
-            "[yellow]Warning:[/yellow] API is bound to all interfaces. "
-            "Only do this behind a trusted network boundary, firewall, or reverse proxy."
-        )
-    console.print()
-
-    api_app = create_app(agent_loop, model_name=model_name, request_timeout=timeout)
-
-    async def on_startup(_app):
-        await agent_loop._connect_mcp()
-
-    async def on_cleanup(_app):
-        await agent_loop.close_mcp()
-
-    api_app.on_startup.append(on_startup)
-    api_app.on_cleanup.append(on_cleanup)
-
-    web.run_app(api_app, host=host, port=port, print=lambda msg: logger.info(msg))
+    config: Config
+    bus: Any
+    provider: Any
+    session_manager: Any
+    agent: Any
+    cron: Any
+    channels: Any
+    heartbeat: Any
 
 
-# ============================================================================
-# Gateway / Server
-# ============================================================================
-
-
-@app.command()
-def gateway(
-    port: int | None = typer.Option(None, "--port", "-p", help="Gateway port"),
-    workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
-    config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
-):
-    """Start the krabobot gateway."""
+def _build_gateway_runtime(config: Config) -> _GatewayRuntime:
+    """Build the channel/gateway stack used by both ``gateway`` and ``serve``."""
     from krabobot.agent.loop import AgentLoop
     from krabobot.bus.queue import MessageBus
     from krabobot.channels.manager import ChannelManager
@@ -721,20 +641,7 @@ def gateway(
     from krabobot.cron.types import CronJob
     from krabobot.heartbeat.service import HeartbeatService
     from krabobot.session.manager import SessionManager
-    from krabobot.stt.model_manager import ensure_sherpa_stt_model
-    from krabobot.tts.model_manager import ensure_sherpa_tts_models
 
-    if verbose:
-        import logging
-        logging.basicConfig(level=logging.DEBUG)
-
-    config = _load_runtime_config(config, workspace)
-    ensure_sherpa_stt_model(config.stt)
-    ensure_sherpa_tts_models(config.tts)
-    port = port if port is not None else config.gateway.port
-
-    console.print(f"{__logo__} Starting krabobot gateway version {__version__} on port {port}...")
-    sync_workspace_templates(config.workspace_path)
     bus = MessageBus()
     provider = _make_provider(config)
     session_manager = SessionManager(config.workspace_path)
@@ -742,7 +649,6 @@ def gateway(
     cron_store_path = config.workspace_path / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
 
-    # Create agent with cron service
     agent = AgentLoop(
         bus=bus,
         provider=provider,
@@ -764,7 +670,6 @@ def gateway(
         timezone=config.agents.defaults.timezone,
     )
 
-    # Set cron callback (needs agent)
     async def on_cron_job(job: CronJob) -> str | None:
         """Execute a cron job through the agent."""
         from krabobot.agent.tools.cron import CronTool
@@ -828,15 +733,14 @@ def gateway(
                     metadata=notify_meta,
                 ))
         return response
+
     cron.on_job = on_cron_job
 
-    # Create channel manager
     channels = ChannelManager(config, bus)
 
     def _pick_heartbeat_target() -> tuple[str, str]:
         """Pick a routable channel/chat target for heartbeat-triggered messages."""
         enabled = set(channels.enabled_channels)
-        # Prefer the most recently updated non-internal session on an enabled channel.
         for item in session_manager.list_sessions():
             key = item.get("key") or ""
             if ":" not in key:
@@ -846,10 +750,8 @@ def gateway(
                 continue
             if channel in enabled and chat_id:
                 return channel, chat_id
-        # Fallback keeps prior behavior but remains explicit.
         return "cli", "direct"
 
-    # Create heartbeat service
     async def on_heartbeat_execute(tasks: str) -> str:
         """Phase 2: execute heartbeat tasks through the full agent loop."""
         channel, chat_id = _pick_heartbeat_target()
@@ -865,8 +767,6 @@ def gateway(
             on_progress=_silent,
         )
 
-        # Keep a small tail of heartbeat history so the loop stays bounded
-        # without losing all short-term context between runs.
         session = agent.sessions.get_or_create("heartbeat")
         session.retain_recent_legal_suffix(hb_cfg.keep_recent_messages)
         agent.sessions.save(session)
@@ -876,10 +776,13 @@ def gateway(
     async def on_heartbeat_notify(response: str) -> None:
         """Deliver a heartbeat response to the user's channel."""
         from krabobot.bus.events import OutboundMessage
+
         channel, chat_id = _pick_heartbeat_target()
         if channel == "cli":
-            return  # No external channel available to deliver to
-        await bus.publish_outbound(OutboundMessage(channel=channel, chat_id=chat_id, content=response))
+            return
+        await bus.publish_outbound(
+            OutboundMessage(channel=channel, chat_id=chat_id, content=response)
+        )
 
     hb_cfg = config.gateway.heartbeat
     heartbeat = HeartbeatService(
@@ -893,37 +796,184 @@ def gateway(
         timezone=config.agents.defaults.timezone,
     )
 
-    if channels.enabled_channels:
-        console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
-    else:
-        console.print("[yellow]Warning: No channels enabled[/yellow]")
+    return _GatewayRuntime(
+        config=config,
+        bus=bus,
+        provider=provider,
+        session_manager=session_manager,
+        agent=agent,
+        cron=cron,
+        channels=channels,
+        heartbeat=heartbeat,
+    )
 
-    cron_status = cron.status()
+
+def _log_gateway_status(runtime: _GatewayRuntime) -> None:
+    """Print channels / cron / heartbeat status lines."""
+    channels = runtime.channels
+    if channels.enabled_channels:
+        console.print(
+            f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}"
+        )
+    else:
+        console.print(
+            "[yellow]No channels enabled — skipping channel listeners "
+            "(API/cron/heartbeat still run)[/yellow]"
+        )
+
+    cron_status = runtime.cron.status()
     if cron_status["jobs"] > 0:
         console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
 
+    hb_cfg = runtime.config.gateway.heartbeat
     console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
+
+
+async def _run_gateway_stack(runtime: _GatewayRuntime) -> None:
+    """Start cron/heartbeat and run agent + channels until cancelled/stopped."""
+    try:
+        await runtime.cron.start()
+        await runtime.heartbeat.start()
+        await asyncio.gather(
+            runtime.agent.run(),
+            runtime.channels.start_all(),
+        )
+    finally:
+        await runtime.agent.close_mcp()
+        runtime.heartbeat.stop()
+        runtime.cron.stop()
+        runtime.agent.stop()
+        await runtime.channels.stop_all()
+
+
+# ============================================================================
+# OpenAI-Compatible API Server
+# ============================================================================
+
+
+@app.command()
+def serve(
+    port: int | None = typer.Option(None, "--port", "-p", help="API server port"),
+    host: str | None = typer.Option(None, "--host", "-H", help="Bind address"),
+    timeout: float | None = typer.Option(None, "--timeout", "-t", help="Per-request timeout (seconds)"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show krabobot runtime logs"),
+    workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+):
+    """Start API/web UI and gateway channels (shared AgentLoop)."""
+    try:
+        from aiohttp import web
+    except ImportError:
+        console.print("[red]aiohttp is required. Install with: pip install 'krabobot-ai[api]'[/red]")
+        raise typer.Exit(1)
+
+    from loguru import logger
+
+    from krabobot.api.server import create_app
+    from krabobot.stt.model_manager import ensure_sherpa_stt_model
+    from krabobot.tts.model_manager import ensure_sherpa_tts_models
+
+    if verbose:
+        logger.enable("krabobot")
+    else:
+        logger.disable("krabobot")
+
+    runtime_config = _load_runtime_config(config, workspace)
+    ensure_sherpa_stt_model(runtime_config.stt)
+    ensure_sherpa_tts_models(runtime_config.tts)
+    api_cfg = runtime_config.api
+    host = host if host is not None else api_cfg.host
+    port = port if port is not None else api_cfg.port
+    timeout = timeout if timeout is not None else api_cfg.timeout
+    sync_workspace_templates(runtime_config.workspace_path)
+
+    runtime = _build_gateway_runtime(runtime_config)
+    agent_loop = runtime.agent
+
+    model_name = runtime_config.agents.defaults.model
+    console.print(f"{__logo__} Starting OpenAI-compatible API server (+ gateway)")
+    console.print(f"  [cyan]Endpoint[/cyan] : http://{host}:{port}/v1/chat/completions")
+    console.print(f"  [cyan]Chat UI[/cyan]   : http://{host}:{port}/")
+    console.print(f"  [cyan]Model[/cyan]    : {model_name}")
+    console.print("  [cyan]Session[/cyan]  : api:default")
+    console.print(f"  [cyan]Timeout[/cyan]  : {timeout}s")
+    if host in {"0.0.0.0", "::"}:
+        console.print(
+            "[yellow]Warning:[/yellow] API is bound to all interfaces. "
+            "Only do this behind a trusted network boundary, firewall, or reverse proxy."
+        )
+    _log_gateway_status(runtime)
+    console.print()
+
+    api_app = create_app(agent_loop, model_name=model_name, request_timeout=timeout)
+
+    async def run():
+        runner = web.AppRunner(api_app)
+        await runner.setup()
+        try:
+            site = web.TCPSite(runner, host, port)
+            await site.start()
+            logger.info("API server listening on http://{}:{}", host, port)
+            try:
+                await _run_gateway_stack(runtime)
+            except KeyboardInterrupt:
+                console.print("\nShutting down...")
+            except Exception:
+                import traceback
+
+                console.print("\n[red]Error: Serve crashed unexpectedly[/red]")
+                console.print(traceback.format_exc())
+        finally:
+            await runner.cleanup()
+
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        console.print("\nShutting down...")
+
+
+# ============================================================================
+# Gateway / Server
+# ============================================================================
+
+
+@app.command()
+def gateway(
+    port: int | None = typer.Option(None, "--port", "-p", help="Gateway port"),
+    workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+):
+    """Start the krabobot gateway (channels only, no HTTP API)."""
+    from krabobot.stt.model_manager import ensure_sherpa_stt_model
+    from krabobot.tts.model_manager import ensure_sherpa_tts_models
+
+    if verbose:
+        import logging
+
+        logging.basicConfig(level=logging.DEBUG)
+
+    config = _load_runtime_config(config, workspace)
+    ensure_sherpa_stt_model(config.stt)
+    ensure_sherpa_tts_models(config.tts)
+    port = port if port is not None else config.gateway.port
+
+    console.print(f"{__logo__} Starting krabobot gateway version {__version__} on port {port}...")
+    sync_workspace_templates(config.workspace_path)
+
+    runtime = _build_gateway_runtime(config)
+    _log_gateway_status(runtime)
 
     async def run():
         try:
-            await cron.start()
-            await heartbeat.start()
-            await asyncio.gather(
-                agent.run(),
-                channels.start_all(),
-            )
+            await _run_gateway_stack(runtime)
         except KeyboardInterrupt:
             console.print("\nShutting down...")
         except Exception:
             import traceback
+
             console.print("\n[red]Error: Gateway crashed unexpectedly[/red]")
             console.print(traceback.format_exc())
-        finally:
-            await agent.close_mcp()
-            heartbeat.stop()
-            cron.stop()
-            agent.stop()
-            await channels.stop_all()
 
     asyncio.run(run())
 

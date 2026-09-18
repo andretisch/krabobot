@@ -205,6 +205,30 @@ def test_fetch_new_messages_skips_missing_mailbox(monkeypatch) -> None:
     assert channel._fetch_new_messages() == []
 
 
+def test_fetch_new_messages_skips_select_no(monkeypatch) -> None:
+    class SelectNoIMAP:
+        def login(self, _user: str, _pw: str):
+            return "OK", [b"logged in"]
+
+        def select(self, _mailbox: str):
+            return "NO", [b"[NONEXISTENT] Mailbox doesn't exist: INBOX"]
+
+        def logout(self):
+            return "BYE", [b""]
+
+    monkeypatch.setattr(
+        "krabobot.channels.email.imaplib.IMAP4_SSL",
+        lambda _h, _p: SelectNoIMAP(),
+    )
+
+    channel = EmailChannel(_make_config(), MessageBus())
+
+    assert channel._fetch_new_messages() == []
+    assert EmailChannel._format_imap_status_data(
+        [b"[NONEXISTENT] Mailbox doesn't exist: INBOX"]
+    ) == "[NONEXISTENT] Mailbox doesn't exist: INBOX"
+
+
 def test_extract_text_body_falls_back_to_html() -> None:
     msg = EmailMessage()
     msg["From"] = "alice@example.com"

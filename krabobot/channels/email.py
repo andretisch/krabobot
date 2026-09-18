@@ -360,14 +360,20 @@ class EmailChannel(BaseChannel):
         try:
             client.login(self.config.imap_username, self.config.imap_password)
             try:
-                status, _ = client.select(mailbox)
+                status, select_data = client.select(mailbox)
             except Exception as exc:
                 if self._is_missing_mailbox_error(exc):
                     logger.warning("Email mailbox unavailable, skipping poll for {}: {}", mailbox, exc)
                     return messages
                 raise
             if status != "OK":
-                logger.warning("Email mailbox select returned {}, skipping poll for {}", status, mailbox)
+                reason = self._format_imap_status_data(select_data)
+                logger.warning(
+                    "Email mailbox select returned {}, skipping poll for {}{}",
+                    status,
+                    mailbox,
+                    f": {reason}" if reason else "",
+                )
                 return messages
 
             status, data = client.search(None, *search_criteria)
@@ -484,6 +490,22 @@ class EmailChannel(BaseChannel):
     def _is_missing_mailbox_error(cls, exc: Exception) -> bool:
         message = str(exc).lower()
         return any(marker in message for marker in cls._IMAP_MISSING_MAILBOX_MARKERS)
+
+    @staticmethod
+    def _format_imap_status_data(data: Any) -> str:
+        """Best-effort decode of IMAP status payload for logs (no secrets)."""
+        if data is None:
+            return ""
+        parts: list[str] = []
+        items = data if isinstance(data, (list, tuple)) else [data]
+        for item in items:
+            if item is None:
+                continue
+            if isinstance(item, (bytes, bytearray)):
+                parts.append(bytes(item).decode("utf-8", errors="replace"))
+            else:
+                parts.append(str(item))
+        return "; ".join(p for p in parts if p).strip()
 
     @classmethod
     def _format_imap_date(cls, value: date) -> str:
