@@ -255,6 +255,7 @@ def test_config_defaults_use_ollama_without_api_key():
 
 
 def test_make_provider_accepts_default_ollama_config_without_api_key():
+    from krabobot.providers.anonymizing import AnonymizingProvider
     from krabobot.providers.ollama_provider import OllamaProvider, resolve_ollama_connection
 
     config = Config()
@@ -265,7 +266,8 @@ def test_make_provider_accepts_default_ollama_config_without_api_key():
     ):
         provider = _make_provider(config)
 
-    assert isinstance(provider, OllamaProvider)
+    assert isinstance(provider, AnonymizingProvider)
+    assert isinstance(provider.inner, OllamaProvider)
     assert provider.api_base == "http://localhost:11434"
     assert provider.get_default_model() == "gemma4:cloud"
 

@@ -63,4 +63,6 @@ def make_provider(config: Config) -> LLMProvider:
         max_tokens=defaults.max_tokens,
         reasoning_effort=defaults.reasoning_effort,
     )
-    return provider
+    from krabobot.providers.anonymizing import wrap_provider_if_anonymize
+
+    return wrap_provider_if_anonymize(provider, defaults.anonymize)

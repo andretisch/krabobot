@@ -233,3 +233,81 @@ async def test_put_web_config_persists(tmp_path: Path, monkeypatch) -> None:
         assert data["providers"]["custom"]["apiKey"] == "sec"
     finally:
         await client.close()
+
+
+@pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
+@pytest.mark.asyncio
+async def test_web_backup_download_config_and_workspace(tmp_path: Path, monkeypatch) -> None:
+    """GET /v1/web/backup/download packs config + workspace, not media/models/history."""
+    import io
+    import tarfile
+
+    from krabobot.config.loader import save_config
+    from krabobot.config.schema import Config
+    from krabobot.session.manager import SessionManager
+
+    krabot_dir = tmp_path / ".krabobot"
+    krabot_dir.mkdir()
+    cfg_file = krabot_dir / "config.json"
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    (ws / "marker.txt").write_text("workspace-ok", encoding="utf-8")
+
+    media = krabot_dir / "media"
+    media.mkdir()
+    (media / "skip.bin").write_bytes(b"\x00\x01")
+    models = krabot_dir / "models"
+    models.mkdir()
+    (models / "big.onnx").write_bytes(b"model")
+    history = krabot_dir / "history"
+    history.mkdir()
+    (history / "cli.log").write_text("hist", encoding="utf-8")
+
+    cfg = Config()
+    cfg.agents.defaults.workspace = str(ws)
+    cfg.agents.defaults.model = "test-model"
+    cfg.agents.defaults.provider = "custom"
+    save_config(cfg, cfg_file)
+
+    monkeypatch.setattr(
+        "krabobot.config.loader.get_config_path",
+        lambda: cfg_file.resolve(),
+        raising=True,
+    )
+
+    mock_agent = MagicMock()
+    mock_agent.process_direct = AsyncMock(return_value="ok")
+    mock_agent.session_manager_for_api = AsyncMock(return_value=SessionManager(tmp_path))
+
+    app = create_app(mock_agent, model_name="t", request_timeout=5)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.get("/v1/web/backup/download")
+        assert resp.status == 200
+        assert "application/gzip" in (resp.headers.get("Content-Type") or "")
+        cd = resp.headers.get("Content-Disposition") or ""
+        assert "attachment" in cd
+        assert "krabobot-backup-" in cd
+        assert cd.endswith('.tar.gz"') or ".tar.gz" in cd
+
+        body = await resp.read()
+        assert body[:2] == b"\x1f\x8b"  # gzip magic
+
+        with tarfile.open(fileobj=io.BytesIO(body), mode="r:gz") as tf:
+            names = set(tf.getnames())
+            assert "manifest.json" in names
+            assert "payload/config.json" in names
+            assert any(n.startswith("payload/workspace/") for n in names)
+            assert not any(n.startswith("payload/media") for n in names)
+            assert not any(n.startswith("payload/models") for n in names)
+            assert not any(n.startswith("payload/history") for n in names)
+
+            m = json.loads(tf.extractfile("manifest.json").read().decode("utf-8"))
+            assert m["entries"] == ["config", "workspace"]
+
+            marker = tf.extractfile("payload/workspace/marker.txt")
+            assert marker is not None
+            assert marker.read().decode("utf-8") == "workspace-ok"
+    finally:
+        await client.close()

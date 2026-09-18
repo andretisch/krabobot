@@ -154,6 +154,8 @@ def test_config_get_api_base_keeps_ollama_cloud_without_v1_suffix() -> None:
 
 
 def test_make_provider_uses_ollama_provider_for_explicit_cloud() -> None:
+    from krabobot.providers.anonymizing import AnonymizingProvider
+
     config = Config.model_validate(
         {
             "agents": {"defaults": {"provider": "ollama", "model": "gemma4:cloud"}},
@@ -165,12 +167,15 @@ def test_make_provider_uses_ollama_provider_for_explicit_cloud() -> None:
 
     provider = make_provider(config)
 
-    assert isinstance(provider, OllamaProvider)
+    assert isinstance(provider, AnonymizingProvider)
+    assert isinstance(provider.inner, OllamaProvider)
     assert provider.api_key == "cloud-key"
     assert provider.api_base == "https://ollama.com"
 
 
 def test_make_provider_auto_uses_local_when_reachable() -> None:
+    from krabobot.providers.anonymizing import AnonymizingProvider
+
     config = Config()
 
     with patch(
@@ -179,12 +184,15 @@ def test_make_provider_auto_uses_local_when_reachable() -> None:
     ):
         provider = make_provider(config)
 
-    assert isinstance(provider, OllamaProvider)
+    assert isinstance(provider, AnonymizingProvider)
+    assert isinstance(provider.inner, OllamaProvider)
     assert provider.api_base == LOCAL_OLLAMA_HOST
     assert provider.api_key is None
 
 
 def test_make_provider_auto_uses_cloud_when_local_unreachable() -> None:
+    from krabobot.providers.anonymizing import AnonymizingProvider
+
     config = Config.model_validate(
         {
             "agents": {"defaults": {"provider": "ollama", "model": "gemma4:cloud"}},
@@ -198,7 +206,8 @@ def test_make_provider_auto_uses_cloud_when_local_unreachable() -> None:
     ):
         provider = make_provider(config)
 
-    assert isinstance(provider, OllamaProvider)
+    assert isinstance(provider, AnonymizingProvider)
+    assert isinstance(provider.inner, OllamaProvider)
     assert provider.api_base == CLOUD_OLLAMA_HOST
     assert provider.api_key == "cloud-key"
 
@@ -215,6 +224,8 @@ def test_make_provider_auto_cloud_requires_api_key() -> None:
 
 
 def test_make_provider_cloud_accepts_env_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    from krabobot.providers.anonymizing import AnonymizingProvider
+
     monkeypatch.setenv("OLLAMA_API_KEY", "env-cloud-key")
     config = Config.model_validate(
         {
@@ -227,5 +238,22 @@ def test_make_provider_cloud_accepts_env_api_key(monkeypatch: pytest.MonkeyPatch
 
     provider = make_provider(config)
 
-    assert isinstance(provider, OllamaProvider)
+    assert isinstance(provider, AnonymizingProvider)
+    assert isinstance(provider.inner, OllamaProvider)
     assert provider.api_key == "env-cloud-key"
+
+
+def test_make_provider_skips_anonymize_wrap_when_disabled() -> None:
+    from krabobot.providers.anonymizing import AnonymizingProvider
+
+    config = Config.model_validate(
+        {
+            "agents": {"defaults": {"provider": "ollama", "model": "gemma4:cloud", "anonymize": False}},
+            "providers": {
+                "ollama": {"apiKey": "cloud-key", "apiBase": "https://ollama.com"},
+            },
+        }
+    )
+    provider = make_provider(config)
+    assert isinstance(provider, OllamaProvider)
+    assert not isinstance(provider, AnonymizingProvider)

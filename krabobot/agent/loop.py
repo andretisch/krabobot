@@ -208,9 +208,11 @@ class AgentLoop:
 
         self.bus = bus
         self.channels_config = channels_config
-        self.provider = provider
+        from krabobot.providers.anonymizing import wrap_provider_if_anonymize
+
+        self.provider = wrap_provider_if_anonymize(provider, anonymize)
         self.workspace = workspace
-        self.model = model or provider.get_default_model()
+        self.model = model or self.provider.get_default_model()
         self.max_iterations = max_iterations
         self.context_window_tokens = context_window_tokens
         self.web_search_config = web_search_config or WebSearchConfig()
@@ -220,11 +222,10 @@ class AgentLoop:
         self.restrict_to_workspace = restrict_to_workspace
         self.short_memory = short_memory
         self.anonymize = anonymize
-        self._turn_token_map = None
         self._start_time = time.time()
         self._last_usage: dict[str, int] = {}
         self._extra_hooks: list[AgentHook] = hooks or []
-        self.runner = AgentRunner(provider)
+        self.runner = AgentRunner(self.provider)
         self.timezone = timezone
 
         self._running = False
@@ -344,9 +345,6 @@ class AgentLoop:
         This lets the tool report delivery blockers back to the model/user
         instead of silently queueing messages that channels will later skip.
         """
-        if self._turn_token_map is not None and isinstance(msg.content, str):
-            msg.content = self._turn_token_map.decode(msg.content)
-
         channel = (msg.channel or "").strip().lower()
         if channel in {"", "cli", "system"}:
             await self.bus.publish_outbound(msg)
@@ -512,24 +510,14 @@ class AgentLoop:
         *on_stream_end(resuming)*: called when a streaming session finishes.
         ``resuming=True`` means tool calls follow (spinner should restart);
         ``resuming=False`` means this is the final response.
-        """
-        from krabobot.agent.anonymize import TokenMap, anonymize_messages, decode_messages
 
-        messages = initial_messages
-        token_map: TokenMap | None = None
+        PII masking toward the LLM is handled by ``AnonymizingProvider`` (when
+        ``anonymize`` is on); session/UI messages stay human-readable.
+        """
+        # Streaming deltas would briefly show tokens before decode; buffer instead.
         if self.anonymize:
-            token_map = TokenMap()
-            messages = anonymize_messages(initial_messages, token_map)
-            if token_map.token_to_original:
-                logger.info(
-                    "PII anonymize: masked {} span(s) toward LLM ({})",
-                    len(token_map.token_to_original),
-                    ", ".join(sorted({t.split("-")[0].strip("[]") for t in token_map.token_to_original})),
-                )
-            # Streaming would leak tokenized fragments before decode.
             on_stream = None
             on_stream_end = None
-            self._turn_token_map = token_map
 
         loop_hook = _LoopHook(
             self,
@@ -548,18 +536,15 @@ class AgentLoop:
             else loop_hook
         )
 
-        try:
-            result = await self.runner.run(AgentRunSpec(
-                initial_messages=messages,
-                tools=runtime.tools,
-                model=self.model,
-                max_iterations=self.max_iterations,
-                hook=hook,
-                error_message="Sorry, I encountered an error calling the AI model.",
-                concurrent_tools=True,
-            ))
-        finally:
-            self._turn_token_map = None
+        result = await self.runner.run(AgentRunSpec(
+            initial_messages=initial_messages,
+            tools=runtime.tools,
+            model=self.model,
+            max_iterations=self.max_iterations,
+            hook=hook,
+            error_message="Sorry, I encountered an error calling the AI model.",
+            concurrent_tools=True,
+        ))
 
         self._last_usage = result.usage
         if result.stop_reason == "max_iterations":
@@ -567,13 +552,7 @@ class AgentLoop:
         elif result.stop_reason == "error":
             logger.error("LLM returned error: {}", (result.final_content or "")[:200])
 
-        final_content = result.final_content
-        saved_messages = result.messages
-        if token_map is not None:
-            if final_content:
-                final_content = token_map.decode(final_content)
-            saved_messages = decode_messages(saved_messages, token_map)
-        return final_content, result.tools_used, saved_messages
+        return result.final_content, result.tools_used, result.messages
 
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""

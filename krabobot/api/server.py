@@ -10,8 +10,11 @@ import asyncio
 import base64
 import mimetypes
 import re
+import shutil
+import tempfile
 import time
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
@@ -677,6 +680,62 @@ async def handle_web_config_restore(request: web.Request) -> web.Response:
     )
 
 
+async def handle_web_backup_download(request: web.Request) -> web.StreamResponse:
+    """GET /v1/web/backup/download — .tar.gz with config + workspace (not media/models/history)."""
+    from krabobot.cli.backup import create_archive
+    from krabobot.config.loader import get_config_path
+
+    cfg_path = get_config_path()
+    if not cfg_path.is_file():
+        return _error_json(404, "Config not found")
+
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    filename = f"krabobot-backup-{stamp}.tar.gz"
+    tmp_dir = Path(tempfile.mkdtemp(prefix="krabobot-web-backup-"))
+    archive_path = tmp_dir / filename
+
+    try:
+        # Same defaults as ``krabobot backup`` without --full / --with-*.
+        create_archive(
+            archive_path,
+            config_path=cfg_path,
+            include_workspace=True,
+            include_media=False,
+            include_models=False,
+            include_history=False,
+        )
+    except FileNotFoundError as e:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return _error_json(404, str(e))
+    except Exception:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        logger.exception("Failed to create web backup archive")
+        return _error_json(500, "Internal server error", err_type="server_error")
+
+    size = archive_path.stat().st_size
+    resp = web.StreamResponse(
+        status=200,
+        headers={
+            "Content-Type": "application/gzip",
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(size),
+            "Cache-Control": "no-store",
+        },
+    )
+    await resp.prepare(request)
+    try:
+        with archive_path.open("rb") as f:
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                await resp.write(chunk)
+        await resp.write_eof()
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    return resp
+
+
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
@@ -709,4 +768,5 @@ def create_app(agent_loop, model_name: str = "krabobot", request_timeout: float 
     app.router.add_put("/v1/web/config", handle_web_config_put)
     app.router.add_get("/v1/web/config/backups", handle_web_config_backups)
     app.router.add_post("/v1/web/config/restore", handle_web_config_restore)
+    app.router.add_get("/v1/web/backup/download", handle_web_backup_download)
     return app

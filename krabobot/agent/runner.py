@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -100,6 +101,16 @@ class AgentRunner:
     def __init__(self, provider: LLMProvider):
         self.provider = provider
 
+    def _turn_scope(self):
+        """Share one TokenMap across all chat() calls in this run when anonymizing."""
+        from krabobot.providers.anonymizing import AnonymizingProvider
+
+        if isinstance(self.provider, AnonymizingProvider):
+            from krabobot.agent.anonymize import token_map_scope
+
+            return token_map_scope()
+        return nullcontext()
+
     async def run(self, spec: AgentRunSpec) -> AgentRunResult:
         hook = spec.hook or AgentHook()
         messages = list(spec.initial_messages)
@@ -110,121 +121,123 @@ class AgentRunner:
         stop_reason = "completed"
         tool_events: list[dict[str, str]] = []
 
-        for iteration in range(spec.max_iterations):
-            context = AgentHookContext(iteration=iteration, messages=messages)
-            await hook.before_iteration(context)
-            kwargs: dict[str, Any] = {
-                "messages": messages,
-                "tools": spec.tools.get_definitions(),
-                "model": spec.model,
-            }
-            if spec.temperature is not None:
-                kwargs["temperature"] = spec.temperature
-            if spec.max_tokens is not None:
-                kwargs["max_tokens"] = spec.max_tokens
-            if spec.reasoning_effort is not None:
-                kwargs["reasoning_effort"] = spec.reasoning_effort
+        with self._turn_scope():
+            for iteration in range(spec.max_iterations):
+                context = AgentHookContext(iteration=iteration, messages=messages)
+                await hook.before_iteration(context)
+                kwargs: dict[str, Any] = {
+                    "messages": messages,
+                    "tools": spec.tools.get_definitions(),
+                    "model": spec.model,
+                }
+                if spec.temperature is not None:
+                    kwargs["temperature"] = spec.temperature
+                if spec.max_tokens is not None:
+                    kwargs["max_tokens"] = spec.max_tokens
+                if spec.reasoning_effort is not None:
+                    kwargs["reasoning_effort"] = spec.reasoning_effort
 
-            if hook.wants_streaming():
-                async def _stream(delta: str) -> None:
-                    await hook.on_stream(context, delta)
-
-                response = await self.provider.chat_stream_with_retry(
-                    **kwargs,
-                    on_content_delta=_stream,
-                )
-            else:
-                response = await self.provider.chat_with_retry(**kwargs)
-
-            raw_usage = response.usage or {}
-            usage = {
-                "prompt_tokens": int(raw_usage.get("prompt_tokens", 0) or 0),
-                "completion_tokens": int(raw_usage.get("completion_tokens", 0) or 0),
-            }
-            context.response = response
-            context.usage = usage
-            context.tool_calls = list(response.tool_calls)
-
-            if response.has_tool_calls:
                 if hook.wants_streaming():
-                    await hook.on_stream_end(context, resuming=True)
+                    async def _stream(delta: str) -> None:
+                        await hook.on_stream(context, delta)
 
-                messages.append(build_assistant_message(
-                    response.content or "",
-                    tool_calls=[tc.to_openai_tool_call() for tc in response.tool_calls],
-                    reasoning_content=response.reasoning_content,
-                    thinking_blocks=response.thinking_blocks,
-                ))
-                tools_used.extend(tc.name for tc in response.tool_calls)
+                    response = await self.provider.chat_stream_with_retry(
+                        **kwargs,
+                        on_content_delta=_stream,
+                    )
+                else:
+                    response = await self.provider.chat_with_retry(**kwargs)
 
-                await hook.before_execute_tools(context)
+                raw_usage = response.usage or {}
+                usage = {
+                    "prompt_tokens": int(raw_usage.get("prompt_tokens", 0) or 0),
+                    "completion_tokens": int(raw_usage.get("completion_tokens", 0) or 0),
+                }
+                context.response = response
+                context.usage = usage
+                context.tool_calls = list(response.tool_calls)
 
-                results, new_events, fatal_error = await self._execute_tools(spec, response.tool_calls)
-                tool_events.extend(new_events)
-                context.tool_results = list(results)
-                context.tool_events = list(new_events)
-                if fatal_error is not None:
-                    error = f"Error: {type(fatal_error).__name__}: {fatal_error}"
-                    stop_reason = "tool_error"
+                if response.has_tool_calls:
+                    if hook.wants_streaming():
+                        await hook.on_stream_end(context, resuming=True)
+
+                    messages.append(build_assistant_message(
+                        response.content or "",
+                        tool_calls=[tc.to_openai_tool_call() for tc in response.tool_calls],
+                        reasoning_content=response.reasoning_content,
+                        thinking_blocks=response.thinking_blocks,
+                    ))
+                    tools_used.extend(tc.name for tc in response.tool_calls)
+
+                    await hook.before_execute_tools(context)
+
+                    results, new_events, fatal_error = await self._execute_tools(spec, response.tool_calls)
+                    tool_events.extend(new_events)
+                    context.tool_results = list(results)
+                    context.tool_events = list(new_events)
+                    if fatal_error is not None:
+                        error = f"Error: {type(fatal_error).__name__}: {fatal_error}"
+                        stop_reason = "tool_error"
+                        context.error = error
+                        context.stop_reason = stop_reason
+                        await hook.after_iteration(context)
+                        break
+
+                    vision_user = _vision_bridge_user_content_from_results(
+                        response.tool_calls,
+                        results,
+                    )
+                    for tool_call, result in zip(response.tool_calls, results):
+                        if _tool_result_contains_vision_media(result):
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "name": tool_call.name,
+                                "content": (
+                                    f"[{tool_call.name}] Визуальный вывод (изображение) — "
+                                    "пиксели в следующем сообщении пользователя (служебный мост для API)."
+                                ),
+                            })
+                        else:
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "name": tool_call.name,
+                                "content": result,
+                            })
+                    if vision_user:
+                        messages.append({"role": "user", "content": vision_user})
+                    await hook.after_iteration(context)
+                    continue
+
+                if hook.wants_streaming():
+                    await hook.on_stream_end(context, resuming=False)
+
+                clean = hook.finalize_content(context, response.content)
+                if response.finish_reason == "error":
+                    final_content = clean or spec.error_message or _DEFAULT_ERROR_MESSAGE
+                    stop_reason = "error"
+                    error = final_content
+                    context.final_content = final_content
                     context.error = error
                     context.stop_reason = stop_reason
                     await hook.after_iteration(context)
                     break
-                vision_user = _vision_bridge_user_content_from_results(
-                    response.tool_calls,
-                    results,
-                )
-                for tool_call, result in zip(response.tool_calls, results):
-                    if _tool_result_contains_vision_media(result):
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "name": tool_call.name,
-                            "content": (
-                                f"[{tool_call.name}] Визуальный вывод (изображение) — "
-                                "пиксели в следующем сообщении пользователя (служебный мост для API)."
-                            ),
-                        })
-                    else:
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "name": tool_call.name,
-                            "content": result,
-                        })
-                if vision_user:
-                    messages.append({"role": "user", "content": vision_user})
-                await hook.after_iteration(context)
-                continue
 
-            if hook.wants_streaming():
-                await hook.on_stream_end(context, resuming=False)
-
-            clean = hook.finalize_content(context, response.content)
-            if response.finish_reason == "error":
-                final_content = clean or spec.error_message or _DEFAULT_ERROR_MESSAGE
-                stop_reason = "error"
-                error = final_content
+                messages.append(build_assistant_message(
+                    clean,
+                    reasoning_content=response.reasoning_content,
+                    thinking_blocks=response.thinking_blocks,
+                ))
+                final_content = clean
                 context.final_content = final_content
-                context.error = error
                 context.stop_reason = stop_reason
                 await hook.after_iteration(context)
                 break
-
-            messages.append(build_assistant_message(
-                clean,
-                reasoning_content=response.reasoning_content,
-                thinking_blocks=response.thinking_blocks,
-            ))
-            final_content = clean
-            context.final_content = final_content
-            context.stop_reason = stop_reason
-            await hook.after_iteration(context)
-            break
-        else:
-            stop_reason = "max_iterations"
-            template = spec.max_iterations_message or _DEFAULT_MAX_ITERATIONS_MESSAGE
-            final_content = template.format(max_iterations=spec.max_iterations)
+            else:
+                stop_reason = "max_iterations"
+                template = spec.max_iterations_message or _DEFAULT_MAX_ITERATIONS_MESSAGE
+                final_content = template.format(max_iterations=spec.max_iterations)
 
         return AgentRunResult(
             final_content=final_content,
@@ -267,8 +280,10 @@ class AgentRunner:
         spec: AgentRunSpec,
         tool_call: ToolCallRequest,
     ) -> tuple[Any, dict[str, str], BaseException | None]:
+        # Tool args are already decoded by AnonymizingProvider when anonymize is on.
+        arguments = tool_call.arguments
         try:
-            result = await spec.tools.execute(tool_call.name, tool_call.arguments)
+            result = await spec.tools.execute(tool_call.name, arguments)
         except asyncio.CancelledError:
             raise
         except BaseException as exc:

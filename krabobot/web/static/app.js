@@ -1417,6 +1417,7 @@
   const kbCfgSaveBtn = document.getElementById("kb-cfg-save");
   const kbCfgReloadBtn = document.getElementById("kb-cfg-reload");
   const kbCfgRestoreBtn = document.getElementById("kb-cfg-restore");
+  const kbCfgDownloadBackupBtn = document.getElementById("kb-cfg-download-backup");
 
   function kbCfgFormatSaveError(data, status) {
     const err = data && data.error ? data.error : null;
@@ -1426,6 +1427,18 @@
       msg += "\n" + JSON.stringify(err.detail).slice(0, 900);
     }
     return msg;
+  }
+
+  if (kbCfgDownloadBackupBtn) {
+    kbCfgDownloadBackupBtn.addEventListener("click", () => {
+      const a = document.createElement("a");
+      a.href = "/v1/web/backup/download";
+      a.download = "";
+      a.rel = "noopener";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    });
   }
 
   if (kbCfgSaveBtn) {

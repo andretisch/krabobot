@@ -21,7 +21,7 @@ def _make_loop(tmp_path):
          patch("krabobot.agent.loop.SessionManager"), \
          patch("krabobot.agent.loop.SubagentManager") as MockSubMgr:
         MockSubMgr.return_value.cancel_by_session = AsyncMock(return_value=0)
-        loop = AgentLoop(bus=bus, provider=provider, workspace=tmp_path)
+        loop = AgentLoop(bus=bus, provider=provider, workspace=tmp_path, anonymize=False)
     return loop
 
 

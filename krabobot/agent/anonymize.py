@@ -9,10 +9,12 @@ from __future__ import annotations
 import copy
 import json
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from loguru import logger
 
@@ -73,6 +75,28 @@ class TokenMap:
             if token in result:
                 result = result.replace(token, original)
         return result
+
+
+# Shared across multiple chat() calls within one agent turn / consolidator run.
+_active_token_map: ContextVar[TokenMap | None] = ContextVar(
+    "krabobot_anonymize_token_map", default=None
+)
+
+
+def get_active_token_map() -> TokenMap | None:
+    """Return the TokenMap for the current turn, if any."""
+    return _active_token_map.get()
+
+
+@contextmanager
+def token_map_scope(token_map: TokenMap | None = None) -> Iterator[TokenMap]:
+    """Bind a TokenMap for the duration of an agent turn (nested scopes restore)."""
+    active = token_map if token_map is not None else TokenMap()
+    token = _active_token_map.set(active)
+    try:
+        yield active
+    finally:
+        _active_token_map.reset(token)
 
 
 @lru_cache(maxsize=1)
@@ -231,6 +255,42 @@ def decode_content(content: Any, token_map: TokenMap) -> Any:
             out.append(block)
         return out
     return content
+
+
+def _map_string_values(value: Any, transform: Any) -> Any:
+    """Recursively apply *transform* to every string leaf in dict/list trees."""
+    if isinstance(value, str):
+        return transform(value)
+    if isinstance(value, dict):
+        return {k: _map_string_values(v, transform) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_map_string_values(v, transform) for v in value]
+    return value
+
+
+def decode_tool_arguments(arguments: dict[str, Any], token_map: TokenMap) -> dict[str, Any]:
+    """Decode tokens in tool-call argument values so tools see originals."""
+    if not arguments or not token_map.token_to_original:
+        return arguments
+    decoded = _map_string_values(arguments, token_map.decode)
+    return decoded if isinstance(decoded, dict) else arguments
+
+
+def encode_tool_arguments(
+    arguments: dict[str, Any],
+    token_map: TokenMap,
+    rules: list[RegexRule] | None = None,
+) -> dict[str, Any]:
+    """Encode PII spans in tool-call argument values (toward the LLM)."""
+    if not arguments:
+        return arguments
+    active = rules if rules is not None else list(load_default_rules())
+
+    def _encode(s: str) -> str:
+        return token_map.encode(s, active)
+
+    encoded = _map_string_values(arguments, _encode)
+    return encoded if isinstance(encoded, dict) else arguments
 
 
 def anonymize_messages(
