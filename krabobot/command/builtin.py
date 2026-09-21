@@ -8,6 +8,8 @@ import sys
 from dataclasses import dataclass
 from typing import Literal
 
+from loguru import logger
+
 from krabobot import __version__
 from krabobot.bus.events import OutboundMessage
 from krabobot.command.router import CommandContext, CommandRouter
@@ -43,7 +45,11 @@ async def cmd_stop(ctx: CommandContext) -> OutboundMessage:
 
 
 async def cmd_restart(ctx: CommandContext) -> OutboundMessage:
-    """Restart the process in-place via os.execv."""
+    """Restart the process in-place via os.execv.
+
+    For ``krabobot serve``, also stops the gateway subprocess (via gateway.pid)
+    so the new serve starts a fresh gateway and channels come back up.
+    """
     msg = ctx.msg
     denied = await _owner_only_guard(ctx, action_label="перезапуск бота")
     if denied is not None:
@@ -51,6 +57,9 @@ async def cmd_restart(ctx: CommandContext) -> OutboundMessage:
 
     async def _do_restart():
         await asyncio.sleep(1)
+        from krabobot.utils.gateway_pid import prepare_process_restart
+
+        prepare_process_restart()
         os.execv(sys.executable, [sys.executable, "-m", "krabobot"] + sys.argv[1:])
 
     asyncio.create_task(_do_restart())
@@ -399,7 +408,13 @@ async def cmd_reg(ctx: CommandContext) -> OutboundMessage:
         msg.sender_id,
         note=raw_args,
     )
-    await _notify_owner_about_registration(ctx, request_id=request.request_id)
+    try:
+        await _notify_owner_about_registration(ctx, request_id=request.request_id)
+    except Exception:
+        logger.exception(
+            "Owner notification failed for registration {}",
+            request.request_id,
+        )
     return OutboundMessage(
         channel=msg.channel,
         chat_id=msg.chat_id,
@@ -582,33 +597,54 @@ def _builtin_command_specs() -> list[BuiltinCommandSpec]:
 
 
 async def _notify_owner_about_registration(ctx: CommandContext, *, request_id: str) -> None:
-    """Best-effort notification to owner account when new registration arrives."""
+    """Best-effort notification to all owner accounts when new registration arrives.
+
+    Gateway channels (telegram/vk/email) go through the bus. Local channels
+    (api/cli) are written into session history so the web UI can show them —
+    ChannelManager has no ``api`` adapter and would otherwise drop the message.
+    """
     owner_id = await ctx.loop.user_resolver.get_owner_user_id()
     if not owner_id:
         return
     accounts = await ctx.loop.user_resolver.accounts_for_user(owner_id)
     if not accounts:
         return
-    target = accounts[0]
-    channel, sep, sender = target.partition(":")
-    if not sep:
-        return
-    chat_id = _owner_chat_id_from_sender(channel, sender)
-    await ctx.loop.bus.publish_outbound(
-        OutboundMessage(
+
+    content = (
+        "Новая заявка на регистрацию.\n"
+        f"ID: {request_id}\n"
+        f"Канал: {ctx.msg.channel}\n"
+        f"Отправитель: {ctx.msg.sender_id}\n\n"
+        f"Подтвердить: /reg approve {request_id}\n"
+        f"Отклонить: /reg reject {request_id}"
+    )
+    delivered = 0
+    for account in accounts:
+        channel, sep, sender = account.partition(":")
+        if not sep:
+            continue
+        channel = channel.strip().lower()
+        chat_id = _owner_chat_id_from_sender(channel, sender)
+        out = OutboundMessage(
             channel=channel,
             chat_id=chat_id,
-            content=(
-                "Новая заявка на регистрацию.\n"
-                f"ID: {request_id}\n"
-                f"Канал: {ctx.msg.channel}\n"
-                f"Отправитель: {ctx.msg.sender_id}\n\n"
-                f"Подтвердить: /reg approve {request_id}\n"
-                f"Отклонить: /reg reject {request_id}"
-            ),
+            content=content,
             metadata={"render_as": "text"},
         )
-    )
+        deliver = getattr(ctx.loop, "deliver_outbound", None)
+        if callable(deliver):
+            ok = await deliver(out)
+        else:
+            await ctx.loop.bus.publish_outbound(out)
+            ok = True
+        if ok:
+            delivered += 1
+
+    if delivered == 0:
+        logger.warning(
+            "Registration {} created but owner could not be notified on any linked channel",
+            request_id,
+        )
 
 
 def _owner_chat_id_from_sender(channel: str, sender_id: str) -> str:

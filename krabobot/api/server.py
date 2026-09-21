@@ -558,6 +558,8 @@ async def handle_web_session_messages(request: web.Request) -> web.Response:
     except Exception:
         logger.exception("Failed to resolve API session manager for messages")
         return _error_json(500, "Internal server error", err_type="server_error")
+    # Gateway may have appended notify messages on disk; drop stale in-memory cache.
+    sm.invalidate(key)
     session = sm.get_or_create(key)
     out: list[dict[str, Any]] = []
     for m in session.messages:

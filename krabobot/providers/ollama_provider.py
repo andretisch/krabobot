@@ -129,15 +129,72 @@ class OllamaProvider(LLMProvider):
         )
 
     @staticmethod
-    def _to_ollama_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Convert OpenAI-style messages to Ollama /api/chat format."""
+    def _image_b64_from_block(block: dict[str, Any]) -> str | None:
+        """Extract raw base64 from an OpenAI-style image content part."""
+        btype = block.get("type")
+        url: str | None = None
+        if btype == "image_url":
+            iu = block.get("image_url")
+            if isinstance(iu, dict):
+                raw = iu.get("url")
+                url = raw if isinstance(raw, str) else None
+            elif isinstance(iu, str):
+                url = iu
+        elif btype == "input_image":
+            raw = block.get("image") or block.get("url")
+            url = raw if isinstance(raw, str) else None
+        if not url:
+            return None
+        if url.startswith("data:") and ";base64," in url:
+            return url.split(";base64,", 1)[1]
+        # Already raw base64 or a filesystem path the ollama client can load.
+        return url
+
+    @classmethod
+    def _flatten_content(
+        cls, content: Any
+    ) -> tuple[str | None, list[str]]:
+        """Convert OpenAI multimodal content list → (text, images for Ollama)."""
+        if content is None:
+            return None, []
+        if isinstance(content, str):
+            return content, []
+        if not isinstance(content, list):
+            return str(content), []
+
+        text_parts: list[str] = []
+        images: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype in ("text", "input_text", "output_text"):
+                text = block.get("text")
+                if isinstance(text, str) and text:
+                    text_parts.append(text)
+            elif btype in ("image_url", "input_image"):
+                b64 = cls._image_b64_from_block(block)
+                if b64:
+                    images.append(b64)
+        joined = "\n".join(text_parts) if text_parts else ("" if images else None)
+        return joined, images
+
+    @classmethod
+    def _to_ollama_messages(cls, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Convert OpenAI-style messages to Ollama /api/chat format.
+
+        Ollama's ``Message`` model requires ``content: str`` and puts images in a
+        separate ``images`` field — OpenAI multimodal content lists must be flattened.
+        """
         converted: list[dict[str, Any]] = []
         for msg in messages:
             role = msg.get("role")
             clean: dict[str, Any] = {"role": role}
-            content = msg.get("content")
-            if content is not None:
-                clean["content"] = content
+            text, images = cls._flatten_content(msg.get("content"))
+            if text is not None:
+                clean["content"] = text
+            if images:
+                clean["images"] = images
 
             if role == "assistant" and msg.get("tool_calls"):
                 tool_calls = []

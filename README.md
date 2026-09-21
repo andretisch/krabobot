@@ -87,7 +87,13 @@ krabobot onboard
 krabobot serve
 ```
 
-`krabobot serve` поднимает HTTP API/веб-UI и тот же стек каналов, что и `krabobot gateway` (один общий AgentLoop). Для каналов без API по-прежнему можно запускать только `krabobot gateway`.
+`krabobot serve` поднимает HTTP API/веб-UI. Если gateway ещё не запущен, serve сам стартует `krabobot gateway` **отдельным процессом** (свой event loop для каналов). Если gateway уже работает — пишет «already running» и поднимает только HTTP.
+
+На выходе из serve останавливается **только** gateway-потомок, который serve сам породил; внешне запущенный `krabobot gateway` не трогается.
+
+Команда `/restart` (владелец): при запуске из `serve` сначала останавливает gateway по `gateway.pid`, затем перезапускает serve — новый serve снова поднимет gateway. При `/restart` из самого gateway перезапускается только процесс каналов.
+
+Для каналов без API по-прежнему можно запускать только `krabobot gateway`.
 
 Полезно:
 
@@ -199,7 +205,7 @@ Cron и сессии хранятся **только** в `workspace/` (или �
 
 **Настраивается в `config.json`, не хранится в `.krabobot` как текст контекста:**
 
-- Каналы (`telegram`, `vk`, `email`) — подключаются при `krabobot serve` или `krabobot gateway`.
+- Каналы (`telegram`, `vk`, `email`) — подключаются при `krabobot gateway` (в т.ч. когда его автоматически стартует `krabobot serve`).
 - MCP-серверы (`tools.mcpServers`) — ленивое подключение при первом сообщении, инструменты регистрируются в рантайме.
 - Провайдер LLM, STT/TTS, веб-поиск — влияют на поведение, но не копируются в промпт целиком.
 

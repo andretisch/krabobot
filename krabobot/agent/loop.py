@@ -985,6 +985,52 @@ class AgentLoop:
             session.messages.append(entry)
         session.updated_at = datetime.now()
 
+    # Channels without ChannelManager adapters — deliver into session history instead.
+    _LOCAL_OUTBOUND_CHANNELS = frozenset({"api", "cli"})
+
+    async def deliver_outbound(self, msg: OutboundMessage) -> bool:
+        """Deliver an outbound message without blocking the caller on channel I/O.
+
+        ``api``/``cli`` have no gateway adapter, so the message is appended to the
+        matching session JSONL (visible in web chat after refresh). Other channels
+        go through the bus for ChannelManager. Never raises.
+        """
+        try:
+            channel = (msg.channel or "").strip().lower()
+            if channel in self._LOCAL_OUTBOUND_CHANNELS:
+                await self._append_outbound_to_session(msg)
+                return True
+            await self.bus.publish_outbound(msg)
+            return True
+        except Exception:
+            logger.exception(
+                "Failed to deliver outbound to {}:{}",
+                getattr(msg, "channel", "?"),
+                getattr(msg, "chat_id", "?"),
+            )
+            return False
+
+    async def _append_outbound_to_session(self, msg: OutboundMessage) -> None:
+        """Persist an assistant message into a local (api/cli) session."""
+        channel = (msg.channel or "").strip().lower()
+        session_id = (msg.chat_id or "").strip() or "default"
+        key = f"{channel}:{session_id}"
+        content = (msg.content or "").strip()
+        if not content:
+            return
+        stub = InboundMessage(
+            channel=channel,
+            sender_id=session_id,
+            chat_id="default",
+            content="",
+        )
+        await self._ensure_identity(stub)
+        runtime = await self._runtime_for_message(stub)
+        session = runtime.sessions.get_or_create(key)
+        session.add_message("assistant", content, source="local_outbound")
+        runtime.sessions.save(session)
+        logger.info("Delivered local outbound to session {}", key)
+
     async def process_direct(
         self,
         content: str | list[dict[str, Any]],

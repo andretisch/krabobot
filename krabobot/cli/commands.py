@@ -846,6 +846,39 @@ async def _run_gateway_stack(runtime: _GatewayRuntime) -> None:
         await runtime.channels.stop_all()
 
 
+def _gateway_subprocess_cmd(
+    *,
+    config: str | None,
+    workspace: str | None,
+    verbose: bool,
+) -> list[str]:
+    """CLI argv to start a standalone gateway in a child process."""
+    cmd = [sys.executable, "-m", "krabobot", "gateway"]
+    if config:
+        cmd.extend(["--config", str(Path(config).expanduser().resolve())])
+    if workspace:
+        cmd.extend(["--workspace", str(Path(workspace).expanduser().resolve())])
+    if verbose:
+        cmd.append("--verbose")
+    return cmd
+
+
+def _stop_gateway_child(proc: Any) -> None:
+    """Terminate a gateway subprocess that *serve* started (not an external one)."""
+    if proc.poll() is not None:
+        return
+    console.print(f"[dim]Stopping gateway subprocess (pid {proc.pid})...[/dim]")
+    proc.terminate()
+    try:
+        proc.wait(timeout=15)
+    except Exception:
+        proc.kill()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+
+
 # ============================================================================
 # OpenAI-Compatible API Server
 # ============================================================================
@@ -860,7 +893,9 @@ def serve(
     workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
     config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
 ):
-    """Start API/web UI and gateway channels (shared AgentLoop)."""
+    """Start the OpenAI-compatible API server; auto-start gateway if needed."""
+    import subprocess
+
     try:
         from aiohttp import web
     except ImportError:
@@ -869,9 +904,15 @@ def serve(
 
     from loguru import logger
 
+    from krabobot.agent.loop import AgentLoop
     from krabobot.api.server import create_app
-    from krabobot.stt.model_manager import ensure_sherpa_stt_model
-    from krabobot.tts.model_manager import ensure_sherpa_tts_models
+    from krabobot.bus.queue import MessageBus
+    from krabobot.session.manager import SessionManager
+    from krabobot.utils.gateway_pid import (
+        clear_serve_pid,
+        is_gateway_running,
+        write_serve_pid,
+    )
 
     if verbose:
         logger.enable("krabobot")
@@ -879,19 +920,54 @@ def serve(
         logger.disable("krabobot")
 
     runtime_config = _load_runtime_config(config, workspace)
-    ensure_sherpa_stt_model(runtime_config.stt)
-    ensure_sherpa_tts_models(runtime_config.tts)
     api_cfg = runtime_config.api
     host = host if host is not None else api_cfg.host
     port = port if port is not None else api_cfg.port
     timeout = timeout if timeout is not None else api_cfg.timeout
     sync_workspace_templates(runtime_config.workspace_path)
 
-    runtime = _build_gateway_runtime(runtime_config)
-    agent_loop = runtime.agent
+    write_serve_pid()
+    our_pid = os.getpid()
+
+    # Separate process for channels — do not share aiohttp's event loop.
+    gateway_child: subprocess.Popen | None = None
+    running, existing_pid = is_gateway_running()
+    if running:
+        console.print(
+            f"[green]✓[/green] Gateway already running (pid {existing_pid}), "
+            "not starting another"
+        )
+    else:
+        cmd = _gateway_subprocess_cmd(config=config, workspace=workspace, verbose=verbose)
+        console.print(f"[dim]Starting gateway subprocess: {' '.join(cmd)}[/dim]")
+        gateway_child = subprocess.Popen(cmd)
+        console.print(f"[green]✓[/green] Gateway started (pid {gateway_child.pid})")
+
+    bus = MessageBus()
+    provider = _make_provider(runtime_config)
+    session_manager = SessionManager(runtime_config.workspace_path)
+    agent_loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=runtime_config.workspace_path,
+        model=runtime_config.agents.defaults.model,
+        max_iterations=runtime_config.agents.defaults.max_tool_iterations,
+        context_window_tokens=runtime_config.agents.defaults.context_window_tokens,
+        web_search_config=runtime_config.tools.web.search,
+        web_proxy=runtime_config.tools.web.proxy or None,
+        exec_config=runtime_config.tools.exec,
+        restrict_to_workspace=runtime_config.tools.restrict_to_workspace,
+        session_manager=session_manager,
+        mcp_servers=runtime_config.tools.mcp_servers,
+        channels_config=runtime_config.channels,
+        multi_user_config=runtime_config.tools.multi_user,
+        short_memory=runtime_config.agents.defaults.short_memory,
+        anonymize=runtime_config.agents.defaults.anonymize,
+        timezone=runtime_config.agents.defaults.timezone,
+    )
 
     model_name = runtime_config.agents.defaults.model
-    console.print(f"{__logo__} Starting OpenAI-compatible API server (+ gateway)")
+    console.print(f"{__logo__} Starting OpenAI-compatible API server")
     console.print(f"  [cyan]Endpoint[/cyan] : http://{host}:{port}/v1/chat/completions")
     console.print(f"  [cyan]Chat UI[/cyan]   : http://{host}:{port}/")
     console.print(f"  [cyan]Model[/cyan]    : {model_name}")
@@ -902,34 +978,27 @@ def serve(
             "[yellow]Warning:[/yellow] API is bound to all interfaces. "
             "Only do this behind a trusted network boundary, firewall, or reverse proxy."
         )
-    _log_gateway_status(runtime)
     console.print()
 
     api_app = create_app(agent_loop, model_name=model_name, request_timeout=timeout)
 
-    async def run():
-        runner = web.AppRunner(api_app)
-        await runner.setup()
-        try:
-            site = web.TCPSite(runner, host, port)
-            await site.start()
-            logger.info("API server listening on http://{}:{}", host, port)
-            try:
-                await _run_gateway_stack(runtime)
-            except KeyboardInterrupt:
-                console.print("\nShutting down...")
-            except Exception:
-                import traceback
+    async def on_startup(_app):
+        await agent_loop._connect_mcp()
 
-                console.print("\n[red]Error: Serve crashed unexpectedly[/red]")
-                console.print(traceback.format_exc())
-        finally:
-            await runner.cleanup()
+    async def on_cleanup(_app):
+        await agent_loop.close_mcp()
+
+    api_app.on_startup.append(on_startup)
+    api_app.on_cleanup.append(on_cleanup)
 
     try:
-        asyncio.run(run())
+        web.run_app(api_app, host=host, port=port, print=lambda msg: logger.info(msg))
     except KeyboardInterrupt:
         console.print("\nShutting down...")
+    finally:
+        if gateway_child is not None:
+            _stop_gateway_child(gateway_child)
+        clear_serve_pid(only_pid=our_pid)
 
 
 # ============================================================================
@@ -947,21 +1016,37 @@ def gateway(
     """Start the krabobot gateway (channels only, no HTTP API)."""
     from krabobot.stt.model_manager import ensure_sherpa_stt_model
     from krabobot.tts.model_manager import ensure_sherpa_tts_models
+    from krabobot.utils.gateway_pid import (
+        clear_gateway_pid,
+        is_gateway_running,
+        write_gateway_pid,
+    )
 
     if verbose:
         import logging
 
         logging.basicConfig(level=logging.DEBUG)
 
-    config = _load_runtime_config(config, workspace)
-    ensure_sherpa_stt_model(config.stt)
-    ensure_sherpa_tts_models(config.tts)
-    port = port if port is not None else config.gateway.port
+    config_obj = _load_runtime_config(config, workspace)
+    ensure_sherpa_stt_model(config_obj.stt)
+    ensure_sherpa_tts_models(config_obj.tts)
+    port = port if port is not None else config_obj.gateway.port
+
+    running, existing_pid = is_gateway_running()
+    if running and existing_pid != os.getpid():
+        console.print(
+            f"[red]Gateway already running (pid {existing_pid}).[/red]\n"
+            "  Stop it first, or use [cyan]krabobot serve[/cyan] which reuses that process."
+        )
+        raise typer.Exit(1)
+
+    write_gateway_pid()
+    our_pid = os.getpid()
 
     console.print(f"{__logo__} Starting krabobot gateway version {__version__} on port {port}...")
-    sync_workspace_templates(config.workspace_path)
+    sync_workspace_templates(config_obj.workspace_path)
 
-    runtime = _build_gateway_runtime(config)
+    runtime = _build_gateway_runtime(config_obj)
     _log_gateway_status(runtime)
 
     async def run():
@@ -975,7 +1060,10 @@ def gateway(
             console.print("\n[red]Error: Gateway crashed unexpectedly[/red]")
             console.print(traceback.format_exc())
 
-    asyncio.run(run())
+    try:
+        asyncio.run(run())
+    finally:
+        clear_gateway_pid(only_pid=our_pid)
 
 
 

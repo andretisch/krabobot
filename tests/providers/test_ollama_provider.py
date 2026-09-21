@@ -257,3 +257,67 @@ def test_make_provider_skips_anonymize_wrap_when_disabled() -> None:
     provider = make_provider(config)
     assert isinstance(provider, OllamaProvider)
     assert not isinstance(provider, AnonymizingProvider)
+
+
+def test_to_ollama_messages_flattens_multimodal_content() -> None:
+    """OpenAI content parts → Ollama content str + images (avoids Message validation error)."""
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc123"}},
+                {"type": "text", "text": "The user sent the image(s) above."},
+            ],
+        }
+    ]
+    out = OllamaProvider._to_ollama_messages(messages)
+    assert out == [
+        {
+            "role": "user",
+            "content": "The user sent the image(s) above.",
+            "images": ["abc123"],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ollama_chat_accepts_multimodal_via_anonymizing_provider() -> None:
+    """Regression: list content must not raise Pydantic Message string_type error."""
+    from ollama._client import _copy_messages
+
+    from krabobot.providers.anonymizing import AnonymizingProvider
+
+    provider = OllamaProvider(api_key="secret-key", api_base="https://ollama.com")
+    mock_response = MagicMock()
+    mock_response.model_dump.return_value = {
+        "message": {"role": "assistant", "content": "I see a cat"},
+        "done": True,
+    }
+    mock_client = AsyncMock()
+    mock_client.chat.return_value = mock_response
+    provider._client = mock_client
+
+    wrapped = AnonymizingProvider(provider)
+    multimodal = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJDRA=="}},
+                {"type": "text", "text": "Describe Иванов И.И. in the image."},
+            ],
+        }
+    ]
+    result = await wrapped.chat(multimodal)
+
+    assert result.finish_reason != "error"
+    assert result.content == "I see a cat"
+    kwargs = mock_client.chat.call_args.kwargs
+    sent = kwargs["messages"]
+    assert isinstance(sent[0]["content"], str)
+    assert sent[0]["images"] == ["QUJDRA=="]
+    # Anonymizer still encodes text parts before flatten
+    assert "Иванов" not in sent[0]["content"]
+    # Must be valid for the ollama Message model (the original failure mode)
+    validated = list(_copy_messages(sent))
+    assert validated[0].content == sent[0]["content"]
+    assert len(validated[0].images or []) == 1
