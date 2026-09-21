@@ -10,17 +10,21 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 
-from krabobot.session.manager import SessionManager
-
 from krabobot.api.server import (
     API_CHAT_ID,
     API_SESSION_KEY,
+    DEFAULT_MAX_UPLOAD_HARD_MB,
+    MAX_UPLOAD_FILE_BYTES,
+    MAX_UPLOAD_SOFT_BYTES,
     _chat_completion_response,
     _error_json,
+    _persist_web_uploads,
+    _stream_multipart_part_to_path,
     create_app,
     handle_chat_completions,
     web_static_dir,
 )
+from krabobot.session.manager import SessionManager
 
 try:
     from aiohttp.test_utils import TestClient, TestServer
@@ -459,3 +463,184 @@ async def test_web_session_delete_and_messages(aiohttp_client) -> None:
     assert resp2.status == 200
     body = await resp2.json()
     assert body["data"] == []
+
+
+@pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
+@pytest.mark.asyncio
+async def test_web_uploads_saves_mp4(aiohttp_client, tmp_path) -> None:
+    from aiohttp import FormData
+
+    agent = _make_mock_agent(workspace=tmp_path)
+    app = create_app(agent, model_name="m")
+    client = await aiohttp_client(app)
+
+    payload = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 64
+    form = FormData()
+    form.add_field("session_id", "sess-video-1")
+    form.add_field(
+        "files",
+        payload,
+        filename="Screen Recording 2026-09-21.mp4",
+        content_type="video/mp4",
+    )
+
+    resp = await client.post("/v1/web/uploads", data=form)
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["object"] == "upload.result"
+    assert len(body["data"]) == 1
+    row = body["data"][0]
+    assert row["mime"] == "video/mp4"
+    assert row["size"] == len(payload)
+    assert row["filename"].endswith(".mp4")
+    saved = Path(row["path"])
+    assert saved.is_file()
+    assert saved.read_bytes() == payload
+    assert "uploads" in saved.parts
+    assert "web" in saved.parts
+
+
+@pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
+@pytest.mark.asyncio
+async def test_web_uploads_rejects_oversized(aiohttp_client, tmp_path) -> None:
+    from aiohttp import FormData
+
+    agent = _make_mock_agent(workspace=tmp_path)
+    app = create_app(agent, model_name="m", max_upload_mb=1)
+    # Keep test fast: tiny hard limit (client_max_size still allows the small body).
+    app["max_upload_bytes"] = 32
+    client = await aiohttp_client(app)
+
+    form = FormData()
+    form.add_field("session_id", "s1")
+    form.add_field(
+        "files",
+        b"x" * 64,
+        filename="big.mp4",
+        content_type="video/mp4",
+    )
+    resp = await client.post("/v1/web/uploads", data=form)
+    assert resp.status == 413
+    body = await resp.json()
+    assert "слишком большой" in body["error"]["message"].lower()
+
+
+@pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
+@pytest.mark.asyncio
+async def test_web_uploads_streams_to_disk(aiohttp_client, tmp_path) -> None:
+    from aiohttp import FormData
+
+    agent = _make_mock_agent(workspace=tmp_path)
+    app = create_app(agent, model_name="m", max_upload_mb=8)
+    client = await aiohttp_client(app)
+
+    # ~256 KiB — larger than a single read_chunk in the soft path, still fast.
+    payload = b"\x00\x00\x00\x18ftypmp42" + (b"V" * (256 * 1024))
+    form = FormData()
+    form.add_field("session_id", "sess-stream")
+    form.add_field(
+        "files",
+        payload,
+        filename="bigish.mp4",
+        content_type="video/mp4",
+    )
+    resp = await client.post("/v1/web/uploads", data=form)
+    assert resp.status == 200
+    body = await resp.json()
+    row = body["data"][0]
+    saved = Path(row["path"])
+    assert saved.is_file()
+    assert saved.read_bytes() == payload
+    assert row["size"] == len(payload)
+    assert (tmp_path / "uploads" / "web").exists()
+
+
+@pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
+@pytest.mark.asyncio
+async def test_health_reports_upload_limits(aiohttp_client, tmp_path) -> None:
+    agent = _make_mock_agent(workspace=tmp_path)
+    app = create_app(agent, model_name="m", max_upload_mb=512)
+    client = await aiohttp_client(app)
+    resp = await client.get("/health")
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["status"] == "ok"
+    assert body["maxUploadSoftMb"] == 50
+    assert body["maxUploadHardMb"] == 512
+    assert body["maxUploadHardBytes"] == 512 * 1024 * 1024
+
+
+@pytest.mark.asyncio
+async def test_stream_multipart_part_to_path_enforces_limit(tmp_path: Path) -> None:
+    class _FakePart:
+        def __init__(self, data: bytes, chunk: int = 8) -> None:
+            self._data = data
+            self._chunk = chunk
+            self._pos = 0
+
+        async def read_chunk(self, size: int = 64 * 1024) -> bytes:
+            n = min(size, self._chunk, len(self._data) - self._pos)
+            if n <= 0:
+                return b""
+            out = self._data[self._pos : self._pos + n]
+            self._pos += n
+            return out
+
+    dest = tmp_path / "out.bin"
+    with pytest.raises(ValueError, match="слишком большой"):
+        await _stream_multipart_part_to_path(_FakePart(b"abcdefghij"), dest, limit=5)
+    assert not dest.exists()
+
+
+def test_persist_web_uploads_kb_file_mp4(tmp_path: Path) -> None:
+    import base64
+
+    raw = b"fake-mp4-bytes"
+    b64 = base64.b64encode(raw).decode("ascii")
+    coerced = [
+        {"type": "text", "text": "посмотри видео"},
+        {
+            "type": "kb_file",
+            "kb_file": {
+                "filename": "clip.mp4",
+                "mime": "video/mp4",
+                "data": b64,
+            },
+        },
+    ]
+    text, media = _persist_web_uploads(tmp_path, "sid-kb", coerced)
+    assert media == []
+    assert "посмотри видео" in text
+    assert "Файл сохранён в workspace:" in text
+    assert ".mp4" in text
+    # File actually written
+    upload_root = tmp_path / "uploads" / "web"
+    files = list(upload_root.rglob("*.mp4"))
+    assert len(files) == 1
+    assert files[0].read_bytes() == raw
+
+
+def test_max_upload_soft_under_body_limit() -> None:
+    from krabobot.api.server import MAX_REQUEST_BODY_BYTES
+
+    assert MAX_UPLOAD_SOFT_BYTES < MAX_REQUEST_BODY_BYTES
+    assert MAX_UPLOAD_SOFT_BYTES == 50 * 1024 * 1024
+    assert MAX_UPLOAD_FILE_BYTES == MAX_UPLOAD_SOFT_BYTES
+    assert DEFAULT_MAX_UPLOAD_HARD_MB == 2048
+
+
+def test_create_app_client_max_covers_hard_upload() -> None:
+    agent = MagicMock()
+    app = create_app(agent, model_name="m", max_upload_mb=100)
+    assert app["max_upload_mb"] == 100
+    assert app["max_upload_bytes"] == 100 * 1024 * 1024
+    assert app._client_max_size >= 100 * 1024 * 1024
+
+
+def test_api_config_max_upload_mb_alias() -> None:
+    from krabobot.config.schema import ApiConfig
+
+    cfg = ApiConfig.model_validate({"maxUploadMb": 1024})
+    assert cfg.max_upload_mb == 1024
+    dumped = cfg.model_dump(by_alias=True)
+    assert dumped["maxUploadMb"] == 1024

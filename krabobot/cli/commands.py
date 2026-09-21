@@ -980,7 +980,12 @@ def serve(
         )
     console.print()
 
-    api_app = create_app(agent_loop, model_name=model_name, request_timeout=timeout)
+    api_app = create_app(
+        agent_loop,
+        model_name=model_name,
+        request_timeout=timeout,
+        max_upload_mb=api_cfg.max_upload_mb,
+    )
 
     async def on_startup(_app):
         await agent_loop._connect_mcp()

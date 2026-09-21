@@ -50,6 +50,12 @@ API_SESSION_KEY = "api:default"
 API_CHAT_ID = "default"
 # aiohttp defaults to 1 MiB — base64 images in JSON exceed that and the body is truncated → JSON parse fails.
 MAX_REQUEST_BODY_BYTES = 64 * 1024 * 1024
+# Soft threshold: ≤ this size uses the normal chat attach path; above → stream-to-disk «folder» path.
+MAX_UPLOAD_SOFT_BYTES = 50 * 1024 * 1024
+# Backward-compatible alias (soft mode / former hard cap for in-memory multipart).
+MAX_UPLOAD_FILE_BYTES = MAX_UPLOAD_SOFT_BYTES
+# Default hard max for large multipart uploads (overridable via api.maxUploadMb).
+DEFAULT_MAX_UPLOAD_HARD_MB = 2048
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +201,49 @@ def _image_ext_for_mime(mime: str) -> str:
     return ".img"
 
 
+def _format_size_mb(n: int) -> str:
+    return f"{n / (1024 * 1024):.0f}"
+
+
+async def _stream_multipart_part_to_path(part: Any, dest: Path, limit: int) -> int:
+    """Stream a multipart file part to disk without holding the whole body in RAM."""
+    total = 0
+    try:
+        with dest.open("wb") as out:
+            while True:
+                chunk = await part.read_chunk(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > limit:
+                    raise ValueError(
+                        f"Файл слишком большой (больше {_format_size_mb(limit)} МБ). "
+                        f"Максимум — {_format_size_mb(limit)} МБ."
+                    )
+                out.write(chunk)
+    except Exception:
+        try:
+            if dest.is_file():
+                dest.unlink()
+        except OSError:
+            pass
+        raise
+    return total
+
+
+def _resolve_max_upload_bytes(max_upload_mb: int | None) -> tuple[int, int]:
+    """Return (hard_mb, hard_bytes) from config or defaults."""
+    mb = DEFAULT_MAX_UPLOAD_HARD_MB if max_upload_mb is None else int(max_upload_mb)
+    if mb < 1:
+        mb = 1
+    return mb, mb * 1024 * 1024
+
+
+def _web_upload_dir(workspace: Path, session_id: str) -> Path:
+    sub = safe_filename(session_id)[:80] or "default"
+    return ensure_dir(workspace.resolve() / "uploads" / "web" / sub)
+
+
 def _persist_web_uploads(
     workspace: Path,
     session_id: str,
@@ -209,8 +258,7 @@ def _persist_web_uploads(
         return coerced, []
 
     ws = workspace.resolve()
-    sub = safe_filename(session_id)[:80] or "default"
-    upload_dir = ensure_dir(ws / "uploads" / "web" / sub)
+    upload_dir = _web_upload_dir(ws, session_id)
     tag = uuid.uuid4().hex[:10]
 
     text_parts: list[str] = []
@@ -487,7 +535,131 @@ async def handle_models(request: web.Request) -> web.Response:
 
 async def handle_health(request: web.Request) -> web.Response:
     """GET /health"""
-    return web.json_response({"status": "ok"})
+    soft = int(request.app.get("max_upload_soft_bytes", MAX_UPLOAD_SOFT_BYTES))
+    hard = int(request.app.get("max_upload_bytes", DEFAULT_MAX_UPLOAD_HARD_MB * 1024 * 1024))
+    hard_mb = int(request.app.get("max_upload_mb", DEFAULT_MAX_UPLOAD_HARD_MB))
+    return web.json_response({
+        "status": "ok",
+        "maxUploadSoftMb": soft // (1024 * 1024),
+        "maxUploadHardMb": hard_mb,
+        "maxUploadSoftBytes": soft,
+        "maxUploadHardBytes": hard,
+    })
+
+
+async def handle_web_uploads(request: web.Request) -> web.Response:
+    """POST /v1/web/uploads — multipart file upload for web chat (video/docs).
+
+    Streams each part to ``workspace/uploads/web/<session>/`` so large files
+    (up to api.maxUploadMb, default 2 GiB) do not need to fit in RAM or JSON base64.
+    """
+    ctype = (request.content_type or "").lower()
+    if "multipart/" not in ctype:
+        return _error_json(400, "Ожидается multipart/form-data")
+
+    agent_loop = request.app["agent_loop"]
+    hard_limit = int(request.app.get("max_upload_bytes", DEFAULT_MAX_UPLOAD_HARD_MB * 1024 * 1024))
+    session_id = "default"
+    saved: list[dict[str, Any]] = []
+    upload_dir: Path | None = None
+    ws: Path | None = None
+    tag = uuid.uuid4().hex[:10]
+    file_index = 0
+
+    async def _bind_session(sid: str) -> web.Response | None:
+        nonlocal upload_dir, ws
+        try:
+            sm = await agent_loop.session_manager_for_api(sid)
+        except Exception:
+            logger.exception("Failed to resolve session for upload sid={}", sid)
+            return _error_json(500, "Internal server error", err_type="server_error")
+        upload_dir = _web_upload_dir(sm.workspace, sid)
+        ws = sm.workspace.resolve()
+        return None
+
+    try:
+        reader = await request.multipart()
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            name = part.name or ""
+            if name == "session_id":
+                session_id = (await part.text()).strip() or "default"
+                err = await _bind_session(session_id)
+                if err is not None:
+                    return err
+                continue
+            if name not in ("files", "file"):
+                await part.read(decode=False)
+                continue
+
+            if upload_dir is None or ws is None:
+                err = await _bind_session(session_id)
+                if err is not None:
+                    return err
+
+            filename = Path(part.filename or "file.bin").name
+            mime = "application/octet-stream"
+            hdr_ct = None
+            if hasattr(part, "headers"):
+                hdr_ct = part.headers.get("Content-Type")
+            if hdr_ct and "/" in str(hdr_ct):
+                mime = str(hdr_ct).split(";")[0].strip()
+            elif mimetypes.guess_type(filename)[0]:
+                mime = mimetypes.guess_type(filename)[0] or mime
+
+            assert upload_dir is not None and ws is not None
+            base = safe_filename(filename)[:160] or "file.bin"
+            if "." not in base:
+                guess = mimetypes.guess_extension(mime) or ".bin"
+                base = f"{base}{guess}"
+            fn = f"{tag}_{file_index}_{base}"
+            path = upload_dir / fn
+            try:
+                size = await _stream_multipart_part_to_path(part, path, hard_limit)
+            except ValueError as e:
+                return _error_json(413, str(e))
+            except OSError as e:
+                logger.warning("Failed to write multipart upload {}: {}", path, e)
+                return _error_json(
+                    500, f"Не удалось сохранить файл: {filename}", err_type="server_error"
+                )
+            if size == 0:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return _error_json(400, f"Пустой файл: {filename}")
+
+            resolved = path.resolve()
+            try:
+                resolved.relative_to(ws)
+            except ValueError:
+                logger.warning("Upload path outside workspace, dropping {}", resolved)
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return _error_json(500, "Путь загрузки вне workspace", err_type="server_error")
+
+            saved.append({
+                "filename": filename,
+                "saved_as": fn,
+                "path": str(resolved),
+                "mime": mime,
+                "size": size,
+            })
+            logger.info("Web UI multipart saved {} ({}, {} bytes)", resolved, mime, size)
+            file_index += 1
+    except Exception:
+        logger.exception("Failed to parse multipart web upload")
+        return _error_json(400, "Не удалось прочитать загрузку")
+
+    if not saved:
+        return _error_json(400, "Нет файлов в запросе")
+
+    return web.json_response({"object": "upload.result", "data": saved})
 
 
 async def handle_web_sessions_list(request: web.Request) -> web.Response:
@@ -742,19 +914,32 @@ async def handle_web_backup_download(request: web.Request) -> web.StreamResponse
 # App factory
 # ---------------------------------------------------------------------------
 
-def create_app(agent_loop, model_name: str = "krabobot", request_timeout: float = 120.0) -> web.Application:
+def create_app(
+    agent_loop,
+    model_name: str = "krabobot",
+    request_timeout: float = 120.0,
+    *,
+    max_upload_mb: int | None = None,
+) -> web.Application:
     """Create the aiohttp application.
 
     Args:
         agent_loop: An initialized AgentLoop instance.
         model_name: Model name reported in responses.
         request_timeout: Per-request timeout in seconds.
+        max_upload_mb: Hard max for multipart web uploads (default 2048). Soft UI
+            threshold between in-chat and folder-upload modes stays 50 MiB.
     """
-    app = web.Application(client_max_size=MAX_REQUEST_BODY_BYTES)
+    hard_mb, hard_bytes = _resolve_max_upload_bytes(max_upload_mb)
+    client_max = max(MAX_REQUEST_BODY_BYTES, hard_bytes)
+    app = web.Application(client_max_size=client_max)
     app["agent_loop"] = agent_loop
     app["model_name"] = model_name
     app["request_timeout"] = request_timeout
     app["session_locks"] = {}  # per-user locks, keyed by session_key
+    app["max_upload_mb"] = hard_mb
+    app["max_upload_bytes"] = hard_bytes
+    app["max_upload_soft_bytes"] = MAX_UPLOAD_SOFT_BYTES
 
     static = web_static_dir()
     if static.is_dir():
@@ -763,6 +948,7 @@ def create_app(agent_loop, model_name: str = "krabobot", request_timeout: float 
     app.router.add_post("/v1/chat/completions", handle_chat_completions)
     app.router.add_get("/v1/models", handle_models)
     app.router.add_get("/health", handle_health)
+    app.router.add_post("/v1/web/uploads", handle_web_uploads)
     app.router.add_get("/v1/web/sessions", handle_web_sessions_list)
     app.router.add_delete("/v1/web/sessions/{session_id}", handle_web_sessions_delete)
     app.router.add_get("/v1/web/sessions/{session_id}/messages", handle_web_session_messages)

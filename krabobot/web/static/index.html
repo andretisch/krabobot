@@ -128,7 +128,7 @@
               id="kb-files"
               class="kb-file-input"
               multiple
-              accept="image/*,audio/*,text/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.zip,.7z,.rar,.epub"
+              accept="image/*,audio/*,video/*,text/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.zip,.7z,.rar,.epub,.mp4,.webm,.mov,.mkv,.avi,.m4v"
             />
             <div class="kb-compose">
               <textarea id="kb-input" class="kb-input" rows="3" placeholder="Текст сообщения…"></textarea>
@@ -280,6 +280,10 @@
           <p class="kb-settings-p">
             Вложения из чата сохраняются в
             <code>uploads/web/&lt;session_id&gt;/</code> рабочего каталога агента.
+            До 50&nbsp;МБ — обычная вставка в чат; больше (до
+            <code>api.maxUploadMb</code>, по умолчанию 2048&nbsp;МБ) — потоковая
+            загрузка в эту папку, боту уходит путь к файлу для инструментов
+            (например ffmpeg).
           </p>
         </div>
       </div>

@@ -83,6 +83,8 @@ class ApiConfig(Base):
     host: str = "127.0.0.1"  # Safer default: local-only bind.
     port: int = 8900
     timeout: float = 120.0  # Per-request timeout in seconds.
+    # Hard max for multipart web uploads (stream-to-disk). Soft UI threshold stays 50 MiB.
+    max_upload_mb: int = Field(default=2048, ge=1, le=10240)
 
 
 class GatewayConfig(Base):

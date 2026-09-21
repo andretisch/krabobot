@@ -908,6 +908,11 @@
         const j = await r.json().catch(() => ({}));
         elHealth.textContent =
           r.ok && j.status === "ok" ? "ok" : "HTTP " + r.status;
+        if (r.ok && typeof j.maxUploadHardBytes === "number" && j.maxUploadHardBytes > 0) {
+          maxAttachHardBytes = j.maxUploadHardBytes;
+        } else if (r.ok && typeof j.maxUploadHardMb === "number" && j.maxUploadHardMb > 0) {
+          maxAttachHardBytes = j.maxUploadHardMb * 1024 * 1024;
+        }
       } catch {
         elHealth.textContent = "недоступно";
       }
@@ -956,9 +961,125 @@
         const i = s.indexOf(",");
         resolve(i >= 0 ? s.slice(i + 1) : s);
       };
-      fr.onerror = () => reject(fr.error);
+      fr.onerror = () => {
+        const err = fr.error;
+        const name = file && file.name ? file.name : "файл";
+        if (err && err.name === "NotReadableError") {
+          reject(
+            new Error(
+              "Не удалось прочитать «" +
+                name +
+                "». Для больших видео используйте обычную отправку (без повторного выбора из OneDrive/временной папки) или уменьшите файл."
+            )
+          );
+          return;
+        }
+        reject(err || new Error("Ошибка чтения файла «" + name + "»"));
+      };
       fr.readAsDataURL(file);
     });
+  }
+
+  /** Soft: ≤50 MiB — usual attach (multipart or inline). Above — folder stream upload. */
+  const MAX_ATTACH_SOFT_BYTES = 50 * 1024 * 1024;
+  /** Hard max for large folder uploads; refreshed from GET /health when available. */
+  let maxAttachHardBytes = 2048 * 1024 * 1024;
+
+  function formatSizeMb(n) {
+    return (Number(n) / (1024 * 1024)).toFixed(0);
+  }
+
+  function assertAttachHardMax(file) {
+    if (!file || typeof file.size !== "number") {
+      return;
+    }
+    if (file.size > maxAttachHardBytes) {
+      throw new Error(
+        "Файл «" +
+          (file.name || "без имени") +
+          "» слишком большой (" +
+          formatSizeMb(file.size) +
+          " МБ). Максимум — " +
+          formatSizeMb(maxAttachHardBytes) +
+          " МБ. Уменьшите файл или поднимите api.maxUploadMb в config.json."
+      );
+    }
+  }
+
+  function isLargeAttach(file) {
+    return file && typeof file.size === "number" && file.size > MAX_ATTACH_SOFT_BYTES;
+  }
+
+  function isVideoFile(file) {
+    const mt = (file.type || "").toLowerCase();
+    const name = file.name || "";
+    if (mt.startsWith("video/")) {
+      return true;
+    }
+    // Extension-only: treat as video unless browser labeled it audio/*
+    if (mt.startsWith("audio/")) {
+      return false;
+    }
+    return /\.(mp4|m4v|mov|mkv|avi|webm)$/i.test(name);
+  }
+
+  /** Large / binary attachments go via multipart — not FileReader base64 in JSON. */
+  function needsMultipartUpload(file) {
+    const mt = (file.type || "").toLowerCase();
+    const name = file.name || "";
+    if (isVideoFile(file)) {
+      return true;
+    }
+    if (mt.startsWith("image/")) {
+      return false;
+    }
+    if (mt.startsWith("audio/") || /\.(mp3|wav|ogg|m4a|flac)$/i.test(name)) {
+      return false;
+    }
+    // audio/webm from mic — keep inline; bare .webm without audio/ already caught as video
+    if (/\.(webm)$/i.test(name) && mt.startsWith("audio/")) {
+      return false;
+    }
+    if (
+      mt.startsWith("text/") ||
+      /\.(txt|md|csv|json|xml|yaml|yml|log|ini|env)$/i.test(name)
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  async function uploadFilesMultipart(files, opts) {
+    if (!files.length) {
+      return [];
+    }
+    for (const f of files) {
+      assertAttachHardMax(f);
+    }
+    const large = files.some(isLargeAttach);
+    if (large) {
+      setStatus("Загрузка большого файла…");
+    } else if (opts && opts.status) {
+      setStatus(opts.status);
+    }
+    const fd = new FormData();
+    fd.append("session_id", getSessionId());
+    for (const f of files) {
+      fd.append("files", f, f.name || "file.bin");
+    }
+    const r = await fetch("/v1/web/uploads", { method: "POST", body: fd });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const msg =
+        data?.error?.message ||
+        (typeof data === "object" ? JSON.stringify(data) : String(data));
+      throw new Error(msg || "Загрузка файла: HTTP " + r.status);
+    }
+    const rows = Array.isArray(data.data) ? data.data : [];
+    if (!rows.length) {
+      throw new Error("Сервер не вернул сохранённые файлы");
+    }
+    return rows;
   }
 
   function audioFormat(mime, name) {
@@ -976,12 +1097,37 @@
 
   /**
    * OpenAI-style content parts from text + files.
+   * ≤50 MiB: images/audio/text stay inline (base64); video/docs via multipart.
+   * >50 MiB: stream multipart to workspace folder (no FileReader), then path notes.
    */
   async function buildContentPayload(text, files) {
     const parts = [];
     const trim = (text || "").trim();
+    const multipartFiles = [];
+    const inlineFiles = [];
 
     for (const file of files) {
+      assertAttachHardMax(file);
+      // Large files always go through folder upload (never FileReader/base64).
+      if (isLargeAttach(file) || needsMultipartUpload(file)) {
+        multipartFiles.push(file);
+      } else {
+        inlineFiles.push(file);
+      }
+    }
+
+    if (multipartFiles.length) {
+      const uploaded = await uploadFilesMultipart(multipartFiles);
+      for (const u of uploaded) {
+        const p = u.path || u.saved_as || u.filename;
+        parts.push({
+          type: "text",
+          text: "[Файл сохранён в workspace: " + p + "]",
+        });
+      }
+    }
+
+    for (const file of inlineFiles) {
       const mt = file.type || "";
       const name = file.name || "file";
 
@@ -1015,16 +1161,14 @@
         continue;
       }
 
-      // PDF, Office, архивы и остальной бинарник — на сервер как base64, сохраняется в workspace
-      const b64 = await readAsBase64(file);
-      parts.push({
-        type: "kb_file",
-        kb_file: {
-          filename: name,
-          mime: mt || "application/octet-stream",
-          data: b64,
-        },
-      });
+      // Fallback (should be rare — needsMultipartUpload covers the rest)
+      const uploaded = await uploadFilesMultipart([file]);
+      for (const u of uploaded) {
+        parts.push({
+          type: "text",
+          text: "[Файл сохранён в workspace: " + (u.path || u.filename) + "]",
+        });
+      }
     }
 
     if (trim && parts.length === 0) {
@@ -1567,7 +1711,15 @@
   fileInputEl.addEventListener("change", () => {
     const files = Array.from(fileInputEl.files || []);
     fileInputEl.value = "";
-    pendingFiles.push(...files);
+    for (const f of files) {
+      try {
+        assertAttachHardMax(f);
+      } catch (err) {
+        appendMessage("assistant", String(err.message || err), "error");
+        continue;
+      }
+      pendingFiles.push(f);
+    }
     renderAttachments();
   });
 
