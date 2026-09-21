@@ -749,6 +749,30 @@ body {
   text-align: right;
 }
 
+.kb-status--busy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.45rem;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.kb-status-spinner {
+  width: 0.85rem;
+  height: 0.85rem;
+  border: 2px solid rgba(255, 255, 255, 0.28);
+  border-top-color: rgba(255, 255, 255, 0.95);
+  border-radius: 50%;
+  flex-shrink: 0;
+  animation: kb-spin 0.7s linear infinite;
+}
+
+@keyframes kb-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .kb-main {
   position: relative;
   z-index: 2;

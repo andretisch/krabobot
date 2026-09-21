@@ -140,7 +140,27 @@
   }
 
   function setStatus(text) {
+    statusEl.classList.remove("kb-status--busy");
     statusEl.textContent = text || "";
+  }
+
+  /** Status with spinner + optional percent (upload progress). */
+  function setUploadProgressStatus(label, percent) {
+    const pct =
+      typeof percent === "number" && Number.isFinite(percent)
+        ? Math.max(0, Math.min(100, Math.round(percent)))
+        : null;
+    const line = pct != null ? label + " " + pct + "%" : label;
+    statusEl.classList.add("kb-status--busy");
+    statusEl.replaceChildren();
+    const spin = document.createElement("span");
+    spin.className = "kb-status-spinner";
+    spin.setAttribute("aria-hidden", "true");
+    const text = document.createElement("span");
+    text.className = "kb-status-text";
+    text.textContent = line;
+    statusEl.appendChild(spin);
+    statusEl.appendChild(text);
   }
 
   const KB_CFG_AGENT_ORDER = ["model", "provider", "workspace", "anonymize", "shortMemory"];
@@ -1075,6 +1095,38 @@
     return true;
   }
 
+  /**
+   * POST FormData with upload progress (XHR). Returns { ok, status, data }.
+   * @param {(loaded: number, total: number) => void} [onProgress]
+   */
+  function postFormDataWithProgress(url, formData, onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", url);
+      xhr.upload.onprogress = (ev) => {
+        if (typeof onProgress === "function") {
+          onProgress(ev.loaded, ev.lengthComputable ? ev.total : 0);
+        }
+      };
+      xhr.onload = () => {
+        let data = {};
+        try {
+          data = xhr.responseText ? JSON.parse(xhr.responseText) : {};
+        } catch (_e) {
+          data = {};
+        }
+        resolve({
+          ok: xhr.status >= 200 && xhr.status < 300,
+          status: xhr.status,
+          data: data,
+        });
+      };
+      xhr.onerror = () => reject(new Error("NetworkError"));
+      xhr.onabort = () => reject(new Error("Aborted"));
+      xhr.send(formData);
+    });
+  }
+
   async function uploadFilesMultipart(files, opts) {
     if (!files.length) {
       return [];
@@ -1083,11 +1135,10 @@
       assertAttachHardMax(f);
     }
     const large = files.some(isLargeAttach);
-    if (large) {
-      setStatus("Загрузка большого файла…");
-    } else if (opts && opts.status) {
-      setStatus(opts.status);
-    }
+    const statusLabel = large
+      ? "Загрузка большого файла…"
+      : (opts && opts.status) || "Загрузка файла…";
+    setUploadProgressStatus(statusLabel, 0);
     const fd = new FormData();
     fd.append("session_id", getSessionId());
     for (const f of files) {
@@ -1096,13 +1147,21 @@
     }
     let r;
     try {
-      r = await fetch("/v1/web/uploads", { method: "POST", body: fd });
+      r = await postFormDataWithProgress("/v1/web/uploads", fd, (loaded, total) => {
+        if (total > 0) {
+          setUploadProgressStatus(statusLabel, (loaded / total) * 100);
+        } else {
+          setUploadProgressStatus(statusLabel, null);
+        }
+      });
     } catch (err) {
+      setStatus("");
       const n = files[0] && files[0].name ? files[0].name : "файл";
       throw new Error(friendlyAttachError(err, n));
     }
-    const data = await r.json().catch(() => ({}));
+    const data = r.data && typeof r.data === "object" ? r.data : {};
     if (!r.ok) {
+      setStatus("");
       const msg =
         data?.error?.message ||
         (typeof data === "object" ? JSON.stringify(data) : String(data));
@@ -1110,6 +1169,7 @@
     }
     const rows = Array.isArray(data.data) ? data.data : [];
     if (!rows.length) {
+      setStatus("");
       throw new Error("Сервер не вернул сохранённые файлы");
     }
     return rows;
