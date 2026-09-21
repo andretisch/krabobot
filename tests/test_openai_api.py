@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -313,8 +314,11 @@ async def test_root_serves_bundled_chat_ui(aiohttp_client, app) -> None:
     client = await aiohttp_client(app)
     resp = await client.get("/")
     assert resp.status == 200
+    assert resp.headers.get("Cache-Control") == "no-store"
     text = await resp.text()
     assert "<html" in text.lower()
+    # mtime cache-bust so browsers pick up app.js after deploy without hard refresh
+    assert re.search(r'src="/static/app\.js\?v=\d+"', text)
 
 
 @pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
@@ -463,6 +467,38 @@ async def test_web_session_delete_and_messages(aiohttp_client) -> None:
     assert resp2.status == 200
     body = await resp2.json()
     assert body["data"] == []
+
+
+@pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
+@pytest.mark.asyncio
+async def test_web_session_messages_strips_linked_accounts(aiohttp_client) -> None:
+    """UI history must not leak [Linked Accounts] blocks into the chat transcript."""
+    linked = (
+        "[Linked Accounts]\n"
+        "user_id: u1\n"
+        "accounts: telegram:123, vk:456\n\n"
+        "Hello from user"
+    )
+    sm = MagicMock()
+    sm.invalidate = MagicMock()
+    sm.get_or_create.return_value = MagicMock(
+        messages=[
+            {"role": "user", "content": linked},
+            {"role": "assistant", "content": "Hi!"},
+        ]
+    )
+
+    agent = _make_mock_agent()
+    agent.session_manager_for_api = AsyncMock(return_value=sm)
+
+    app = create_app(agent, model_name="m")
+    client = await aiohttp_client(app)
+    resp = await client.get("/v1/web/sessions/s1/messages")
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["data"][0]["content"] == "Hello from user"
+    assert "Linked Accounts" not in body["data"][0]["content"]
+    assert body["data"][1]["content"] == "Hi!"
 
 
 @pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
@@ -621,12 +657,22 @@ def test_persist_web_uploads_kb_file_mp4(tmp_path: Path) -> None:
 
 
 def test_max_upload_soft_under_body_limit() -> None:
+    """Soft 50 MiB is the UI attach threshold; multipart endpoint enforces hard max."""
     from krabobot.api.server import MAX_REQUEST_BODY_BYTES
 
     assert MAX_UPLOAD_SOFT_BYTES < MAX_REQUEST_BODY_BYTES
     assert MAX_UPLOAD_SOFT_BYTES == 50 * 1024 * 1024
     assert MAX_UPLOAD_FILE_BYTES == MAX_UPLOAD_SOFT_BYTES
     assert DEFAULT_MAX_UPLOAD_HARD_MB == 2048
+
+
+def test_create_app_soft_and_hard_upload_limits_distinct() -> None:
+    """Regression: soft (UI) stays 50 MiB while hard follows max_upload_mb."""
+    agent = MagicMock()
+    app = create_app(agent, model_name="m", max_upload_mb=512)
+    assert app["max_upload_soft_bytes"] == MAX_UPLOAD_SOFT_BYTES
+    assert app["max_upload_bytes"] == 512 * 1024 * 1024
+    assert app["max_upload_soft_bytes"] < app["max_upload_bytes"]
 
 
 def test_create_app_client_max_covers_hard_upload() -> None:

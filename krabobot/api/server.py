@@ -40,11 +40,29 @@ def web_static_dir() -> Path:
 
 
 async def handle_chat_index(_request: web.Request) -> web.StreamResponse:
-    """Serve single-page chat at GET /."""
-    idx = web_static_dir() / "index.html"
+    """Serve single-page chat at GET /. Inject mtime cache-bust on app.js / CSS."""
+    static = web_static_dir()
+    idx = static / "index.html"
     if not idx.is_file():
         return web.Response(status=404, text="Web UI not found on server.")
-    return web.FileResponse(idx)
+    try:
+        html = idx.read_text(encoding="utf-8")
+    except OSError:
+        return web.Response(status=500, text="Failed to read Web UI.")
+    app_js = static / "app.js"
+    if app_js.is_file():
+        ver = str(int(app_js.stat().st_mtime))
+        html = html.replace('src="/static/app.js"', f'src="/static/app.js?v={ver}"')
+    css = static / "chat.css"
+    if css.is_file():
+        cver = str(int(css.stat().st_mtime))
+        html = html.replace('href="/static/chat.css"', f'href="/static/chat.css?v={cver}"')
+    return web.Response(
+        text=html,
+        content_type="text/html",
+        charset="utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
 
 API_SESSION_KEY = "api:default"
 API_CHAT_ID = "default"

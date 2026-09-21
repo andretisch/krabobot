@@ -119,7 +119,11 @@
       return null;
     }
   }
-  /** @type {File[]} */
+  /**
+   * Pending attachments: either a browser File, or an already-uploaded multipart ref
+   * (video/docs/large) so we never FileReader them later at send time.
+   * @type {Array<File|{__kbUploaded:true,name:string,rows:object[]}>}
+   */
   let pendingFiles = [];
 
   function getSessionId() {
@@ -953,6 +957,47 @@
     logEl.scrollTop = logEl.scrollHeight;
   }
 
+  /** Soft: ≤50 MiB — usual attach (multipart or inline). Above — folder stream upload. */
+  const MAX_ATTACH_SOFT_BYTES = 50 * 1024 * 1024;
+  /** Hard max for large folder uploads; refreshed from GET /health when available. */
+  let maxAttachHardBytes = 2048 * 1024 * 1024;
+
+  function formatSizeMb(n) {
+    return (Number(n) / (1024 * 1024)).toFixed(0);
+  }
+
+  function isUploadedRef(item) {
+    return !!(item && item.__kbUploaded === true);
+  }
+
+  function attachDisplayName(item) {
+    if (isUploadedRef(item)) {
+      return item.name || "файл";
+    }
+    return (item && item.name) || "файл";
+  }
+
+  /** Browser NotReadableError / locked OneDrive-Teams file → clear Russian text. */
+  function friendlyAttachError(err, fileName) {
+    const name = fileName || "файл";
+    const raw = err && (err.message || err.name) ? String(err.message || err.name) : String(err || "");
+    const isNotReadable =
+      (err && err.name === "NotReadableError") ||
+      /could not be read/i.test(raw) ||
+      /NotReadableError/i.test(raw) ||
+      /permission problems that have occurred after a reference/i.test(raw);
+    if (isNotReadable) {
+      return (
+        "Не удалось прочитать «" +
+        name +
+        "». Файл, скорее всего, ещё записывается или заблокирован (Teams/OneDrive). " +
+        "Дождитесь окончания записи/синхронизации и выберите файл снова. " +
+        "Видео в чат уходит как обычная загрузка файла (без чтения в память браузера)."
+      );
+    }
+    return raw || "Ошибка чтения файла «" + name + "»";
+  }
+
   function readAsBase64(file) {
     return new Promise((resolve, reject) => {
       const fr = new FileReader();
@@ -964,29 +1009,10 @@
       fr.onerror = () => {
         const err = fr.error;
         const name = file && file.name ? file.name : "файл";
-        if (err && err.name === "NotReadableError") {
-          reject(
-            new Error(
-              "Не удалось прочитать «" +
-                name +
-                "». Для больших видео используйте обычную отправку (без повторного выбора из OneDrive/временной папки) или уменьшите файл."
-            )
-          );
-          return;
-        }
-        reject(err || new Error("Ошибка чтения файла «" + name + "»"));
+        reject(new Error(friendlyAttachError(err || new Error("read failed"), name)));
       };
       fr.readAsDataURL(file);
     });
-  }
-
-  /** Soft: ≤50 MiB — usual attach (multipart or inline). Above — folder stream upload. */
-  const MAX_ATTACH_SOFT_BYTES = 50 * 1024 * 1024;
-  /** Hard max for large folder uploads; refreshed from GET /health when available. */
-  let maxAttachHardBytes = 2048 * 1024 * 1024;
-
-  function formatSizeMb(n) {
-    return (Number(n) / (1024 * 1024)).toFixed(0);
   }
 
   function assertAttachHardMax(file) {
@@ -1013,18 +1039,22 @@
   function isVideoFile(file) {
     const mt = (file.type || "").toLowerCase();
     const name = file.name || "";
-    if (mt.startsWith("video/")) {
+    // Extension wins: Teams/OneDrive often mislabel .mp4 as audio/* or octet-stream.
+    if (/\.(mp4|m4v|mov|mkv|avi|webm)$/i.test(name)) {
+      // Mic audio/webm stays audio; only bare/unknown .webm counts as video above.
+      if (/\.webm$/i.test(name) && mt.startsWith("audio/")) {
+        return false;
+      }
       return true;
     }
-    // Extension-only: treat as video unless browser labeled it audio/*
-    if (mt.startsWith("audio/")) {
-      return false;
-    }
-    return /\.(mp4|m4v|mov|mkv|avi|webm)$/i.test(name);
+    return mt.startsWith("video/");
   }
 
   /** Large / binary attachments go via multipart — not FileReader base64 in JSON. */
   function needsMultipartUpload(file) {
+    if (isUploadedRef(file)) {
+      return false;
+    }
     const mt = (file.type || "").toLowerCase();
     const name = file.name || "";
     if (isVideoFile(file)) {
@@ -1034,10 +1064,6 @@
       return false;
     }
     if (mt.startsWith("audio/") || /\.(mp3|wav|ogg|m4a|flac)$/i.test(name)) {
-      return false;
-    }
-    // audio/webm from mic — keep inline; bare .webm without audio/ already caught as video
-    if (/\.(webm)$/i.test(name) && mt.startsWith("audio/")) {
       return false;
     }
     if (
@@ -1065,9 +1091,16 @@
     const fd = new FormData();
     fd.append("session_id", getSessionId());
     for (const f of files) {
+      // Pass File/Blob directly — never FileReader / base64 into JS memory.
       fd.append("files", f, f.name || "file.bin");
     }
-    const r = await fetch("/v1/web/uploads", { method: "POST", body: fd });
+    let r;
+    try {
+      r = await fetch("/v1/web/uploads", { method: "POST", body: fd });
+    } catch (err) {
+      const n = files[0] && files[0].name ? files[0].name : "файл";
+      throw new Error(friendlyAttachError(err, n));
+    }
     const data = await r.json().catch(() => ({}));
     if (!r.ok) {
       const msg =
@@ -1099,6 +1132,7 @@
    * OpenAI-style content parts from text + files.
    * ≤50 MiB: images/audio/text stay inline (base64); video/docs via multipart.
    * >50 MiB: stream multipart to workspace folder (no FileReader), then path notes.
+   * Pre-uploaded refs (from attach-time multipart) only add path notes — no re-read.
    */
   async function buildContentPayload(text, files) {
     const parts = [];
@@ -1106,9 +1140,20 @@
     const multipartFiles = [];
     const inlineFiles = [];
 
-    for (const file of files) {
+    for (const item of files) {
+      if (isUploadedRef(item)) {
+        for (const u of item.rows || []) {
+          const p = u.path || u.saved_as || u.filename;
+          parts.push({
+            type: "text",
+            text: "[Файл сохранён в workspace: " + p + "]",
+          });
+        }
+        continue;
+      }
+      const file = item;
       assertAttachHardMax(file);
-      // Large files always go through folder upload (never FileReader/base64).
+      // Large / video / binary: never FileReader/base64 — FormData only.
       if (isLargeAttach(file) || needsMultipartUpload(file)) {
         multipartFiles.push(file);
       } else {
@@ -1131,43 +1176,58 @@
       const mt = file.type || "";
       const name = file.name || "file";
 
-      if (mt.startsWith("image/")) {
-        const b64 = await readAsBase64(file);
-        parts.push({
-          type: "image_url",
-          image_url: { url: `data:${mt};base64,${b64}` },
-        });
-        continue;
-      }
-
-      if (mt.startsWith("audio/") || /\.(mp3|wav|ogg|webm|m4a|flac)$/i.test(name)) {
-        const b64 = await readAsBase64(file);
-        parts.push({
-          type: "input_audio",
-          input_audio: { data: b64, format: audioFormat(mt, name) },
-        });
-        continue;
-      }
-
-      if (
-        mt.startsWith("text/") ||
-        /\.(txt|md|csv|json|xml|yaml|yml|log|ini|env)$/i.test(name)
-      ) {
-        let t = await file.text();
-        if (t.length > 120000) {
-          t = t.slice(0, 120000) + "\n…(обрезано)";
+      try {
+        if (mt.startsWith("image/")) {
+          const b64 = await readAsBase64(file);
+          parts.push({
+            type: "image_url",
+            image_url: { url: `data:${mt};base64,${b64}` },
+          });
+          continue;
         }
-        parts.push({ type: "text", text: `--- ${name} ---\n${t}` });
-        continue;
-      }
 
-      // Fallback (should be rare — needsMultipartUpload covers the rest)
-      const uploaded = await uploadFilesMultipart([file]);
-      for (const u of uploaded) {
-        parts.push({
-          type: "text",
-          text: "[Файл сохранён в workspace: " + (u.path || u.filename) + "]",
-        });
+        if (mt.startsWith("audio/") || /\.(mp3|wav|ogg|webm|m4a|flac)$/i.test(name)) {
+          // Never inline true video containers (e.g. mislabeled .mp4).
+          if (isVideoFile(file)) {
+            const uploaded = await uploadFilesMultipart([file]);
+            for (const u of uploaded) {
+              parts.push({
+                type: "text",
+                text: "[Файл сохранён в workspace: " + (u.path || u.filename) + "]",
+              });
+            }
+            continue;
+          }
+          const b64 = await readAsBase64(file);
+          parts.push({
+            type: "input_audio",
+            input_audio: { data: b64, format: audioFormat(mt, name) },
+          });
+          continue;
+        }
+
+        if (
+          mt.startsWith("text/") ||
+          /\.(txt|md|csv|json|xml|yaml|yml|log|ini|env)$/i.test(name)
+        ) {
+          let t = await file.text();
+          if (t.length > 120000) {
+            t = t.slice(0, 120000) + "\n…(обрезано)";
+          }
+          parts.push({ type: "text", text: `--- ${name} ---\n${t}` });
+          continue;
+        }
+
+        // Fallback (should be rare — needsMultipartUpload covers the rest)
+        const uploaded = await uploadFilesMultipart([file]);
+        for (const u of uploaded) {
+          parts.push({
+            type: "text",
+            text: "[Файл сохранён в workspace: " + (u.path || u.filename) + "]",
+          });
+        }
+      } catch (err) {
+        throw new Error(friendlyAttachError(err, name));
       }
     }
 
@@ -1422,7 +1482,11 @@
       setStatus("");
       await refreshSessions();
     } catch (err) {
-      appendMessage("assistant", String(err.message || err), "error");
+      const hint =
+        filesSnapshot && filesSnapshot.length
+          ? attachDisplayName(filesSnapshot[0])
+          : "";
+      appendMessage("assistant", friendlyAttachError(err, hint), "error");
       setStatus("");
     } finally {
       sendBtn.disabled = false;
@@ -1478,7 +1542,7 @@
     const userVisible =
       text +
       (filesSnapshot.length
-        ? "\n" + filesSnapshot.map((f) => "📎 " + f.name).join("\n")
+        ? "\n" + filesSnapshot.map((f) => "📎 " + attachDisplayName(f)).join("\n")
         : "");
     inputEl.value = "";
     await postChatTurn(userVisible || "(вложения)", text, filesSnapshot);
@@ -1708,19 +1772,41 @@
 
   attachBtn.addEventListener("click", () => fileInputEl.click());
 
-  fileInputEl.addEventListener("change", () => {
+  fileInputEl.addEventListener("change", async () => {
     const files = Array.from(fileInputEl.files || []);
+    // Keep File references; clear only the input so the same path can be re-picked.
     fileInputEl.value = "";
     for (const f of files) {
       try {
         assertAttachHardMax(f);
+        // Video / docs / large: upload immediately via FormData (no FileReader).
+        // Avoids stale handles and never loads the file into JS memory as base64.
+        if (isLargeAttach(f) || needsMultipartUpload(f)) {
+          setStatus("Загрузка «" + (f.name || "файл") + "»…");
+          sendBtn.disabled = true;
+          const rows = await uploadFilesMultipart([f], {
+            status: "Загрузка «" + (f.name || "файл") + "»…",
+          });
+          pendingFiles.push({
+            __kbUploaded: true,
+            name: f.name || "file.bin",
+            rows: rows,
+          });
+        } else {
+          pendingFiles.push(f);
+        }
       } catch (err) {
-        appendMessage("assistant", String(err.message || err), "error");
-        continue;
+        appendMessage(
+          "assistant",
+          friendlyAttachError(err, f && f.name ? f.name : "файл"),
+          "error"
+        );
+      } finally {
+        sendBtn.disabled = false;
       }
-      pendingFiles.push(f);
     }
     renderAttachments();
+    setStatus("");
   });
 
   function renderAttachments() {
@@ -1732,7 +1818,7 @@
     pendingFiles.forEach((f) => {
       const tag = document.createElement("span");
       tag.className = "kb-attach-tag";
-      tag.textContent = f.name;
+      tag.textContent = attachDisplayName(f);
       const x = document.createElement("button");
       x.type = "button";
       x.textContent = "×";

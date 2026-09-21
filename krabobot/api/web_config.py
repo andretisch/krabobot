@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import secrets
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -17,8 +18,10 @@ _CHANNEL_COMMON_KEYS: frozenset[str] = frozenset({"sendProgress", "sendToolHints
 _OTHER_SECTION_KEYS_UI: frozenset[str] = frozenset({"api", "gateway", "tools", "tts", "stt"})
 SECRET_DISPLAY_MASK = "••••••••"
 _BACKUP_LEGACY = re.compile(r"^config\.backup\.[0-9]{8}-[0-9]{6}\.json$")
-# Microseconds avoid colliding with a restore source backup created same wall second.
-_BACKUP_WITH_MICROS = re.compile(r"^config\.backup\.[0-9]{8}-[0-9]{6}-[0-9]{6}\.json$")
+# Microseconds + optional hex disambiguator (Windows clock often shares the same %f).
+_BACKUP_WITH_MICROS = re.compile(
+    r"^config\.backup\.[0-9]{8}-[0-9]{6}-[0-9]{6}(?:-[0-9a-f]{4,8})?\.json$"
+)
 
 
 def _should_redact_key(key: str) -> bool:
@@ -185,6 +188,10 @@ def backup_config_now(path: Path | None = None) -> Path:
     parent = cfg.parent
     suffix = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     dup = parent / f"config.backup.{suffix}.json"
+    # Avoid clobbering an existing backup when the clock has not advanced (Windows).
+    if dup.exists():
+        suffix = f"{suffix}-{secrets.token_hex(3)}"
+        dup = parent / f"config.backup.{suffix}.json"
     shutil.copy2(cfg, dup)
     return dup
 
@@ -238,6 +245,8 @@ def restore_backup(basename: str) -> tuple[Path, Path]:
     if parent != src.parent or src.name != basename:
         raise ValueError("backup path escapes config directory")
 
+    # Read first: a same-timestamp safety backup must not overwrite the restore source.
+    payload = src.read_bytes()
     bak = backup_config_now(dest)
-    shutil.copy2(src, dest)
+    dest.write_bytes(payload)
     return dest.resolve(), bak.resolve()

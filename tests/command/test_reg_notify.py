@@ -146,3 +146,56 @@ async def test_deliver_outbound_api_does_not_warn_unknown_channel(tmp_path: Path
     sm = await loop.session_manager_for_api("s1")
     session = sm.get_or_create("api:s1")
     assert session.messages[-1]["content"] == "hello owner"
+
+
+async def _cli_session(loop, chat_id: str = "direct"):
+    """Resolve the SessionManager used for local cli outbound (per-user workspace)."""
+    stub = InboundMessage(channel="cli", sender_id=chat_id, chat_id="default", content="")
+    await loop._ensure_identity(stub)
+    runtime = await loop._runtime_for_message(stub)
+    return runtime.sessions.get_or_create(f"cli:{chat_id}")
+
+
+@pytest.mark.asyncio
+async def test_deliver_outbound_cli_writes_session(tmp_path: Path):
+    """cli has no ChannelManager adapter — must land in session JSONL, not the bus."""
+    loop, bus = _make_loop(tmp_path)
+
+    ok = await loop.deliver_outbound(
+        OutboundMessage(channel="cli", chat_id="direct", content="owner ping")
+    )
+    assert ok is True
+    assert bus.outbound_size == 0
+    session = await _cli_session(loop, "direct")
+    assert session.messages[-1]["role"] == "assistant"
+    assert session.messages[-1]["content"] == "owner ping"
+
+
+@pytest.mark.asyncio
+async def test_reg_delivers_owner_notify_to_cli_session(tmp_path: Path):
+    """Owner linked only on cli still gets registration notify in session history."""
+    loop, bus = _make_loop(tmp_path)
+    resolver: UserResolver = loop.user_resolver
+
+    owner = await resolver.resolve_or_create("cli", "direct")
+    await resolver.ensure_owner(owner)
+
+    msg = InboundMessage(
+        channel="email",
+        sender_id="newbie@example.com",
+        chat_id="newbie@example.com",
+        content="/reg",
+    )
+    ctx = CommandContext(
+        msg=msg, session=None, key=msg.session_key, raw="/reg", args="", loop=loop
+    )
+
+    out = await cmd_reg(ctx)
+    assert "Заявка на регистрацию отправлена" in out.content
+    assert bus.outbound_size == 0
+
+    session = await _cli_session(loop, "direct")
+    assistant = [m for m in session.messages if m.get("role") == "assistant"]
+    assert assistant, "expected owner notify in cli session"
+    assert "Новая заявка на регистрацию" in assistant[-1]["content"]
+    assert "/reg approve" in assistant[-1]["content"]

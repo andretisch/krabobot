@@ -280,6 +280,21 @@ def test_to_ollama_messages_flattens_multimodal_content() -> None:
     ]
 
 
+def test_to_ollama_messages_image_only_still_string_content() -> None:
+    """Image-only multimodal must not leave content as a list for the ollama client."""
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,Zm9v"}},
+            ],
+        }
+    ]
+    out = OllamaProvider._to_ollama_messages(messages)
+    assert isinstance(out[0]["content"], str)
+    assert out[0]["images"] == ["Zm9v"]
+
+
 @pytest.mark.asyncio
 async def test_ollama_chat_accepts_multimodal_via_anonymizing_provider() -> None:
     """Regression: list content must not raise Pydantic Message string_type error."""

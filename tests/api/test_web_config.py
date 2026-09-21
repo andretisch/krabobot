@@ -188,6 +188,45 @@ def test_restore_roundtrip(monkeypatch, tmp_path: Path) -> None:
     assert restored["agents"]["defaults"]["model"] == "a"
 
 
+def test_restore_survives_same_timestamp_safety_backup(monkeypatch, tmp_path: Path) -> None:
+    """Windows often reuses %f; safety backup must not clobber the restore source."""
+    from krabobot.api import web_config as wc
+
+    krabot_dir = tmp_path / ".krabobot"
+    krabot_dir.mkdir()
+    cfg_file = krabot_dir / "config.json"
+    v1 = {
+        "agents": {"defaults": {"model": "a", "provider": "custom", "workspace": "~"}},
+        "providers": {"custom": {"apiKey": "k", "apiBase": ""}},
+        "channels": {},
+        "api": {"host": "127.0.0.1", "port": 8900},
+    }
+    cfg_file.write_text(json.dumps(v1, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(wc, "get_config_path", lambda: cfg_file.resolve(), raising=True)
+
+    frozen = "20260101-120000-000000"
+    bn = f"config.backup.{frozen}.json"
+    (krabot_dir / bn).write_text(json.dumps(v1, ensure_ascii=False), encoding="utf-8")
+    cfg_file.write_text(
+        json.dumps({**v1, "agents": {**v1["agents"], "defaults": {**v1["agents"]["defaults"], "model": "b"}}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    class _FrozenDateTime:
+        @staticmethod
+        def now():
+            from datetime import datetime as _dt
+
+            return _dt.strptime(frozen, "%Y%m%d-%H%M%S-%f")
+
+    monkeypatch.setattr(wc, "datetime", _FrozenDateTime)
+    wc.restore_backup(bn)
+    restored = json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert restored["agents"]["defaults"]["model"] == "a"
+    # Source backup still holds the restore payload
+    assert json.loads((krabot_dir / bn).read_text(encoding="utf-8"))["agents"]["defaults"]["model"] == "a"
+
+
 @pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
 @pytest.mark.asyncio
 async def test_put_web_config_persists(tmp_path: Path, monkeypatch) -> None:

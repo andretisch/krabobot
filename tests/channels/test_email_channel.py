@@ -609,6 +609,24 @@ def test_backward_compat_verify_disabled(monkeypatch) -> None:
     assert len(items) == 1, "With verification disabled, emails should be accepted as before"
 
 
+def test_verify_spf_false_allows_spf_fail(monkeypatch) -> None:
+    """verifySpf=false must not reject on spf=fail when DKIM is also not required."""
+    raw = _make_raw_email(
+        subject="SpfFailOk",
+        body="Allowed when SPF check is off",
+        auth_results="mx.example.com; spf=fail smtp.mailfrom=alice@example.com; dkim=fail",
+    )
+    fake = _make_fake_imap(raw)
+    monkeypatch.setattr("krabobot.channels.email.imaplib.IMAP4_SSL", lambda _h, _p: fake)
+
+    cfg = _make_config(verify_dkim=False, verify_spf=False)
+    channel = EmailChannel(cfg, MessageBus())
+    items = channel._fetch_new_messages()
+
+    assert len(items) == 1
+    assert items[0]["sender"] == "alice@example.com"
+
+
 def test_email_content_tagged_with_email_context(monkeypatch) -> None:
     """Email content should be prefixed with [EMAIL-CONTEXT] for LLM isolation."""
     raw = _make_raw_email(subject="Tagged", body="Check the tag")
