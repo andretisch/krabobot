@@ -54,6 +54,7 @@ class ContextBuilder:
             parts.append(f"""# Skills
 
 The following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.
+Skills are primarily SKILL.md instructions; some also ship helper scripts beside SKILL.md — read the skill and exec those scripts when documented.
 Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
 
 {skills_summary}""")

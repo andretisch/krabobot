@@ -39,7 +39,11 @@ async def cmd_stop(ctx: CommandContext) -> OutboundMessage:
         except (asyncio.CancelledError, Exception):
             pass
     sub_cancelled = await runtime.subagents.cancel_by_session(msg.dispatch_key)
-    total = cancelled + sub_cancelled
+    bg_cancelled = 0
+    exec_tool = runtime.tools.get("exec")
+    if exec_tool is not None and hasattr(exec_tool, "cancel_by_session"):
+        bg_cancelled = await exec_tool.cancel_by_session(msg.dispatch_key)
+    total = cancelled + sub_cancelled + bg_cancelled
     content = f"Остановлено задач: {total}." if total else "Нет активных задач для остановки."
     return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 

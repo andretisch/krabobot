@@ -327,6 +327,7 @@ class AgentLoop:
                 restrict_to_workspace=self.restrict_to_workspace,
                 path_append=self.exec_config.path_append,
                 internal_url_allowlist=self.exec_config.internal_url_allowlist,
+                bus=self.bus,
             ))
         runtime.tools.register(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
         runtime.tools.register(WebFetchTool(proxy=self.web_proxy))
@@ -452,10 +453,10 @@ class AgentLoop:
     ) -> None:
         """Update context for all tools that need routing info."""
         sid = sender_id or ""
-        for name in ("message", "spawn", "cron"):
+        for name in ("message", "spawn", "cron", "exec"):
             if tool := runtime.tools.get(name):
                 if hasattr(tool, "set_context"):
-                    if name == "spawn":
+                    if name in ("spawn", "exec"):
                         tool.set_context(channel, chat_id, user_id)
                     elif name == "message":
                         tool.set_context(channel, chat_id, message_id, user_id=user_id)

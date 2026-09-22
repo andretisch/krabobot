@@ -23,4 +23,4 @@ The skill format and metadata structure follow OpenClaw's conventions to maintai
 | `tmux` | Remote-control tmux sessions |
 | `clawhub` | Search and install skills from ClawHub registry |
 | `skill-creator` | Create new skills |
-| `stt-audio-transcriber` | Transcribe short/long audio with STT |
+| `stt-audio-transcriber` | Local sherpa-onnx STT: transcribe + save wav/transcript via sibling scripts |

@@ -255,7 +255,12 @@ Tools like 'read_file' and 'web_fetch' can return native image content. Read vis
 
         skills_summary = SkillsLoader(workspace).build_skills_summary()
         if skills_summary:
-            parts.append(f"## Skills\n\nRead SKILL.md with read_file to use a skill.\n\n{skills_summary}")
+            parts.append(
+                f"## Skills\n\n"
+                f"Read SKILL.md with read_file to use a skill. "
+                f"Some skills ship helper scripts next to SKILL.md — exec them when documented.\n\n"
+                f"{skills_summary}"
+            )
 
         return "\n\n".join(parts)
 

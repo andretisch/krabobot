@@ -82,6 +82,7 @@ include = [
     "krabobot/web/static/**/*",
     "krabobot/templates/**/*.md",
     "krabobot/skills/**/*.md",
+    "krabobot/skills/**/*.py",
     "krabobot/skills/**/*.sh",
 ]
 
