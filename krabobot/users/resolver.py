@@ -158,7 +158,6 @@ class UserResolver:
         note: str = "",
     ) -> RegistrationRequest:
         """Create or replace pending registration request for account."""
-        account = _account_key(channel, sender_id)
         async with self._lock:
             db = self._load()
             reqs = db.setdefault("registration_requests", {})
@@ -342,6 +341,161 @@ class UserResolver:
             user_pref = prefs.setdefault(str(user_id), {})
             user_pref["tts_enabled"] = bool(enabled)
             self._save(db)
+
+    async def get_display_name(self, user_id: str) -> str:
+        """Return stored display name for a user (empty if unset)."""
+        if not user_id:
+            return ""
+        async with self._lock:
+            db = self._load()
+            prefs = db.get("user_prefs", {}) or {}
+            user_pref = prefs.get(str(user_id), {}) or {}
+            return str(user_pref.get("display_name") or "").strip()
+
+    async def set_display_name(self, user_id: str, display_name: str) -> None:
+        """Persist display name in user_prefs."""
+        if not user_id:
+            return
+        async with self._lock:
+            db = self._load()
+            prefs = db.setdefault("user_prefs", {})
+            user_pref = prefs.setdefault(str(user_id), {})
+            user_pref["display_name"] = (display_name or "").strip()
+            self._save(db)
+
+    async def list_users(self) -> list[dict[str, Any]]:
+        """Aggregate users from accounts + prefs (sorted: owner first, then id)."""
+        async with self._lock:
+            db = self._load()
+            accounts = db.get("accounts", {}) or {}
+            prefs = db.get("user_prefs", {}) or {}
+            owner = str(db.get("owner_user_id") or "").strip()
+
+        by_id: dict[str, dict[str, Any]] = {}
+        if owner:
+            by_id[owner] = {
+                "user_id": owner,
+                "display_name": "",
+                "accounts": [],
+                "tts_enabled": False,
+                "is_owner": True,
+            }
+        for account_key, uid in accounts.items():
+            user_id = str(uid)
+            if not user_id:
+                continue
+            entry = by_id.setdefault(
+                user_id,
+                {
+                    "user_id": user_id,
+                    "display_name": "",
+                    "accounts": [],
+                    "tts_enabled": False,
+                    "is_owner": False,
+                },
+            )
+            entry["accounts"].append(str(account_key))
+
+        for user_id, pref in prefs.items():
+            uid = str(user_id)
+            if not uid:
+                continue
+            entry = by_id.setdefault(
+                uid,
+                {
+                    "user_id": uid,
+                    "display_name": "",
+                    "accounts": [],
+                    "tts_enabled": False,
+                    "is_owner": False,
+                },
+            )
+            if isinstance(pref, dict):
+                entry["display_name"] = str(pref.get("display_name") or "").strip()
+                if pref.get("tts_enabled") is not None:
+                    entry["tts_enabled"] = bool(pref.get("tts_enabled"))
+
+        for entry in by_id.values():
+            entry["is_owner"] = bool(owner) and entry["user_id"] == owner
+            entry["accounts"].sort()
+
+        users = list(by_id.values())
+        users.sort(key=lambda u: (not u["is_owner"], u["user_id"]))
+        return users
+
+    async def create_user(
+        self,
+        *,
+        display_name: str = "",
+        channel: str = "",
+        sender_id: str = "",
+    ) -> str:
+        """Create a new user id; optionally link one channel account."""
+        channel = (channel or "").strip()
+        sender_id = (sender_id or "").strip()
+        name = (display_name or "").strip()
+        async with self._lock:
+            db = self._load()
+            accounts = db.setdefault("accounts", {})
+            if channel and sender_id:
+                account = _account_key(channel, sender_id)
+                existing = accounts.get(account)
+                if existing:
+                    user_id = str(existing)
+                else:
+                    user_id = uuid.uuid4().hex
+                    accounts[account] = user_id
+            else:
+                user_id = uuid.uuid4().hex
+            prefs = db.setdefault("user_prefs", {})
+            user_pref = prefs.setdefault(user_id, {})
+            if name:
+                user_pref["display_name"] = name
+            if not db.get("owner_user_id"):
+                db["owner_user_id"] = user_id
+            self._save(db)
+            logger.info("Created user {} (display_name={!r})", user_id, name)
+            return user_id
+
+    async def delete_user(self, user_id: str) -> tuple[bool, str | None]:
+        """Remove account links and prefs for *user_id*. Blocks deleting the owner.
+
+        Returns (ok, error_code). Does not wipe the workspace directory — caller does.
+        """
+        uid = str(user_id or "").strip()
+        if not uid:
+            return False, "empty_user_id"
+        async with self._lock:
+            db = self._load()
+            owner = str(db.get("owner_user_id") or "").strip()
+            if owner and owner == uid:
+                return False, "cannot_delete_owner"
+            accounts = db.get("accounts", {}) or {}
+            to_drop = [k for k, v in accounts.items() if str(v) == uid]
+            for k in to_drop:
+                del accounts[k]
+            db["accounts"] = accounts
+            prefs = db.get("user_prefs", {}) or {}
+            prefs.pop(uid, None)
+            db["user_prefs"] = prefs
+            self._save(db)
+            logger.info("Deleted user {} ({} account links)", uid, len(to_drop))
+            return True, None
+
+    async def user_exists(self, user_id: str) -> bool:
+        """True if user appears in accounts or prefs (or is owner)."""
+        uid = str(user_id or "").strip()
+        if not uid:
+            return False
+        async with self._lock:
+            db = self._load()
+            if str(db.get("owner_user_id") or "").strip() == uid:
+                return True
+            accounts = db.get("accounts", {}) or {}
+            if any(str(v) == uid for v in accounts.values()):
+                return True
+            prefs = db.get("user_prefs", {}) or {}
+            return uid in prefs
 
     async def create_link_code(self, user_id: str) -> str:
         """Create a one-time code that can link another account to *user_id*."""

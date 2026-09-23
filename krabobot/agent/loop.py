@@ -687,7 +687,7 @@ class AgentLoop:
     async def session_manager_for_api(self, session_id: str | None = None) -> SessionManager:
         """Session store used for HTTP API / web UI (owner workspace)."""
         sid = str(session_id or "default")
-        msg = InboundMessage(channel="api", sender_id=sid, chat_id="default", content="")
+        msg = InboundMessage(channel="api", sender_id=sid, chat_id=sid, content="")
         await self._ensure_identity(msg)
         runtime = await self._runtime_for_message(msg)
         return runtime.sessions
@@ -1044,7 +1044,11 @@ class AgentLoop:
         on_stream: Callable[[str], Awaitable[None]] | None = None,
         on_stream_end: Callable[..., Awaitable[None]] | None = None,
     ) -> OutboundMessage | None:
-        """Process a message directly and return the outbound payload."""
+        """Process a message directly and return the outbound payload.
+
+        Uses the same per-session lock as ``run()``/``_dispatch`` so background
+        exec / subagent system announces cannot race the active turn.
+        """
         await self._connect_mcp()
         msg = InboundMessage(
             channel=channel,
@@ -1054,7 +1058,11 @@ class AgentLoop:
             media=list(media) if media else [],
         )
         runtime = await self._runtime_for_message(msg)
-        return await self._process_message(
-            msg, runtime=runtime, session_key=session_key, on_progress=on_progress,
-            on_stream=on_stream, on_stream_end=on_stream_end,
-        )
+        dispatch_key = msg.dispatch_key
+        lock = self._session_locks.setdefault(dispatch_key, asyncio.Lock())
+        gate = self._concurrency_gate or nullcontext()
+        async with lock, gate:
+            return await self._process_message(
+                msg, runtime=runtime, session_key=session_key, on_progress=on_progress,
+                on_stream=on_stream, on_stream_end=on_stream_end,
+            )

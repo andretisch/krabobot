@@ -13,10 +13,45 @@
     href="https://fonts.googleapis.com/css2?family=Nunito:wght@500;600;700&display=swap"
     rel="stylesheet"
   />
-  <link rel="stylesheet" href="/static/chat.css" />
+  <link rel="stylesheet" href="/static/chat.css?v=users-links2" />
 </head>
 <body>
-  <div id="kb-layout" class="kb-layout">
+  <div id="kb-auth-gate" class="kb-auth-gate" hidden>
+    <div class="kb-auth-card">
+      <h1 class="kb-auth-title">крабобот</h1>
+      <p id="kb-auth-lead" class="kb-auth-lead">
+        Для веб-интерфейса нужен пароль администратора.
+      </p>
+      <form id="kb-auth-form" class="kb-auth-form">
+        <label class="kb-sr" for="kb-auth-password">Пароль</label>
+        <input
+          type="password"
+          id="kb-auth-password"
+          class="kb-input kb-auth-input"
+          autocomplete="current-password"
+          placeholder="Пароль"
+          required
+          minlength="6"
+        />
+        <label class="kb-auth-token-label" for="kb-auth-token"
+          >Или API-ключ (<code>api.auth.adminToken</code>)</label
+        >
+        <input
+          type="password"
+          id="kb-auth-token"
+          class="kb-input kb-auth-input"
+          autocomplete="off"
+          placeholder="adminToken (необязательно)"
+        />
+        <button type="submit" id="kb-auth-submit" class="kb-btn kb-btn-primary kb-btn-block">
+          Войти
+        </button>
+      </form>
+      <p id="kb-auth-error" class="kb-cfg-banner kb-cfg-banner--err" hidden></p>
+    </div>
+  </div>
+
+  <div id="kb-layout" class="kb-layout" hidden>
     <header class="kb-top">
       <div class="kb-top-inner">
         <div class="kb-menu-wrap">
@@ -53,6 +88,22 @@
               role="menuitem"
             >
               Настройки
+            </button>
+            <button
+              type="button"
+              id="kb-nav-admin"
+              class="kb-dropdown-item"
+              role="menuitem"
+            >
+              Администрирование
+            </button>
+            <button
+              type="button"
+              id="kb-nav-logout"
+              class="kb-dropdown-item"
+              role="menuitem"
+            >
+              Выйти
             </button>
           </div>
         </div>
@@ -201,8 +252,8 @@
             Ниже тот же <code>config.json</code>, который использует запущенный
             <code>krabobot serve</code> (ключ <code>-c</code>). Нажмите «Сохранить» —
             перед записью файл автоматически копируется в бэкап; секретные поля пусть
-            остаются пустыми, если не хотите их менять. Локальный веб-сервер обычно без
-            пароля — не открывайте порт наружу.
+            остаются пустыми, если не хотите их менять. Доступ к веб-UI защищён
+            паролем или <code>api.auth.adminToken</code> (см. экран входа).
           </p>
 
           <div class="kb-cfg-toolbar" id="kb-cfg-toolbar">
@@ -287,12 +338,93 @@
           </p>
         </div>
       </div>
+
+        <div
+          id="kb-view-admin"
+          class="kb-view kb-view--hidden"
+          role="region"
+          aria-label="Администрирование"
+          hidden
+        >
+          <div class="kb-settings kb-settings--wide kb-admin">
+            <div class="kb-admin-tabs" role="tablist" aria-label="Разделы администрирования">
+              <button
+                type="button"
+                id="kb-admin-tab-users"
+                class="kb-admin-tab kb-admin-tab--active"
+                role="tab"
+                aria-selected="true"
+              >
+                Пользователи
+              </button>
+            </div>
+
+            <div id="kb-admin-users" class="kb-admin-panel" role="tabpanel">
+              <div id="kb-admin-ok" class="kb-cfg-banner kb-cfg-banner--ok" hidden></div>
+              <div id="kb-admin-error" class="kb-cfg-banner kb-cfg-banner--err" hidden></div>
+
+              <section class="kb-cfg-section" aria-labelledby="kb-admin-pending-h">
+                <h2 id="kb-admin-pending-h" class="kb-cfg-section-h">Заявки на регистрацию</h2>
+                <ul id="kb-admin-pending" class="kb-admin-list"></ul>
+                <p id="kb-admin-pending-empty" class="kb-settings-p" hidden>
+                  Нет ожидающих заявок.
+                </p>
+              </section>
+
+              <section class="kb-cfg-section" aria-labelledby="kb-admin-create-h">
+                <h2 id="kb-admin-create-h" class="kb-cfg-section-h">Создать пользователя</h2>
+                <form id="kb-admin-create-form" class="kb-admin-create">
+                  <label class="kb-cfg-label"
+                    >Имя
+                    <input
+                      type="text"
+                      id="kb-admin-create-name"
+                      class="kb-input"
+                      placeholder="Отображаемое имя"
+                    />
+                  </label>
+                  <label class="kb-cfg-label"
+                    >Канал (необязательно)
+                    <select id="kb-admin-create-channel" class="kb-input">
+                      <option value="">— без привязки —</option>
+                      <option value="telegram">Telegram</option>
+                      <option value="vk">VK</option>
+                      <option value="email">Email</option>
+                      <option value="cli">Терминал (krabobot agent)</option>
+                    </select>
+                  </label>
+                  <label class="kb-cfg-label" for="kb-admin-create-sender"
+                    ><span id="kb-admin-create-sender-caption">Идентификатор в канале</span>
+                    <input
+                      type="text"
+                      id="kb-admin-create-sender"
+                      class="kb-input"
+                      placeholder="Сначала выберите канал"
+                    />
+                  </label>
+                  <button type="submit" class="kb-btn kb-btn-primary">Создать</button>
+                </form>
+              </section>
+
+              <section class="kb-cfg-section" aria-labelledby="kb-admin-users-h">
+                <div class="kb-admin-users-head">
+                  <h2 id="kb-admin-users-h" class="kb-cfg-section-h">Пользователи</h2>
+                  <button type="button" id="kb-admin-refresh" class="kb-btn kb-btn-secondary">
+                    Обновить
+                  </button>
+                </div>
+                <div id="kb-admin-user-list" class="kb-admin-user-list"></div>
+              </section>
+            </div>
+          </div>
+        </div>
+
         </div>
       </div>
     </div>
   </div>
   <script src="/static/vendor/marked.min.js"></script>
   <script src="/static/vendor/purify.min.js"></script>
-  <script src="/static/app.js" defer></script>
+  <script src="/static/app.js?v=users-links2" defer></script>
 </body>
 </html>

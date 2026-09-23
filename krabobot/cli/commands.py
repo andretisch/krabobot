@@ -988,9 +988,34 @@ def serve(
     )
 
     async def on_startup(_app):
+        # Consume inbound (background exec / subagent announces). Without this,
+        # serve only uses process_direct and completion callbacks sit forever
+        # on the in-memory bus (gateway is a separate process with its own bus).
         await agent_loop._connect_mcp()
+        _app["agent_loop_task"] = asyncio.create_task(agent_loop.run())
+
+        async def _drain_local_outbound() -> None:
+            """Drop api/cli outbound; turns are already persisted by _process_message."""
+            while True:
+                try:
+                    await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+                except asyncio.CancelledError:
+                    break
+
+        _app["outbound_drain_task"] = asyncio.create_task(_drain_local_outbound())
 
     async def on_cleanup(_app):
+        agent_loop.stop()
+        for key in ("agent_loop_task", "outbound_drain_task"):
+            task = _app.get(key)
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         await agent_loop.close_mcp()
 
     api_app.on_startup.append(on_startup)

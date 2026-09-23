@@ -231,6 +231,7 @@ def test_restore_survives_same_timestamp_safety_backup(monkeypatch, tmp_path: Pa
 @pytest.mark.asyncio
 async def test_put_web_config_persists(tmp_path: Path, monkeypatch) -> None:
     from krabobot.api import web_config as wc
+    from krabobot.api.web_auth import hash_password
     from krabobot.session.manager import SessionManager
 
     krabot_dir = tmp_path / ".krabobot"
@@ -248,10 +249,19 @@ async def test_put_web_config_persists(tmp_path: Path, monkeypatch) -> None:
             "ollama": {"apiKey": "", "apiBase": None},
         },
         "channels": {},
-        "api": {"host": "127.0.0.1", "port": 8900},
+        "api": {
+            "host": "127.0.0.1",
+            "port": 8900,
+            "auth": {"passwordHash": hash_password("secret12")},
+        },
     }
     cfg_file.write_text(json.dumps(minimal, ensure_ascii=False), encoding="utf-8")
     monkeypatch.setattr(wc, "get_config_path", lambda: cfg_file.resolve(), raising=True)
+    monkeypatch.setattr(
+        "krabobot.api.web_auth.get_config_path",
+        lambda: cfg_file.resolve(),
+        raising=True,
+    )
 
     mock_agent = MagicMock()
     mock_agent.process_direct = AsyncMock(return_value="ok")
@@ -265,7 +275,14 @@ async def test_put_web_config_persists(tmp_path: Path, monkeypatch) -> None:
     client = TestClient(TestServer(app))
     await client.start_server()
     try:
-        resp = await client.put("/v1/web/config", json=payload)
+        login = await client.post("/v1/web/auth/login", json={"password": "secret12"})
+        assert login.status == 200
+        token = (await login.json())["token"]
+        resp = await client.put(
+            "/v1/web/config",
+            json=payload,
+            headers={"Authorization": f"Bearer {token}"},
+        )
         assert resp.status == 200
         data = json.loads(cfg_file.read_text(encoding="utf-8"))
         assert data["agents"]["defaults"]["model"] == "y"
@@ -281,6 +298,7 @@ async def test_web_backup_download_config_and_workspace(tmp_path: Path, monkeypa
     import io
     import tarfile
 
+    from krabobot.api.web_auth import hash_password
     from krabobot.config.loader import save_config
     from krabobot.config.schema import Config
     from krabobot.session.manager import SessionManager
@@ -306,10 +324,16 @@ async def test_web_backup_download_config_and_workspace(tmp_path: Path, monkeypa
     cfg.agents.defaults.workspace = str(ws)
     cfg.agents.defaults.model = "test-model"
     cfg.agents.defaults.provider = "custom"
+    cfg.api.auth.password_hash = hash_password("secret12")
     save_config(cfg, cfg_file)
 
     monkeypatch.setattr(
         "krabobot.config.loader.get_config_path",
+        lambda: cfg_file.resolve(),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "krabobot.api.web_auth.get_config_path",
         lambda: cfg_file.resolve(),
         raising=True,
     )
@@ -322,7 +346,13 @@ async def test_web_backup_download_config_and_workspace(tmp_path: Path, monkeypa
     client = TestClient(TestServer(app))
     await client.start_server()
     try:
-        resp = await client.get("/v1/web/backup/download")
+        login = await client.post("/v1/web/auth/login", json={"password": "secret12"})
+        assert login.status == 200
+        token = (await login.json())["token"]
+        resp = await client.get(
+            "/v1/web/backup/download",
+            headers={"Authorization": f"Bearer {token}"},
+        )
         assert resp.status == 200
         assert "application/gzip" in (resp.headers.get("Content-Type") or "")
         cd = resp.headers.get("Content-Disposition") or ""

@@ -29,11 +29,13 @@ def _should_redact_key(key: str) -> bool:
     n = "".join(c for c in key if c.isalnum()).lower()
     if len(n) < 2:
         return False
-    if n in {"apikey", "password", "passwd", "secret"}:
+    if n in {"apikey", "password", "passwd", "secret", "passwordhash"}:
         return True
     if n.endswith("apikey"):
         return True
-    if n.endswith("password") or n.endswith("passwd"):
+    if n.endswith("password") or n.endswith("passwd") or n.endswith("passwordhash"):
+        return True
+    if "password" in n and "hash" in n:
         return True
     if n.endswith("secret"):
         return True

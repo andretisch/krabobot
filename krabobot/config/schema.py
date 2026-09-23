@@ -77,6 +77,13 @@ class HeartbeatConfig(Base):
     keep_recent_messages: int = 8
 
 
+class ApiAuthConfig(Base):
+    """Web UI / API authentication (password hash and/or admin token)."""
+
+    password_hash: str = ""  # pbkdf2_sha256$iterations$salt$hex — never store plaintext
+    admin_token: str = ""  # optional persistent Bearer token (API key)
+
+
 class ApiConfig(Base):
     """OpenAI-compatible API server configuration."""
 
@@ -85,6 +92,7 @@ class ApiConfig(Base):
     timeout: float = 120.0  # Per-request timeout in seconds.
     # Hard max for multipart web uploads (stream-to-disk). Soft UI threshold stays 50 MiB.
     max_upload_mb: int = Field(default=2048, ge=1, le=10240)
+    auth: ApiAuthConfig = Field(default_factory=ApiAuthConfig)
 
 
 class GatewayConfig(Base):

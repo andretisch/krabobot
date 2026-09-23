@@ -37,6 +37,19 @@ except ImportError:
 pytest_plugins = ("pytest_asyncio",)
 
 
+@pytest.fixture(autouse=True)
+def _bypass_web_auth_for_legacy_api_tests(monkeypatch):
+    """Legacy OpenAI API tests predate the auth gate; they exercise chat/upload paths."""
+    monkeypatch.setattr(
+        "krabobot.api.web_auth.is_authenticated",
+        lambda _request: True,
+    )
+    monkeypatch.setattr(
+        "krabobot.api.web_auth.auth_is_configured",
+        lambda _auth=None: True,
+    )
+
+
 def _make_mock_agent(response_text: str = "mock response", workspace: Path | None = None) -> MagicMock:
     agent = MagicMock()
     agent.process_direct = AsyncMock(return_value=response_text)
@@ -214,6 +227,30 @@ async def test_successful_request_uses_fixed_api_session(aiohttp_client, mock_ag
         channel="api",
         chat_id=API_CHAT_ID,
         sender_id="default",
+    )
+
+
+@pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
+@pytest.mark.asyncio
+async def test_custom_session_id_passed_as_chat_id(aiohttp_client, mock_agent) -> None:
+    """chat_id must be the web session id so background-exec announces hit the same session."""
+    app = create_app(mock_agent, model_name="test-model")
+    client = await aiohttp_client(app)
+    resp = await client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "hello"}],
+            "session_id": "web-sess-99",
+        },
+    )
+    assert resp.status == 200
+    mock_agent.process_direct.assert_called_once_with(
+        content="hello",
+        media=None,
+        session_key="api:web-sess-99",
+        channel="api",
+        chat_id="web-sess-99",
+        sender_id="web-sess-99",
     )
 
 

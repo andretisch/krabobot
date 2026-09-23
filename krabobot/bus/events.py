@@ -21,8 +21,17 @@ class InboundMessage:
 
     @property
     def session_key(self) -> str:
-        """Unique key for session identification."""
-        return self.session_key_override or f"{self.channel}:{self.chat_id}"
+        """Unique key for session identification.
+
+        System announces encode the origin as ``chat_id="channel:chat_id"``
+        (see ExecTool / SubagentManager). Use that origin key so dispatch locks
+        and /stop align with the live conversation, not ``system:…``.
+        """
+        if self.session_key_override:
+            return self.session_key_override
+        if self.channel == "system" and ":" in (self.chat_id or ""):
+            return self.chat_id
+        return f"{self.channel}:{self.chat_id}"
 
     @property
     def dispatch_key(self) -> str:

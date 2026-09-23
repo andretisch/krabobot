@@ -25,11 +25,30 @@ from pydantic import ValidationError
 
 from krabobot.agent.context import ContextBuilder
 from krabobot.agent.loop import AgentLoop
+from krabobot.api.web_auth import (
+    auth_middleware,
+    handle_auth_login,
+    handle_auth_logout,
+    handle_auth_setup,
+    handle_auth_status,
+)
 from krabobot.api.web_config import (
     build_web_config_payload,
     list_config_backups,
     restore_backup,
     save_web_config_sections,
+)
+from krabobot.api.web_users import (
+    handle_registration_approve,
+    handle_registration_reject,
+    handle_registrations_list,
+    handle_user_delete,
+    handle_user_get,
+    handle_user_link_add,
+    handle_user_link_remove,
+    handle_user_patch,
+    handle_users_create,
+    handle_users_list,
 )
 from krabobot.utils.helpers import ensure_dir, safe_filename
 
@@ -492,7 +511,7 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
                         media=media_paths if media_paths else None,
                         session_key=session_key,
                         channel="api",
-                        chat_id=API_CHAT_ID,
+                        chat_id=sid,
                         sender_id=sid,
                     ),
                     timeout=timeout_s,
@@ -510,7 +529,7 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
                             media=media_paths if media_paths else None,
                             session_key=session_key,
                             channel="api",
-                            chat_id=API_CHAT_ID,
+                            chat_id=sid,
                             sender_id=sid,
                         ),
                         timeout=timeout_s,
@@ -950,11 +969,12 @@ def create_app(
     """
     hard_mb, hard_bytes = _resolve_max_upload_bytes(max_upload_mb)
     client_max = max(MAX_REQUEST_BODY_BYTES, hard_bytes)
-    app = web.Application(client_max_size=client_max)
+    app = web.Application(client_max_size=client_max, middlewares=[auth_middleware])
     app["agent_loop"] = agent_loop
     app["model_name"] = model_name
     app["request_timeout"] = request_timeout
     app["session_locks"] = {}  # per-user locks, keyed by session_key
+    app["web_sessions"] = {}  # auth session token -> expiry unix ts
     app["max_upload_mb"] = hard_mb
     app["max_upload_bytes"] = hard_bytes
     app["max_upload_soft_bytes"] = MAX_UPLOAD_SOFT_BYTES
@@ -966,6 +986,10 @@ def create_app(
     app.router.add_post("/v1/chat/completions", handle_chat_completions)
     app.router.add_get("/v1/models", handle_models)
     app.router.add_get("/health", handle_health)
+    app.router.add_get("/v1/web/auth/status", handle_auth_status)
+    app.router.add_post("/v1/web/auth/setup", handle_auth_setup)
+    app.router.add_post("/v1/web/auth/login", handle_auth_login)
+    app.router.add_post("/v1/web/auth/logout", handle_auth_logout)
     app.router.add_post("/v1/web/uploads", handle_web_uploads)
     app.router.add_get("/v1/web/sessions", handle_web_sessions_list)
     app.router.add_delete("/v1/web/sessions/{session_id}", handle_web_sessions_delete)
@@ -975,4 +999,20 @@ def create_app(
     app.router.add_get("/v1/web/config/backups", handle_web_config_backups)
     app.router.add_post("/v1/web/config/restore", handle_web_config_restore)
     app.router.add_get("/v1/web/backup/download", handle_web_backup_download)
+    app.router.add_get("/v1/web/users", handle_users_list)
+    app.router.add_post("/v1/web/users", handle_users_create)
+    app.router.add_get("/v1/web/users/{user_id}", handle_user_get)
+    app.router.add_patch("/v1/web/users/{user_id}", handle_user_patch)
+    app.router.add_delete("/v1/web/users/{user_id}", handle_user_delete)
+    app.router.add_post("/v1/web/users/{user_id}/links", handle_user_link_add)
+    app.router.add_delete("/v1/web/users/{user_id}/links", handle_user_link_remove)
+    app.router.add_get("/v1/web/registrations", handle_registrations_list)
+    app.router.add_post(
+        "/v1/web/registrations/{request_id}/approve",
+        handle_registration_approve,
+    )
+    app.router.add_post(
+        "/v1/web/registrations/{request_id}/reject",
+        handle_registration_reject,
+    )
     return app

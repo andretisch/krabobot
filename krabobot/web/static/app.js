@@ -5,6 +5,7 @@
   "use strict";
 
   const SESSION_KEY = "krabobot_web_session_id";
+  const AUTH_TOKEN_KEY = "krabobot_web_auth_token";
   const logEl = document.getElementById("kb-log");
   const formEl = document.getElementById("kb-form");
   const inputEl = document.getElementById("kb-input");
@@ -19,8 +20,13 @@
   const menuDropdown = document.getElementById("kb-menu-dropdown");
   const navChat = document.getElementById("kb-nav-chat");
   const navSettings = document.getElementById("kb-nav-settings");
+  const navAdmin = document.getElementById("kb-nav-admin");
+  const navLogout = document.getElementById("kb-nav-logout");
   const viewChat = document.getElementById("kb-view-chat");
   const viewSettings = document.getElementById("kb-view-settings");
+  const viewAdmin = document.getElementById("kb-view-admin");
+  const authGate = document.getElementById("kb-auth-gate");
+  const layoutElRoot = document.getElementById("kb-layout");
   const copySessionBtn = document.getElementById("kb-copy-session");
   const cmdMenuBtn = document.getElementById("kb-cmd-menu-btn");
   const cmdMenuDropdown = document.getElementById("kb-cmd-dropdown");
@@ -30,6 +36,60 @@
   const sidebarExpand = document.getElementById("kb-sidebar-expand");
 
   const SIDEBAR_COLLAPSED_KEY = "krabobot_web_sidebar_collapsed";
+
+  function getAuthToken() {
+    try {
+      return sessionStorage.getItem(AUTH_TOKEN_KEY) || "";
+    } catch (_e) {
+      return "";
+    }
+  }
+
+  function setAuthToken(token) {
+    try {
+      if (token) {
+        sessionStorage.setItem(AUTH_TOKEN_KEY, token);
+      } else {
+        sessionStorage.removeItem(AUTH_TOKEN_KEY);
+      }
+    } catch (_e) {
+      /* ignore */
+    }
+  }
+
+  /**
+   * Authenticated fetch for /v1/* (cookie + optional Bearer from login).
+   * @param {string} url
+   * @param {RequestInit} [opts]
+   */
+  function kbApiFetch(url, opts) {
+    const o = Object.assign({ credentials: "include" }, opts || {});
+    const headers = new Headers(o.headers || {});
+    const tok = getAuthToken();
+    if (tok && !headers.has("Authorization")) {
+      headers.set("Authorization", "Bearer " + tok);
+    }
+    o.headers = headers;
+    return fetch(url, o);
+  }
+
+  /** Prefer server Russian message; map bare 401 to a clear RU string. */
+  function kbHttpErrorMessage(status, data, fallback) {
+    const fromApi =
+      data && data.error && data.error.message ? String(data.error.message) : "";
+    if (fromApi) {
+      return fromApi;
+    }
+    if (status === 401) {
+      return "Требуется аутентификация. Войдите снова.";
+    }
+    return fallback || "Ошибка HTTP " + status;
+  }
+
+  async function kbHandleUnauthorized() {
+    setAuthToken("");
+    showAuthGate(false);
+  }
 
 
   /** UUID v4; works over HTTP where crypto.randomUUID is unavailable. */
@@ -190,6 +250,118 @@
     email: "Почта",
   };
 
+  /** Admin UI: channel keys → Russian labels (account links). api hidden — auto-linked. */
+  /** @type {Record<string,string>} */
+  const KB_ADMIN_CHANNEL_LABELS = {
+    telegram: "Telegram",
+    vk: "VK",
+    email: "Email",
+    cli: "Терминал (krabobot agent)",
+  };
+
+  /** Manual add-link / create-user channels (api sessions auto-link to owner). */
+  const KB_ADMIN_MANUAL_CHANNELS = ["telegram", "vk", "email", "cli"];
+
+  /** @type {Record<string,string>} */
+  const KB_ADMIN_SENDER_HINTS = {
+    telegram: "Telegram user ID (число)",
+    vk: "VK user ID",
+    email: "Адрес email",
+    cli: "Локальный id (например user@host)",
+  };
+
+  function kbAdminChannelLabel(channel) {
+    const ch = String(channel || "").trim();
+    return KB_ADMIN_CHANNEL_LABELS[ch] || ch || "—";
+  }
+
+  function kbAdminSenderHint(channel) {
+    const ch = String(channel || "").trim();
+    return KB_ADMIN_SENDER_HINTS[ch] || "Идентификатор в канале";
+  }
+
+  function kbAdminParseAccount(acc) {
+    const s = String(acc || "");
+    const i = s.indexOf(":");
+    if (i < 0) {
+      return { channel: s, sender_id: "" };
+    }
+    return { channel: s.slice(0, i), sender_id: s.slice(i + 1) };
+  }
+
+  function kbAdminFillChannelSelect(selectEl, opts) {
+    const includeEmpty = !!(opts && opts.includeEmpty);
+    const emptyLabel = (opts && opts.emptyLabel) || "— выберите канал —";
+    selectEl.replaceChildren();
+    if (includeEmpty) {
+      const o = document.createElement("option");
+      o.value = "";
+      o.textContent = emptyLabel;
+      selectEl.appendChild(o);
+    }
+    KB_ADMIN_MANUAL_CHANNELS.forEach((ch) => {
+      const o = document.createElement("option");
+      o.value = ch;
+      o.textContent = kbAdminChannelLabel(ch);
+      selectEl.appendChild(o);
+    });
+  }
+
+  function kbAdminBindSenderHint(channelSelect, senderInput, captionEl) {
+    const sync = () => {
+      const ch = channelSelect.value;
+      const hint = ch ? kbAdminSenderHint(ch) : "Идентификатор в канале";
+      senderInput.placeholder = ch ? hint : "Сначала выберите канал";
+      if (captionEl) {
+        captionEl.textContent = hint;
+      }
+    };
+    channelSelect.addEventListener("change", sync);
+    sync();
+  }
+
+  function kbAdminMakeRemoveLinkBtn(userId, account) {
+    const rm = document.createElement("button");
+    rm.type = "button";
+    rm.className = "kb-btn kb-btn-secondary";
+    rm.textContent = "Удалить";
+    rm.addEventListener("click", async () => {
+      const r = await kbApiFetch(
+        "/v1/web/users/" + encodeURIComponent(userId) + "/links",
+        {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ account: account }),
+        }
+      );
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        setAdminBanner("", (d.error && d.error.message) || "Не удалось удалить связь");
+        return;
+      }
+      refreshAdminUsers();
+    });
+    return rm;
+  }
+
+  function kbAdminAppendLinkRow(listEl, userId, account) {
+    const { channel, sender_id } = kbAdminParseAccount(account);
+    const li = document.createElement("li");
+    li.className = "kb-admin-link-row";
+    const span = document.createElement("span");
+    span.className = "kb-admin-link-text";
+    const label = document.createElement("strong");
+    label.textContent = kbAdminChannelLabel(channel);
+    span.appendChild(label);
+    span.appendChild(document.createTextNode(" · "));
+    const code = document.createElement("code");
+    code.textContent = sender_id || account;
+    span.appendChild(code);
+    li.appendChild(span);
+    li.appendChild(kbAdminMakeRemoveLinkBtn(userId, account));
+    listEl.appendChild(li);
+  }
+
   function kbCfgFmtKey(key) {
     const h = KB_CFG_HINTS[key];
     if (h) {
@@ -346,7 +518,7 @@
     def.textContent = "— выберите бэкап —";
     sel.appendChild(def);
     try {
-      const r = await fetch("/v1/web/config/backups");
+      const r = await kbApiFetch("/v1/web/config/backups");
       const data = await r.json().catch(function () {
         return {};
       });
@@ -810,7 +982,7 @@
     errEl.hidden = true;
     errEl.textContent = "";
     try {
-      const r = await fetch("/v1/web/config");
+      const r = await kbApiFetch("/v1/web/config");
       const data = await r.json().catch(function () {
         return {};
       });
@@ -899,17 +1071,33 @@
 
   function switchTab(which) {
     const isChat = which === "chat";
-    if (viewChat && viewSettings) {
+    const isSettings = which === "settings";
+    const isAdmin = which === "admin";
+    if (viewChat) {
       viewChat.classList.toggle("kb-view--hidden", !isChat);
-      viewSettings.classList.toggle("kb-view--hidden", isChat);
-      viewSettings.hidden = isChat;
     }
-    if (navChat && navSettings) {
+    if (viewSettings) {
+      viewSettings.classList.toggle("kb-view--hidden", !isSettings);
+      viewSettings.hidden = !isSettings;
+    }
+    if (viewAdmin) {
+      viewAdmin.classList.toggle("kb-view--hidden", !isAdmin);
+      viewAdmin.hidden = !isAdmin;
+    }
+    if (navChat) {
       navChat.classList.toggle("kb-dropdown-item--active", isChat);
-      navSettings.classList.toggle("kb-dropdown-item--active", !isChat);
     }
-    if (!isChat) {
+    if (navSettings) {
+      navSettings.classList.toggle("kb-dropdown-item--active", isSettings);
+    }
+    if (navAdmin) {
+      navAdmin.classList.toggle("kb-dropdown-item--active", isAdmin);
+    }
+    if (isSettings) {
       refreshSettingsPanel();
+    }
+    if (isAdmin) {
+      refreshAdminUsers();
     }
     closeMenu();
     closeCmdMenu();
@@ -1103,6 +1291,11 @@
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open("POST", url);
+      xhr.withCredentials = true;
+      const tok = getAuthToken();
+      if (tok) {
+        xhr.setRequestHeader("Authorization", "Bearer " + tok);
+      }
       xhr.upload.onprogress = (ev) => {
         if (typeof onProgress === "function") {
           onProgress(ev.loaded, ev.lengthComputable ? ev.total : 0);
@@ -1311,11 +1504,14 @@
   }
 
   async function fetchModel() {
-    const r = await fetch("/v1/models");
+    const r = await kbApiFetch("/v1/models");
+    const data = await r.json().catch(() => ({}));
     if (!r.ok) {
-      throw new Error("GET /v1/models: " + r.status);
+      if (r.status === 401) {
+        await kbHandleUnauthorized();
+      }
+      throw new Error(kbHttpErrorMessage(r.status, data, "GET /v1/models: " + r.status));
     }
-    const data = await r.json();
     const id = data?.data?.[0]?.id;
     if (!id) {
       throw new Error("Нет модели в ответе /v1/models");
@@ -1324,7 +1520,7 @@
   }
 
   async function fetchSessionList() {
-    const r = await fetch("/v1/web/sessions");
+    const r = await kbApiFetch("/v1/web/sessions");
     if (!r.ok) {
       throw new Error("Список диалогов: " + r.status);
     }
@@ -1333,7 +1529,7 @@
   }
 
   async function deleteSessionOnServer(id) {
-    const r = await fetch("/v1/web/sessions/" + encodeURIComponent(id), {
+    const r = await kbApiFetch("/v1/web/sessions/" + encodeURIComponent(id), {
       method: "DELETE",
     });
     if (r.status === 404) {
@@ -1346,7 +1542,7 @@
   }
 
   async function fetchSessionMessages(id) {
-    const r = await fetch(
+    const r = await kbApiFetch(
       "/v1/web/sessions/" + encodeURIComponent(id) + "/messages"
     );
     if (!r.ok) {
@@ -1513,17 +1709,23 @@
       stream: false,
       session_id: getSessionId(),
     };
-    const r = await fetch("/v1/chat/completions", {
+    const r = await kbApiFetch("/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) {
-      const msg =
-        data?.error?.message ||
-        (typeof data === "object" ? JSON.stringify(data) : String(data));
-      throw new Error(msg || "HTTP " + r.status);
+      if (r.status === 401) {
+        await kbHandleUnauthorized();
+      }
+      throw new Error(
+        kbHttpErrorMessage(
+          r.status,
+          data,
+          typeof data === "object" ? JSON.stringify(data) : String(data)
+        )
+      );
     }
     const content = data?.choices?.[0]?.message?.content;
     if (typeof content !== "string") {
@@ -1591,7 +1793,15 @@
   formEl.addEventListener("submit", async (e) => {
     e.preventDefault();
     const text = inputEl.value.trim();
-    if ((!text && pendingFiles.length === 0) || !modelId) {
+    if (!text && pendingFiles.length === 0) {
+      return;
+    }
+    if (!modelId) {
+      appendMessage(
+        "assistant",
+        "Модель ещё не загружена или сессия не авторизована. Обновите страницу или войдите снова.",
+        "error"
+      );
       return;
     }
 
@@ -1667,6 +1877,517 @@
   if (navSettings) {
     navSettings.addEventListener("click", () => switchTab("settings"));
   }
+  if (navAdmin) {
+    navAdmin.addEventListener("click", () => switchTab("admin"));
+  }
+  if (navLogout) {
+    navLogout.addEventListener("click", () => {
+      closeMenu();
+      kbLogout();
+    });
+  }
+
+  function showAuthGate(setupMode) {
+    if (authGate) {
+      authGate.hidden = false;
+    }
+    if (layoutElRoot) {
+      layoutElRoot.hidden = true;
+    }
+    const lead = document.getElementById("kb-auth-lead");
+    const submit = document.getElementById("kb-auth-submit");
+    const tokenLabel = document.querySelector(".kb-auth-token-label");
+    const tokenInput = document.getElementById("kb-auth-token");
+    if (setupMode) {
+      if (lead) {
+        lead.textContent =
+          "Первый запуск: задайте пароль администратора (минимум 6 символов). " +
+          "Он сохранится в config.json как api.auth.passwordHash.";
+      }
+      if (submit) {
+        submit.textContent = "Задать пароль";
+      }
+      if (tokenLabel) {
+        tokenLabel.hidden = true;
+      }
+      if (tokenInput) {
+        tokenInput.hidden = true;
+      }
+    } else {
+      if (lead) {
+        lead.textContent = "Для веб-интерфейса нужен пароль или API-ключ администратора.";
+      }
+      if (submit) {
+        submit.textContent = "Войти";
+      }
+      if (tokenLabel) {
+        tokenLabel.hidden = false;
+      }
+      if (tokenInput) {
+        tokenInput.hidden = false;
+      }
+    }
+  }
+
+  function showAppShell() {
+    if (authGate) {
+      authGate.hidden = true;
+    }
+    if (layoutElRoot) {
+      layoutElRoot.hidden = false;
+    }
+  }
+
+  function setAuthError(msg) {
+    const el = document.getElementById("kb-auth-error");
+    if (!el) {
+      return;
+    }
+    if (msg) {
+      el.hidden = false;
+      el.textContent = msg;
+    } else {
+      el.hidden = true;
+      el.textContent = "";
+    }
+  }
+
+  async function kbLogout() {
+    try {
+      await kbApiFetch("/v1/web/auth/logout", { method: "POST" });
+    } catch (_e) {
+      /* ignore */
+    }
+    setAuthToken("");
+    showAuthGate(false);
+  }
+
+  /**
+   * @returns {Promise<boolean>} true if app may proceed
+   */
+  async function ensureAuthenticated() {
+    let status;
+    try {
+      const r = await fetch("/v1/web/auth/status", { credentials: "include" });
+      status = await r.json();
+    } catch (err) {
+      setAuthError("Не удалось связаться с сервером: " + (err.message || err));
+      showAuthGate(false);
+      return false;
+    }
+    if (status.configured && status.authenticated) {
+      showAppShell();
+      return true;
+    }
+    if (!status.configured) {
+      showAuthGate(true);
+      return false;
+    }
+    // Configured but not authenticated — try Bearer from sessionStorage
+    if (getAuthToken()) {
+      try {
+        const r2 = await kbApiFetch("/v1/web/auth/status");
+        const s2 = await r2.json();
+        if (s2.authenticated) {
+          showAppShell();
+          return true;
+        }
+      } catch (_e) {
+        /* fall through */
+      }
+    }
+    showAuthGate(false);
+    return false;
+  }
+
+  const authForm = document.getElementById("kb-auth-form");
+  if (authForm) {
+    authForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      setAuthError("");
+      const passwordEl = document.getElementById("kb-auth-password");
+      const tokenEl = document.getElementById("kb-auth-token");
+      const password = passwordEl ? passwordEl.value : "";
+      const token = tokenEl && !tokenEl.hidden ? tokenEl.value.trim() : "";
+      let setupMode = false;
+      try {
+        const st = await fetch("/v1/web/auth/status", { credentials: "include" });
+        const sj = await st.json();
+        setupMode = !sj.configured;
+      } catch (_e) {
+        /* assume login */
+      }
+      const url = setupMode ? "/v1/web/auth/setup" : "/v1/web/auth/login";
+      const body = setupMode
+        ? { password: password }
+        : token
+          ? { token: token }
+          : { password: password };
+      try {
+        const r = await fetch(url, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          setAuthError(
+            (data.error && data.error.message) || "Ошибка входа (HTTP " + r.status + ")"
+          );
+          return;
+        }
+        if (data.token) {
+          setAuthToken(data.token);
+        }
+        showAppShell();
+        setAuthError("");
+        try {
+          modelId = await fetchModel();
+          setStatus("Модель: " + modelId);
+          await refreshSettingsPanel();
+          await refreshSessions();
+          await loadHistoryForSession(getSessionId());
+        } catch (err) {
+          appendMessage(
+            "assistant",
+            "Не удалось инициализировать: " + (err.message || err),
+            "error"
+          );
+        }
+      } catch (err) {
+        setAuthError(String(err.message || err));
+      }
+    });
+  }
+
+  function setAdminBanner(okMsg, errMsg) {
+    const ok = document.getElementById("kb-admin-ok");
+    const err = document.getElementById("kb-admin-error");
+    if (ok) {
+      if (okMsg) {
+        ok.hidden = false;
+        ok.textContent = okMsg;
+      } else {
+        ok.hidden = true;
+        ok.textContent = "";
+      }
+    }
+    if (err) {
+      if (errMsg) {
+        err.hidden = false;
+        err.textContent = errMsg;
+      } else {
+        err.hidden = true;
+        err.textContent = "";
+      }
+    }
+  }
+
+  async function refreshAdminUsers() {
+    setAdminBanner("", "");
+    const listEl = document.getElementById("kb-admin-user-list");
+    const pendingEl = document.getElementById("kb-admin-pending");
+    const pendingEmpty = document.getElementById("kb-admin-pending-empty");
+    if (!listEl) {
+      return;
+    }
+    try {
+      const [usersR, regsR] = await Promise.all([
+        kbApiFetch("/v1/web/users"),
+        kbApiFetch("/v1/web/registrations"),
+      ]);
+      if (!usersR.ok) {
+        const d = await usersR.json().catch(() => ({}));
+        throw new Error((d.error && d.error.message) || "HTTP " + usersR.status);
+      }
+      const usersData = await usersR.json();
+      const regsData = regsR.ok ? await regsR.json() : { data: [] };
+      const users = Array.isArray(usersData.data) ? usersData.data : [];
+      const regs = Array.isArray(regsData.data) ? regsData.data : [];
+
+      if (pendingEl) {
+        pendingEl.innerHTML = "";
+        regs.forEach((reg) => {
+          const li = document.createElement("li");
+          li.className = "kb-admin-pending-item";
+          const meta = document.createElement("div");
+          meta.className = "kb-admin-pending-meta";
+          meta.textContent =
+            kbAdminChannelLabel(reg.channel) +
+            " · " +
+            reg.sender_id +
+            (reg.note ? " — " + reg.note : "") +
+            (reg.created_at ? " (" + reg.created_at + ")" : "");
+          const actions = document.createElement("div");
+          actions.className = "kb-admin-pending-actions";
+          const approve = document.createElement("button");
+          approve.type = "button";
+          approve.className = "kb-btn kb-btn-primary";
+          approve.textContent = "Одобрить";
+          approve.addEventListener("click", async () => {
+            const r = await kbApiFetch(
+              "/v1/web/registrations/" + encodeURIComponent(reg.request_id) + "/approve",
+              { method: "POST" }
+            );
+            if (!r.ok) {
+              const d = await r.json().catch(() => ({}));
+              setAdminBanner("", (d.error && d.error.message) || "Ошибка одобрения");
+              return;
+            }
+            setAdminBanner("Заявка одобрена", "");
+            refreshAdminUsers();
+          });
+          const reject = document.createElement("button");
+          reject.type = "button";
+          reject.className = "kb-btn kb-btn-secondary";
+          reject.textContent = "Отклонить";
+          reject.addEventListener("click", async () => {
+            const r = await kbApiFetch(
+              "/v1/web/registrations/" + encodeURIComponent(reg.request_id) + "/reject",
+              { method: "POST" }
+            );
+            if (!r.ok) {
+              const d = await r.json().catch(() => ({}));
+              setAdminBanner("", (d.error && d.error.message) || "Ошибка отклонения");
+              return;
+            }
+            setAdminBanner("Заявка отклонена", "");
+            refreshAdminUsers();
+          });
+          actions.appendChild(approve);
+          actions.appendChild(reject);
+          li.appendChild(meta);
+          li.appendChild(actions);
+          pendingEl.appendChild(li);
+        });
+      }
+      if (pendingEmpty) {
+        pendingEmpty.hidden = regs.length > 0;
+      }
+
+      listEl.innerHTML = "";
+      users.forEach((u) => {
+        listEl.appendChild(renderUserCard(u));
+      });
+      if (!users.length) {
+        const p = document.createElement("p");
+        p.className = "kb-settings-p";
+        p.textContent = "Пользователей пока нет.";
+        listEl.appendChild(p);
+      }
+    } catch (err) {
+      setAdminBanner("", String(err.message || err));
+    }
+  }
+
+  function renderUserCard(u) {
+    const card = document.createElement("article");
+    card.className = "kb-admin-user-card";
+    card.dataset.userId = u.user_id;
+
+    const head = document.createElement("div");
+    head.className = "kb-admin-user-card-head";
+    const nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.className = "kb-input kb-admin-user-name-input";
+    nameInput.value = u.display_name || "";
+    nameInput.placeholder = "Имя";
+    head.appendChild(nameInput);
+    if (u.is_owner) {
+      const badge = document.createElement("span");
+      badge.className = "kb-admin-badge";
+      badge.textContent = "владелец";
+      head.appendChild(badge);
+    }
+    card.appendChild(head);
+
+    const idRo = document.createElement("p");
+    idRo.className = "kb-admin-ro";
+    idRo.textContent = "user_id: " + u.user_id;
+    card.appendChild(idRo);
+
+    const wsRo = document.createElement("p");
+    wsRo.className = "kb-admin-ro";
+    wsRo.textContent = "workspace: " + (u.workspace || "—");
+    card.appendChild(wsRo);
+
+    const ttsLabel = document.createElement("label");
+    ttsLabel.className = "kb-cfg-label";
+    const ttsCb = document.createElement("input");
+    ttsCb.type = "checkbox";
+    ttsCb.checked = !!u.tts_enabled;
+    ttsLabel.appendChild(ttsCb);
+    ttsLabel.appendChild(document.createTextNode(" TTS включён"));
+    card.appendChild(ttsLabel);
+
+    const linksTitle = document.createElement("p");
+    linksTitle.className = "kb-settings-p";
+    linksTitle.style.marginTop = "0.5rem";
+    linksTitle.textContent = "Привязки каналов:";
+    card.appendChild(linksTitle);
+
+    const accounts = (Array.isArray(u.accounts) ? u.accounts : []).filter((acc) => {
+      return kbAdminParseAccount(acc).channel !== "api";
+    });
+
+    const linksUl = document.createElement("ul");
+    linksUl.className = "kb-admin-links";
+    accounts.forEach((acc) => kbAdminAppendLinkRow(linksUl, u.user_id, acc));
+    card.appendChild(linksUl);
+
+    const addRow = document.createElement("div");
+    addRow.className = "kb-admin-link-add";
+    const chIn = document.createElement("select");
+    chIn.className = "kb-input";
+    chIn.required = true;
+    chIn.setAttribute("aria-label", "Канал");
+    kbAdminFillChannelSelect(chIn, {
+      includeEmpty: true,
+      emptyLabel: "— канал —",
+    });
+    const sidIn = document.createElement("input");
+    sidIn.type = "text";
+    sidIn.className = "kb-input";
+    sidIn.setAttribute("aria-label", "Идентификатор в канале");
+    kbAdminBindSenderHint(chIn, sidIn, null);
+    const addBtn = document.createElement("button");
+    addBtn.type = "button";
+    addBtn.className = "kb-btn kb-btn-secondary";
+    addBtn.textContent = "Добавить связь";
+    addBtn.addEventListener("click", async () => {
+      const channel = chIn.value.trim();
+      const sender_id = sidIn.value.trim();
+      if (!channel) {
+        setAdminBanner("", "Выберите канал");
+        return;
+      }
+      if (!sender_id) {
+        setAdminBanner("", "Укажите: " + kbAdminSenderHint(channel));
+        return;
+      }
+      const r = await kbApiFetch(
+        "/v1/web/users/" + encodeURIComponent(u.user_id) + "/links",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ channel: channel, sender_id: sender_id }),
+        }
+      );
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        setAdminBanner("", (d.error && d.error.message) || "Не удалось добавить связь");
+        return;
+      }
+      refreshAdminUsers();
+    });
+    addRow.appendChild(chIn);
+    addRow.appendChild(sidIn);
+    addRow.appendChild(addBtn);
+    card.appendChild(addRow);
+
+    const actions = document.createElement("div");
+    actions.className = "kb-admin-user-actions";
+    const saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.className = "kb-btn kb-btn-primary";
+    saveBtn.textContent = "Сохранить";
+    saveBtn.addEventListener("click", async () => {
+      const r = await kbApiFetch("/v1/web/users/" + encodeURIComponent(u.user_id), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          display_name: nameInput.value.trim(),
+          tts_enabled: ttsCb.checked,
+        }),
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        setAdminBanner("", (d.error && d.error.message) || "Ошибка сохранения");
+        return;
+      }
+      setAdminBanner("Пользователь сохранён", "");
+      refreshAdminUsers();
+    });
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "kb-btn kb-btn-danger";
+    delBtn.textContent = "Удалить";
+    delBtn.disabled = !!u.is_owner;
+    delBtn.title = u.is_owner ? "Нельзя удалить владельца" : "Удалить пользователя и workspace";
+    delBtn.addEventListener("click", async () => {
+      if (u.is_owner) {
+        return;
+      }
+      const ok = window.confirm(
+        "Удалить пользователя " +
+          (u.display_name || u.user_id) +
+          "?\nБудут удалены все привязки и каталог workspace."
+      );
+      if (!ok) {
+        return;
+      }
+      const r = await kbApiFetch("/v1/web/users/" + encodeURIComponent(u.user_id), {
+        method: "DELETE",
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        setAdminBanner("", (d.error && d.error.message) || "Ошибка удаления");
+        return;
+      }
+      setAdminBanner("Пользователь удалён", "");
+      refreshAdminUsers();
+    });
+    actions.appendChild(saveBtn);
+    actions.appendChild(delBtn);
+    card.appendChild(actions);
+    return card;
+  }
+
+  const adminCreateForm = document.getElementById("kb-admin-create-form");
+  const adminCreateChannel = document.getElementById("kb-admin-create-channel");
+  const adminCreateSender = document.getElementById("kb-admin-create-sender");
+  const adminCreateSenderCaption = document.getElementById("kb-admin-create-sender-caption");
+  if (adminCreateChannel && adminCreateSender) {
+    kbAdminBindSenderHint(adminCreateChannel, adminCreateSender, adminCreateSenderCaption);
+  }
+  if (adminCreateForm) {
+    adminCreateForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const name = (document.getElementById("kb-admin-create-name") || {}).value || "";
+      const channel = (adminCreateChannel && adminCreateChannel.value) || "";
+      const sender = (adminCreateSender && adminCreateSender.value) || "";
+      const body = { display_name: String(name).trim() };
+      if (String(channel).trim() && String(sender).trim()) {
+        body.channel = String(channel).trim();
+        body.sender_id = String(sender).trim();
+      } else if (String(channel).trim() || String(sender).trim()) {
+        setAdminBanner("", "Укажите и канал, и идентификатор — или оставьте оба пустыми");
+        return;
+      }
+      const r = await kbApiFetch("/v1/web/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        setAdminBanner("", (d.error && d.error.message) || "Ошибка создания");
+        return;
+      }
+      adminCreateForm.reset();
+      if (adminCreateChannel) {
+        adminCreateChannel.dispatchEvent(new Event("change"));
+      }
+      setAdminBanner("Пользователь создан", "");
+      refreshAdminUsers();
+    });
+  }
+
+  const adminRefreshBtn = document.getElementById("kb-admin-refresh");
+  if (adminRefreshBtn) {
+    adminRefreshBtn.addEventListener("click", () => refreshAdminUsers());
+  }
 
   if (copySessionBtn) {
     copySessionBtn.addEventListener("click", async () => {
@@ -1733,7 +2454,7 @@
             "Загрузите настройки: откройте вкладку и дождитесь загрузки.",
           );
         }
-        const r = await fetch("/v1/web/config", {
+        const r = await kbApiFetch("/v1/web/config", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(sections),
@@ -1801,7 +2522,7 @@
       }
       kbCfgRestoreBtn.disabled = true;
       try {
-        const r = await fetch("/v1/web/config/restore", {
+        const r = await kbApiFetch("/v1/web/config/restore", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ backup: name }),
@@ -1892,6 +2613,10 @@
   }
 
   (async function init() {
+    const ok = await ensureAuthenticated();
+    if (!ok) {
+      return;
+    }
     try {
       modelId = await fetchModel();
       setStatus("Модель: " + modelId);

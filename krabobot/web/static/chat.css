@@ -21,6 +21,13 @@
   box-sizing: border-box;
 }
 
+/* Author display: rules (e.g. .kb-layout / .kb-auth-gate { display: flex })
+   otherwise override the UA [hidden] { display: none }, so the auth gate
+   stays visible after login/setup — looks like "submit does nothing". */
+[hidden] {
+  display: none !important;
+}
+
 html {
   height: 100%;
 }
@@ -1248,4 +1255,268 @@ body {
   .kb-session-list {
     max-height: 28vh;
   }
+}
+
+/* —— Auth gate —— */
+.kb-auth-gate {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background:
+    radial-gradient(ellipse at 20% 0%, rgba(0, 123, 255, 0.12), transparent 55%),
+    radial-gradient(ellipse at 80% 100%, rgba(0, 229, 255, 0.1), transparent 50%),
+    var(--bg, #f0f5fb);
+}
+
+.kb-auth-card {
+  width: 100%;
+  max-width: 22rem;
+  padding: 1.5rem 1.35rem 1.35rem;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 14px;
+  box-shadow: 0 8px 32px rgba(0, 51, 102, 0.12);
+}
+
+.kb-auth-title {
+  margin: 0 0 0.5rem;
+  font-size: 1.35rem;
+  font-weight: 700;
+  color: var(--navy);
+  text-align: center;
+}
+
+.kb-auth-lead {
+  margin: 0 0 1rem;
+  font-size: 0.9rem;
+  color: var(--muted);
+  line-height: 1.45;
+  text-align: center;
+}
+
+.kb-auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.kb-auth-input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.kb-auth-token-label {
+  margin-top: 0.35rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+/* —— Admin —— */
+#kb-view-admin:not(.kb-view--hidden) {
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+}
+
+.kb-panel-stage:has(#kb-view-admin:not(.kb-view--hidden)) .kb-chat-backdrop {
+  opacity: 0;
+}
+
+.kb-admin-tabs {
+  display: flex;
+  gap: 0.35rem;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid var(--border-soft);
+  padding-bottom: 0.5rem;
+}
+
+.kb-admin-tab {
+  appearance: none;
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 0.4rem 0.75rem;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.kb-admin-tab--active {
+  color: var(--navy);
+  background: rgba(0, 123, 255, 0.1);
+}
+
+.kb-admin-users-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.kb-admin-users-head .kb-cfg-section-h {
+  margin: 0;
+}
+
+.kb-admin-create {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  max-width: 28rem;
+}
+
+.kb-cfg-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--navy);
+}
+
+.kb-admin-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.kb-admin-pending-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.kb-admin-pending-meta {
+  font-size: 0.88rem;
+  color: var(--text);
+  line-height: 1.35;
+}
+
+.kb-admin-pending-actions {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.kb-admin-user-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.kb-admin-user-card {
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  padding: 0.85rem 1rem;
+  background: var(--surface);
+  box-shadow: 0 2px 12px rgba(0, 51, 102, 0.05);
+}
+
+.kb-admin-user-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.65rem;
+}
+
+.kb-admin-user-name-input {
+  flex: 1 1 10rem;
+  min-width: 8rem;
+}
+
+.kb-admin-badge {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 0.15rem 0.45rem;
+  border-radius: 6px;
+  background: rgba(0, 123, 255, 0.15);
+  color: var(--navy);
+}
+
+.kb-admin-ro {
+  margin: 0 0 0.35rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.kb-admin-links {
+  list-style: none;
+  margin: 0.5rem 0;
+  padding: 0;
+}
+
+.kb-admin-link-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.35rem 0;
+  border-bottom: 1px dashed var(--border-soft);
+  font-size: 0.88rem;
+}
+
+.kb-admin-link-row:last-child {
+  border-bottom: none;
+}
+
+.kb-admin-link-text {
+  min-width: 0;
+  word-break: break-word;
+}
+
+.kb-admin-link-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.5rem 0;
+  align-items: center;
+}
+
+.kb-admin-link-add .kb-input,
+.kb-admin-link-add select.kb-input {
+  flex: 1 1 6rem;
+  min-width: 5rem;
+}
+
+.kb-admin-create select.kb-input {
+  width: 100%;
+}
+
+.kb-admin-user-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.65rem;
+}
+
+.kb-btn-danger {
+  background: #fff;
+  color: #b00020;
+  border-color: #e0a0a8;
+}
+
+.kb-btn-danger:hover:not(:disabled) {
+  background: #fff5f6;
+  border-color: #b00020;
+}
+
+.kb-btn-danger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
