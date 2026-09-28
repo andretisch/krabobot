@@ -1089,14 +1089,40 @@ def serve(
         _app["agent_loop_task"] = asyncio.create_task(agent_loop.run())
 
         async def _drain_local_outbound() -> None:
-            """Drop api/cli/voice outbound; turns are already persisted by _process_message."""
+            """Route serve-bus outbound: drop local channels, spool real channels for gateway.
+
+            serve and gateway do not share a MessageBus. Local api/cli/voice replies are
+            already persisted by process_direct; cross-channel ``message`` tool sends
+            (email/telegram/vk/…) must be written to the workspace spool so the gateway
+            ChannelManager can deliver them.
+            """
+            from krabobot.bus.spool import enqueue_outbound, route_serve_outbound
+
+            workspace = runtime_config.workspace_path
             while True:
                 try:
-                    await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
+                    msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
                 except asyncio.TimeoutError:
                     continue
                 except asyncio.CancelledError:
                     break
+                to_spool = route_serve_outbound(msg)
+                if to_spool is None:
+                    continue
+                try:
+                    path = enqueue_outbound(workspace, to_spool)
+                    logger.info(
+                        "Spooled cross-process outbound {}:{} → {}",
+                        to_spool.channel,
+                        to_spool.chat_id,
+                        path.name,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to spool outbound {}:{}",
+                        to_spool.channel,
+                        to_spool.chat_id,
+                    )
 
         _app["outbound_drain_task"] = asyncio.create_task(_drain_local_outbound())
 

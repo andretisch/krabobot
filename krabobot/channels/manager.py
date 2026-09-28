@@ -152,9 +152,27 @@ class ChannelManager:
                     logger.warning("Unknown channel: {}", msg.channel)
 
             except asyncio.TimeoutError:
+                # Cross-process spool: serve writes here when its MessageBus is isolated.
+                pending.extend(self._claim_spooled_outbound())
                 continue
             except asyncio.CancelledError:
                 break
+
+    def _claim_spooled_outbound(self) -> list[OutboundMessage]:
+        """Claim filesystem-spooled outbound from ``krabobot serve`` (separate bus)."""
+        from krabobot.bus.spool import claim_spooled_outbound
+
+        try:
+            claimed = claim_spooled_outbound(self.config.workspace_path)
+        except Exception:
+            logger.exception("Failed to claim spooled outbound messages")
+            return []
+        if claimed:
+            logger.info(
+                "Claimed {} spooled outbound message(s) from serve",
+                len(claimed),
+            )
+        return claimed
 
     @staticmethod
     async def _send_once(channel: BaseChannel, msg: OutboundMessage) -> None:
