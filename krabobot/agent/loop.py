@@ -347,7 +347,7 @@ class AgentLoop:
         instead of silently queueing messages that channels will later skip.
         """
         channel = (msg.channel or "").strip().lower()
-        if channel in {"", "cli", "system"}:
+        if channel in {"", "cli", "system", "api", "voice"}:
             await self.bus.publish_outbound(msg)
             return
 
@@ -434,6 +434,7 @@ class AgentLoop:
         if owner_id:
             # OpenAI-compatible HTTP API (krabobot serve + static web UI): same host as the
             # deployment is treated as the owner; link session id for is_registered().
+            # Virtual channel ``voice`` must NOT auto-link — admin pre-links device_id.
             if msg.channel == "api":
                 msg.user_id = owner_id
                 await self.user_resolver.link_account(owner_id, msg.channel, msg.sender_id)
@@ -987,12 +988,12 @@ class AgentLoop:
         session.updated_at = datetime.now()
 
     # Channels without ChannelManager adapters — deliver into session history instead.
-    _LOCAL_OUTBOUND_CHANNELS = frozenset({"api", "cli"})
+    _LOCAL_OUTBOUND_CHANNELS = frozenset({"api", "cli", "voice"})
 
     async def deliver_outbound(self, msg: OutboundMessage) -> bool:
         """Deliver an outbound message without blocking the caller on channel I/O.
 
-        ``api``/``cli`` have no gateway adapter, so the message is appended to the
+        ``api``/``cli``/``voice`` have no gateway adapter, so the message is appended to the
         matching session JSONL (visible in web chat after refresh). Other channels
         go through the bus for ChannelManager. Never raises.
         """

@@ -17,7 +17,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 from aiohttp import web
 from loguru import logger
@@ -25,6 +25,7 @@ from pydantic import ValidationError
 
 from krabobot.agent.context import ContextBuilder
 from krabobot.agent.loop import AgentLoop
+from krabobot.api.voice_io import synthesize_speech_wav, transcribe_audio
 from krabobot.api.web_auth import (
     auth_middleware,
     handle_auth_login,
@@ -50,6 +51,7 @@ from krabobot.api.web_users import (
     handle_users_create,
     handle_users_list,
 )
+from krabobot.bus.events import InboundMessage
 from krabobot.utils.helpers import ensure_dir, safe_filename
 
 
@@ -457,6 +459,48 @@ def _ui_text_from_stored_content(content: Any) -> str:
     return "\n".join(lines) if lines else "[сложное сообщение]"
 
 
+_SESSION_TITLE_MAX = 50
+_SESSION_TITLE_CUSTOM_MAX = 120
+
+
+def _truncate_session_title(text: str, max_len: int = _SESSION_TITLE_MAX) -> str:
+    """Collapse whitespace and truncate for sidebar labels."""
+    cleaned = " ".join(str(text or "").split())
+    if not cleaned:
+        return ""
+    if len(cleaned) <= max_len:
+        return cleaned
+    return cleaned[: max_len - 1].rstrip() + "…"
+
+
+def derive_session_title(
+    messages: list[dict[str, Any]] | None,
+    metadata: dict[str, Any] | None = None,
+    *,
+    max_len: int = _SESSION_TITLE_MAX,
+) -> str:
+    """
+    Human-readable dialog title for the web sidebar.
+
+    Prefers a custom ``metadata["title"]``; otherwise the first user message
+    (UI-stripped). Empty string if neither is available (UI falls back to date).
+    """
+    meta = metadata or {}
+    custom = str(meta.get("title") or "").strip()
+    if custom:
+        return _truncate_session_title(custom, max_len=_SESSION_TITLE_CUSTOM_MAX)
+
+    for msg in messages or []:
+        if msg.get("role") != "user":
+            continue
+        raw = _ui_text_from_stored_content(msg.get("content")).strip()
+        title = _truncate_session_title(raw, max_len=max_len)
+        if title:
+            return title
+        break
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Route handlers
 # ---------------------------------------------------------------------------
@@ -719,6 +763,7 @@ async def handle_web_sessions_list(request: web.Request) -> web.Response:
             if m.get("role") == "user":
                 preview = _ui_text_from_stored_content(m.get("content"))[:160]
                 break
+        title = derive_session_title(session.messages, session.metadata)
         items.append({
             "id": sid,
             "key": key,
@@ -726,8 +771,55 @@ async def handle_web_sessions_list(request: web.Request) -> web.Response:
             "created_at": info.get("created_at"),
             "message_count": len(session.messages),
             "preview": preview,
+            "title": title,
         })
     return web.json_response({"object": "list", "data": items})
+
+
+async def handle_web_sessions_patch(request: web.Request) -> web.Response:
+    """PATCH /v1/web/sessions/{session_id} — rename dialog (stored in session metadata)."""
+    session_id = unquote(request.match_info.get("session_id", "")).strip()
+    if not session_id:
+        return _error_json(400, "Missing session id")
+    try:
+        body = await request.json()
+    except Exception:
+        return _error_json(400, "Invalid JSON body")
+    if not isinstance(body, dict) or "title" not in body:
+        return _error_json(400, "Field 'title' is required")
+    raw_title = body.get("title")
+    if raw_title is None:
+        title = ""
+    elif isinstance(raw_title, str):
+        title = " ".join(raw_title.split()).strip()
+    else:
+        return _error_json(400, "Field 'title' must be a string")
+    if len(title) > _SESSION_TITLE_CUSTOM_MAX:
+        title = title[:_SESSION_TITLE_CUSTOM_MAX].rstrip()
+
+    key = f"api:{session_id}"
+    agent_loop = request.app["agent_loop"]
+    try:
+        sm = await agent_loop.session_manager_for_api(session_id)
+    except Exception:
+        logger.exception("Failed to resolve API session manager for patch")
+        return _error_json(500, "Internal server error", err_type="server_error")
+    sm.invalidate(key)
+    path = sm._get_session_path(key)
+    if not path.exists():
+        return _error_json(404, "Session not found")
+    session = sm.get_or_create(key)
+    if title:
+        session.metadata["title"] = title
+    else:
+        session.metadata.pop("title", None)
+    sm.save(session)
+    derived = derive_session_title(session.messages, session.metadata)
+    return web.json_response({
+        "object": "session",
+        "id": session_id,
+        "title": derived,
+    })
 
 
 async def handle_web_sessions_delete(request: web.Request) -> web.Response:
@@ -776,10 +868,13 @@ async def handle_web_session_messages(request: web.Request) -> web.Response:
         if role not in ("user", "assistant"):
             continue
         content = m.get("content")
+        # Match live web chat: only final assistant text is shown, not intermediate
+        # tool-call turns (role=tool is already skipped above).
         if role == "assistant" and not content and m.get("tool_calls"):
-            text = "[инструменты…]"
-        else:
-            text = _ui_text_from_stored_content(content)
+            continue
+        text = _ui_text_from_stored_content(content)
+        if role == "assistant" and not text.strip():
+            continue
         out.append({"role": role, "content": text})
     return web.json_response({"object": "list", "data": out})
 
@@ -948,6 +1043,221 @@ async def handle_web_backup_download(request: web.Request) -> web.StreamResponse
 
 
 # ---------------------------------------------------------------------------
+# Voice channel (virtual: STT → agent → TTS)
+# ---------------------------------------------------------------------------
+
+def _voice_upload_dir(workspace: Path, device_id: str) -> Path:
+    sub = safe_filename(device_id)[:80] or "device"
+    return ensure_dir(workspace.resolve() / "uploads" / "voice" / sub)
+
+
+async def handle_voice_turn(request: web.Request) -> web.Response:
+    """POST /v1/voice/turn — multipart audio (+ optional instruct/files) → WAV reply.
+
+    Form fields:
+      - device_id (required): stable sender_id for channel ``voice``
+      - audio (optional): speech clip for server STT
+      - instruct (optional): text override/addition (meeting upload+instruct path)
+      - files / file (optional): saved under the linked user's workspace
+
+    Accepts ``multipart/form-data`` (preferred) or ``application/x-www-form-urlencoded``
+    for text-only instruct turns.
+    """
+    ctype = (request.content_type or "").lower()
+    agent_loop: AgentLoop = request.app["agent_loop"]
+    hard_limit = int(request.app.get("max_upload_bytes", DEFAULT_MAX_UPLOAD_HARD_MB * 1024 * 1024))
+    timeout_s = float(request.app.get("request_timeout", 120.0))
+
+    device_id = ""
+    instruct = ""
+    audio_path: Path | None = None
+    media_paths: list[str] = []
+    tmp_dir = Path(tempfile.mkdtemp(prefix="voice_turn_"))
+    tag = uuid.uuid4().hex[:10]
+    file_index = 0
+
+    try:
+        if "multipart/" in ctype:
+            reader = await request.multipart()
+            while True:
+                part = await reader.next()
+                if part is None:
+                    break
+                name = (part.name or "").strip()
+                if name == "device_id":
+                    device_id = (await part.text()).strip()
+                    continue
+                if name == "instruct":
+                    instruct = (await part.text()).strip()
+                    continue
+                if name == "audio":
+                    filename = Path(part.filename or "audio.wav").name
+                    base = safe_filename(filename)[:160] or "audio.wav"
+                    audio_path = tmp_dir / f"{tag}_{base}"
+                    try:
+                        size = await _stream_multipart_part_to_path(part, audio_path, hard_limit)
+                    except ValueError as e:
+                        return _error_json(413, str(e))
+                    if size <= 0:
+                        return _error_json(400, "Пустой audio")
+                    continue
+                if name in ("files", "file"):
+                    filename = Path(part.filename or "file.bin").name
+                    mime = "application/octet-stream"
+                    hdr_ct = part.headers.get("Content-Type") if hasattr(part, "headers") else None
+                    if hdr_ct and "/" in str(hdr_ct):
+                        mime = str(hdr_ct).split(";")[0].strip()
+                    elif mimetypes.guess_type(filename)[0]:
+                        mime = mimetypes.guess_type(filename)[0] or mime
+                    base = safe_filename(filename)[:160] or "file.bin"
+                    if "." not in base:
+                        base = f"{base}{mimetypes.guess_extension(mime) or '.bin'}"
+                    staging = tmp_dir / f"media_{file_index}_{base}"
+                    try:
+                        size = await _stream_multipart_part_to_path(part, staging, hard_limit)
+                    except ValueError as e:
+                        return _error_json(413, str(e))
+                    if size <= 0:
+                        return _error_json(400, f"Пустой файл: {filename}")
+                    media_paths.append(str(staging))
+                    file_index += 1
+                    continue
+                await part.read(decode=False)
+        elif "application/x-www-form-urlencoded" in ctype or ctype in ("", "text/plain"):
+            post = await request.post()
+            device_id = str(post.get("device_id") or "").strip()
+            instruct = str(post.get("instruct") or "").strip()
+        else:
+            return _error_json(400, "Ожидается multipart/form-data")
+
+        if not device_id:
+            return _error_json(400, "device_id is required")
+
+        stub = InboundMessage(
+            channel="voice",
+            sender_id=device_id,
+            chat_id=device_id,
+            content="",
+        )
+        await agent_loop._ensure_identity(stub)
+        if not stub.user_id:
+            return _error_json(
+                403,
+                "device_id is not linked; admin must POST /v1/web/users/{id}/links "
+                "with {channel:\"voice\", sender_id:<device_id>}",
+                err_type="forbidden",
+            )
+        registered = await agent_loop.user_resolver.is_registered("voice", device_id)
+        if not registered:
+            return _error_json(
+                403,
+                "device_id is not linked to a registered user",
+                err_type="forbidden",
+            )
+
+        runtime = await agent_loop._runtime_for_message(stub)
+        # Move staged media into the voice user's workspace.
+        final_media: list[str] = []
+        if media_paths:
+            upload_dir = _voice_upload_dir(runtime.workspace, device_id)
+            for src in media_paths:
+                src_p = Path(src)
+                dest = upload_dir / src_p.name
+                try:
+                    shutil.move(str(src_p), str(dest))
+                    final_media.append(str(dest.resolve()))
+                except OSError as e:
+                    logger.warning("Failed to place voice upload {}: {}", src_p, e)
+                    final_media.append(str(src_p.resolve()))
+
+        transcript = ""
+        if audio_path is not None:
+            from krabobot.config.loader import load_config
+
+            try:
+                audio_size = audio_path.stat().st_size
+            except OSError:
+                audio_size = 0
+            logger.info(
+                "voice turn STT input: device_id={} bytes={} file={}",
+                device_id,
+                audio_size,
+                audio_path.name,
+            )
+            try:
+                stt_cfg = load_config().stt
+            except Exception:
+                stt_cfg = None
+            transcript, stt_err = await transcribe_audio(audio_path, stt=stt_cfg)
+            if not transcript:
+                return _error_json(
+                    400,
+                    stt_err or "Не удалось распознать речь",
+                    err_type="stt_error",
+                )
+
+        content_parts = [p for p in (transcript, instruct) if p]
+        if not content_parts and not final_media:
+            return _error_json(400, "Нужен audio, instruct или файл")
+        content = "\n\n".join(content_parts) if content_parts else "Обработай приложенные файлы."
+
+        session_key = f"voice:{device_id}"
+        try:
+            result = await asyncio.wait_for(
+                agent_loop.process_direct(
+                    content,
+                    session_key=session_key,
+                    channel="voice",
+                    chat_id=device_id,
+                    sender_id=device_id,
+                    media=final_media or None,
+                ),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError:
+            return _error_json(504, f"Request timed out after {timeout_s}s")
+        except Exception:
+            logger.exception("voice turn failed for device_id={}", device_id)
+            return _error_json(500, "Internal server error", err_type="server_error")
+
+        reply = _response_text(result).strip()
+        if not reply:
+            reply = "[empty message]"
+
+        from krabobot.config.loader import load_config
+
+        try:
+            tts_cfg = load_config().tts
+        except Exception:
+            tts_cfg = None
+        wav = await synthesize_speech_wav(reply, tts=tts_cfg)
+        # Header values must be latin-1-safe for aiohttp; percent-encode UTF-8.
+        headers = {
+            "X-Krabobot-Device-Id": device_id,
+            "X-Krabobot-Transcript": quote(transcript[:2000], safe=""),
+            "X-Krabobot-Reply": quote(reply[:2000], safe=""),
+        }
+        if wav is None:
+            return web.json_response(
+                {
+                    "object": "voice.turn",
+                    "device_id": device_id,
+                    "transcript": transcript,
+                    "reply": reply,
+                    "audio": None,
+                    "error": "TTS unavailable",
+                },
+            )
+        return web.Response(
+            body=wav,
+            content_type="audio/wav",
+            headers=headers,
+        )
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
 
@@ -986,12 +1296,14 @@ def create_app(
     app.router.add_post("/v1/chat/completions", handle_chat_completions)
     app.router.add_get("/v1/models", handle_models)
     app.router.add_get("/health", handle_health)
+    app.router.add_post("/v1/voice/turn", handle_voice_turn)
     app.router.add_get("/v1/web/auth/status", handle_auth_status)
     app.router.add_post("/v1/web/auth/setup", handle_auth_setup)
     app.router.add_post("/v1/web/auth/login", handle_auth_login)
     app.router.add_post("/v1/web/auth/logout", handle_auth_logout)
     app.router.add_post("/v1/web/uploads", handle_web_uploads)
     app.router.add_get("/v1/web/sessions", handle_web_sessions_list)
+    app.router.add_patch("/v1/web/sessions/{session_id}", handle_web_sessions_patch)
     app.router.add_delete("/v1/web/sessions/{session_id}", handle_web_sessions_delete)
     app.router.add_get("/v1/web/sessions/{session_id}/messages", handle_web_session_messages)
     app.router.add_get("/v1/web/config", handle_web_config)

@@ -257,10 +257,11 @@
     vk: "VK",
     email: "Email",
     cli: "Терминал (krabobot agent)",
+    voice: "Голос (устройство)",
   };
 
   /** Manual add-link / create-user channels (api sessions auto-link to owner). */
-  const KB_ADMIN_MANUAL_CHANNELS = ["telegram", "vk", "email", "cli"];
+  const KB_ADMIN_MANUAL_CHANNELS = ["telegram", "vk", "email", "cli", "voice"];
 
   /** @type {Record<string,string>} */
   const KB_ADMIN_SENDER_HINTS = {
@@ -268,6 +269,7 @@
     vk: "VK user ID",
     email: "Адрес email",
     cli: "Локальный id (например user@host)",
+    voice: "Стабильный device_id устройства",
   };
 
   function kbAdminChannelLabel(channel) {
@@ -1541,6 +1543,22 @@
     return true;
   }
 
+  async function renameSessionOnServer(id, title) {
+    const r = await kbApiFetch("/v1/web/sessions/" + encodeURIComponent(id), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: title }),
+    });
+    if (r.status === 404) {
+      throw new Error("Диалог не найден");
+    }
+    if (!r.ok) {
+      throw new Error("Переименование: " + r.status);
+    }
+    const data = await r.json().catch(() => ({}));
+    return typeof data.title === "string" ? data.title : title;
+  }
+
   async function fetchSessionMessages(id) {
     const r = await kbApiFetch(
       "/v1/web/sessions/" + encodeURIComponent(id) + "/messages"
@@ -1553,7 +1571,7 @@
   }
 
   /** @param {{ id?: string, updated_at?: string, created_at?: string }} row */
-  function kbFormatSessionListLabel(row) {
+  function kbFormatSessionListDate(row) {
     const ts = row.updated_at || row.created_at;
     if (ts) {
       const d = new Date(ts);
@@ -1571,6 +1589,22 @@
       return s.length > 19 ? s.slice(0, 19).replace("T", " ") : s.replace("T", " ");
     }
     return "—";
+  }
+
+  /** @param {{ id?: string, title?: string, updated_at?: string, created_at?: string }} row */
+  function kbSessionListLabel(row) {
+    const title = String(row.title || "").trim();
+    if (title) {
+      return title;
+    }
+    return kbFormatSessionListDate(row);
+  }
+
+  /** Hover: date · uuid */
+  function kbSessionListTooltip(row) {
+    const date = kbFormatSessionListDate(row);
+    const id = String(row.id || "").trim();
+    return id ? date + " · " + id : date;
   }
 
   function applySidebarCollapsed(collapsed) {
@@ -1619,11 +1653,6 @@
 
   function renderSessionList(rows, currentId) {
     sessionListEl.innerHTML = "";
-    const labelCounts = {};
-    for (const row of rows) {
-      const l = kbFormatSessionListLabel(row);
-      labelCounts[l] = (labelCounts[l] || 0) + 1;
-    }
     for (const row of rows) {
       const id = row.id;
       const li = document.createElement("li");
@@ -1631,19 +1660,34 @@
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "kb-sess-btn";
-      let label = kbFormatSessionListLabel(row);
-      if (labelCounts[label] > 1) {
-        label = label + " · " + String(id || "").slice(0, 8);
-      }
+      const label = kbSessionListLabel(row);
       btn.textContent = label;
-      const preview = (row.preview || "").trim();
-      btn.title = String(id || "") + (preview ? "\n" + preview.slice(0, 220) : "");
-      const ariaPrev = preview ? ". Последнее: " + preview.slice(0, 100) : "";
-      btn.setAttribute("aria-label", "Открыть диалог " + label + ariaPrev);
+      btn.title = kbSessionListTooltip(row);
+      btn.setAttribute(
+        "aria-label",
+        "Открыть диалог «" + label + "». " + kbSessionListTooltip(row)
+      );
       btn.addEventListener("click", async () => {
         setSessionId(id);
         await refreshSessions();
         await loadHistoryForSession(id);
+      });
+      btn.addEventListener("dblclick", async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const current = String(row.title || label || "").trim();
+        const next = window.prompt("Название диалога:", current);
+        if (next === null) {
+          return;
+        }
+        try {
+          await renameSessionOnServer(id, next.trim());
+          await refreshSessions();
+          setStatus("Переименовано");
+        } catch (err) {
+          appendMessage("assistant", String(err.message || err), "error");
+        }
+        setTimeout(() => setStatus(""), 2000);
       });
       const del = document.createElement("button");
       del.type = "button";

@@ -995,7 +995,7 @@ def serve(
         _app["agent_loop_task"] = asyncio.create_task(agent_loop.run())
 
         async def _drain_local_outbound() -> None:
-            """Drop api/cli outbound; turns are already persisted by _process_message."""
+            """Drop api/cli/voice outbound; turns are already persisted by _process_message."""
             while True:
                 try:
                     await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)

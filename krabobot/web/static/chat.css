@@ -192,8 +192,9 @@ body {
   cursor: pointer;
   line-height: 1.25;
   overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
   font-family: inherit;
-  font-variant-numeric: tabular-nums;
 }
 
 .kb-sess-btn:hover {

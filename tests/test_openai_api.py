@@ -464,6 +464,7 @@ async def test_web_sessions_list_uses_agent_session_manager(aiohttp_client) -> N
     ]
     sess = MagicMock()
     sess.messages = [{"role": "user", "content": "hello there"}]
+    sess.metadata = {}
     sm.get_or_create.return_value = sess
 
     agent = _make_mock_agent()
@@ -478,7 +479,39 @@ async def test_web_sessions_list_uses_agent_session_manager(aiohttp_client) -> N
     assert len(body["data"]) == 1
     assert body["data"][0]["id"] == "aa-bb-cc"
     assert "hello" in body["data"][0]["preview"]
+    assert body["data"][0]["title"] == "hello there"
 
+
+@pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
+@pytest.mark.asyncio
+async def test_web_sessions_patch_renames_title(aiohttp_client, tmp_path) -> None:
+    from krabobot.session.manager import Session, SessionManager
+
+    sm = SessionManager(tmp_path)
+    session = Session(key="api:rename-me", metadata={})
+    session.add_message("user", "first question")
+    sm.save(session)
+
+    agent = _make_mock_agent()
+    agent.session_manager_for_api = AsyncMock(return_value=sm)
+
+    app = create_app(agent, model_name="m")
+    client = await aiohttp_client(app)
+
+    resp = await client.patch(
+        "/v1/web/sessions/rename-me",
+        json={"title": "  Рабочий чат  "},
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["title"] == "Рабочий чат"
+
+    reloaded = sm.get_or_create("api:rename-me")
+    assert reloaded.metadata.get("title") == "Рабочий чат"
+
+    listed = await client.get("/v1/web/sessions")
+    rows = (await listed.json())["data"]
+    assert any(r["id"] == "rename-me" and r["title"] == "Рабочий чат" for r in rows)
 
 @pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
 @pytest.mark.asyncio
@@ -536,6 +569,39 @@ async def test_web_session_messages_strips_linked_accounts(aiohttp_client) -> No
     assert body["data"][0]["content"] == "Hello from user"
     assert "Linked Accounts" not in body["data"][0]["content"]
     assert body["data"][1]["content"] == "Hi!"
+
+
+@pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
+@pytest.mark.asyncio
+async def test_web_session_messages_hides_tool_calls(aiohttp_client) -> None:
+    """History UI matches live chat: skip intermediate tool-call turns."""
+    sm = MagicMock()
+    sm.invalidate = MagicMock()
+    sm.get_or_create.return_value = MagicMock(
+        messages=[
+            {"role": "user", "content": "погода?"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "web_search"}}],
+            },
+            {"role": "tool", "tool_call_id": "c1", "name": "web_search", "content": "ok"},
+            {"role": "assistant", "content": "В Липецке +15°C."},
+        ]
+    )
+
+    agent = _make_mock_agent()
+    agent.session_manager_for_api = AsyncMock(return_value=sm)
+
+    app = create_app(agent, model_name="m")
+    client = await aiohttp_client(app)
+    resp = await client.get("/v1/web/sessions/s1/messages")
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["data"] == [
+        {"role": "user", "content": "погода?"},
+        {"role": "assistant", "content": "В Липецке +15°C."},
+    ]
 
 
 @pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")

@@ -144,7 +144,7 @@ class ChannelManager:
                 channel = self.channels.get(msg.channel)
                 if channel:
                     await self._send_with_retry(channel, msg)
-                elif (msg.channel or "").strip().lower() in {"api", "cli"}:
+                elif (msg.channel or "").strip().lower() in {"api", "cli", "voice"}:
                     # Local virtual channels are delivered via AgentLoop.deliver_outbound
                     # (session history). Bus leftovers are safe to ignore.
                     logger.debug("Skipping bus outbound for local channel {}", msg.channel)

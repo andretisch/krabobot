@@ -1,0 +1,41 @@
+# Copy to %LOCALAPPDATA%\krabobot-voice\config.yaml
+# Token: leave empty to use api.auth.adminToken from ~/.krabobot/config.json
+
+base_url: http://127.0.0.1:8900
+device_id: local-desktop
+token: ""
+timeout_s: 120
+sample_rate: 16000
+
+# Wake phrase «Эй, Арнольд»
+# mode: kws (default, lightweight MFCC embedding matcher) | asr (legacy sherpa) | off
+wake:
+  mode: kws
+  threshold: 0.82
+  window_s: 1.6
+  hop_s: 0.3
+  energy_threshold: 0.012
+  # Empty = %LOCALAPPDATA%\krabobot-voice\wake_refs
+  refs_dir: ""
+  # On Windows, synthesize a few SAPI reference WAVs if refs_dir is empty
+  auto_enroll_tts: true
+
+# Push-to-talk (hold-to-talk): record while chord is held
+ptt:
+  enabled: true
+  hotkey: ctrl+alt+space
+
+# Legacy sherpa wake ASR — only used when wake.mode: asr
+# stt_model_dir: ""
+# stt_num_threads: 2
+
+# After beep: discard settle_s (flush mic buffer), then require min_speech_s
+# before VAD may end on silence — avoids posting near-empty clips to STT.
+utterance_max_s: 15.0
+settle_s: 0.35
+preroll_s: 0.4
+speech_start_s: 0.25
+min_speech_s: 1.2
+silence_end_s: 1.2
+no_speech_timeout_s: 5.0
+energy_threshold: 0.008
