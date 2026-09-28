@@ -714,6 +714,77 @@ def _patch_serve_runtime(
     monkeypatch.setattr("subprocess.Popen", _FakePopen)
 
 
+def test_serve_install_as_service_exits_without_run_app(monkeypatch, tmp_path: Path) -> None:
+    from krabobot.utils.serve_service import ServiceResult
+
+    config_file = _write_instance_config(tmp_path)
+    config = Config()
+    config.api.host = "127.0.0.1"
+    config.api.port = 8900
+    seen: dict[str, object] = {}
+
+    _patch_cli_command_runtime(monkeypatch, config)
+
+    def fake_install(**kwargs):
+        seen["install_kwargs"] = kwargs
+        return ServiceResult(ok=True, message="installed", hints=("hint1",))
+
+    monkeypatch.setattr("krabobot.utils.serve_service.install_serve_service", fake_install)
+
+    result = runner.invoke(
+        app,
+        [
+            "serve",
+            "--config",
+            str(config_file),
+            "--install-as-service",
+            "--now",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "installed" in result.stdout
+    assert seen["install_kwargs"]["host"] == "127.0.0.1"
+    assert seen["install_kwargs"]["port"] == 8900
+    assert seen["install_kwargs"]["start_now"] is True
+    assert "gateway.autoUpdate" in result.stdout
+
+
+def test_serve_install_as_service_underscore_alias(monkeypatch, tmp_path: Path) -> None:
+    from krabobot.utils.serve_service import ServiceResult
+
+    config_file = _write_instance_config(tmp_path)
+    _patch_cli_command_runtime(monkeypatch, Config())
+    monkeypatch.setattr(
+        "krabobot.utils.serve_service.install_serve_service",
+        lambda **_k: ServiceResult(ok=True, message="ok"),
+    )
+    result = runner.invoke(app, ["serve", "--config", str(config_file), "--install_as_service"])
+    assert result.exit_code == 0
+    assert "ok" in result.stdout
+
+
+def test_serve_uninstall_as_service(monkeypatch) -> None:
+    from krabobot.utils.serve_service import ServiceResult
+
+    monkeypatch.setattr(
+        "krabobot.utils.serve_service.uninstall_serve_service",
+        lambda: ServiceResult(ok=True, message="removed"),
+    )
+    result = runner.invoke(app, ["serve", "--uninstall-as-service"])
+    assert result.exit_code == 0
+    assert "removed" in result.stdout
+
+
+def test_serve_install_and_uninstall_mutually_exclusive() -> None:
+    result = runner.invoke(
+        app,
+        ["serve", "--install-as-service", "--uninstall-as-service"],
+    )
+    assert result.exit_code == 1
+    assert "only one" in result.stdout.lower() or "only one" in (result.output or "").lower()
+
+
 def test_gateway_uses_workspace_from_config_by_default(monkeypatch, tmp_path: Path) -> None:
     config_file = _write_instance_config(tmp_path)
     config = Config()

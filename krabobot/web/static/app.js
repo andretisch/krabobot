@@ -232,6 +232,14 @@
     sendMaxRetries: "Повторы доставки в канал",
     anonymize: "Анонимизация PII перед отправкой в LLM",
     shortMemory: "Краткая память (только отмеченные факты)",
+    autoUpdate: "Автообновление из git",
+  };
+
+  /** Secondary notes under specific config fields */
+  /** @type {Record<string,string>} */
+  const KB_CFG_NOTES = {
+    autoUpdate:
+      "Перед стартом serve/gateway: git pull текущей ветки, если рабочее дерево чистое.",
   };
 
   /** @type {Record<string,string>} */
@@ -566,6 +574,13 @@
       wrap.appendChild(cb);
       wrap.appendChild(document.createTextNode("да / нет"));
       cell.appendChild(wrap);
+      const note = KB_CFG_NOTES[tailProp];
+      if (note) {
+        const hint = document.createElement("p");
+        hint.className = "kb-cfg-hint-secret";
+        hint.textContent = note;
+        cell.appendChild(hint);
+      }
       return;
     }
 
@@ -953,7 +968,12 @@
             rows.appendChild(sub);
           }
         } else if (key === "gateway") {
-          kbCfgRenderObjectOrderedAt(rows, obj, ["host", "port", "heartbeat"], `other.${key}`);
+          kbCfgRenderObjectOrderedAt(
+            rows,
+            obj,
+            ["host", "port", "autoUpdate", "heartbeat"],
+            `other.${key}`
+          );
         } else {
           kbCfgRenderObjectAt(rows, obj, `other.${key}`);
         }

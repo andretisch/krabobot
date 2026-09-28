@@ -595,6 +595,37 @@ def _load_runtime_config(config: str | None = None, workspace: str | None = None
     return loaded
 
 
+def _report_auto_update(result) -> None:
+    """Print a short console line for startup git auto-update."""
+    if result.status == "disabled":
+        return
+    branch = result.branch or "?"
+    if result.status == "updated":
+        old = (result.old_commit or "")[:7]
+        new = (result.new_commit or "")[:7]
+        console.print(
+            f"[green]✓[/green] Auto-update: {branch} {old} → {new} (re-executing…)"
+        )
+        return
+    if result.status == "up_to_date":
+        console.print(
+            f"[dim]Auto-update: already up to date ({branch} @ "
+            f"{(result.old_commit or '')[:7]})[/dim]"
+        )
+        return
+    reason = result.reason or result.status
+    console.print(f"[yellow]Auto-update skipped:[/yellow] {reason}")
+
+
+def _print_service_result(result) -> None:
+    """Print install/uninstall service outcome and follow-up commands."""
+    style = "green" if result.ok else "red"
+    mark = "✓" if result.ok else "✗"
+    console.print(f"[{style}]{mark}[/{style}] {result.message}")
+    for hint in result.hints:
+        console.print(f"  [cyan]{hint}[/cyan]")
+
+
 def _warn_deprecated_config_keys(config_path: Path | None) -> None:
     """Hint users to remove obsolete keys from their config file."""
     import json
@@ -892,8 +923,63 @@ def serve(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show krabobot runtime logs"),
     workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
     config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+    install_as_service: bool = typer.Option(
+        False,
+        "--install-as-service",
+        "--install_as_service",
+        help="Register user-level service (Task Scheduler / systemd --user) and exit",
+    ),
+    uninstall_as_service: bool = typer.Option(
+        False,
+        "--uninstall-as-service",
+        "--uninstall_as_service",
+        help="Remove user-level serve service and exit",
+    ),
+    now: bool = typer.Option(
+        False,
+        "--now",
+        help="With --install-as-service: start the service immediately after install",
+    ),
 ):
     """Start the OpenAI-compatible API server; auto-start gateway if needed."""
+    if install_as_service and uninstall_as_service:
+        console.print(
+            "[red]Use only one of --install-as-service or --uninstall-as-service.[/red]"
+        )
+        raise typer.Exit(1)
+
+    if uninstall_as_service:
+        from krabobot.utils.serve_service import uninstall_serve_service
+
+        result = uninstall_serve_service()
+        _print_service_result(result)
+        raise typer.Exit(0 if result.ok else 1)
+
+    if install_as_service:
+        from krabobot.utils.serve_service import install_serve_service
+
+        # Resolve host/port from config so the service matches current settings;
+        # serve still reads config on each start (incl. gateway.autoUpdate).
+        runtime_config = _load_runtime_config(config, workspace)
+        api_cfg = runtime_config.api
+        bind_host = host if host is not None else api_cfg.host
+        bind_port = port if port is not None else api_cfg.port
+        result = install_serve_service(
+            config=config,
+            workspace=workspace,
+            host=bind_host,
+            port=bind_port,
+            verbose=verbose,
+            start_now=now,
+        )
+        _print_service_result(result)
+        if result.ok:
+            console.print(
+                "[dim]Сервис запускает `krabobot serve`, поэтому "
+                "gateway.autoUpdate применяется при каждом старте.[/dim]"
+            )
+        raise typer.Exit(0 if result.ok else 1)
+
     import subprocess
 
     try:
@@ -904,10 +990,7 @@ def serve(
 
     from loguru import logger
 
-    from krabobot.agent.loop import AgentLoop
-    from krabobot.api.server import create_app
-    from krabobot.bus.queue import MessageBus
-    from krabobot.session.manager import SessionManager
+    from krabobot.utils.auto_update import reexec_cli, try_git_auto_update
     from krabobot.utils.gateway_pid import (
         clear_serve_pid,
         is_gateway_running,
@@ -919,7 +1002,18 @@ def serve(
     else:
         logger.disable("krabobot")
 
+    # Config + optional git pull before importing the heavy app stack / binding ports.
     runtime_config = _load_runtime_config(config, workspace)
+    update_result = try_git_auto_update(enabled=runtime_config.gateway.auto_update)
+    _report_auto_update(update_result)
+    if update_result.changed:
+        reexec_cli()
+
+    from krabobot.agent.loop import AgentLoop
+    from krabobot.api.server import create_app
+    from krabobot.bus.queue import MessageBus
+    from krabobot.session.manager import SessionManager
+
     api_cfg = runtime_config.api
     host = host if host is not None else api_cfg.host
     port = port if port is not None else api_cfg.port
@@ -1044,8 +1138,7 @@ def gateway(
     config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
 ):
     """Start the krabobot gateway (channels only, no HTTP API)."""
-    from krabobot.stt.model_manager import ensure_sherpa_stt_model
-    from krabobot.tts.model_manager import ensure_sherpa_tts_models
+    from krabobot.utils.auto_update import reexec_cli, try_git_auto_update
     from krabobot.utils.gateway_pid import (
         clear_gateway_pid,
         is_gateway_running,
@@ -1057,7 +1150,16 @@ def gateway(
 
         logging.basicConfig(level=logging.DEBUG)
 
+    # Config + optional git pull before model download / channel bind.
     config_obj = _load_runtime_config(config, workspace)
+    update_result = try_git_auto_update(enabled=config_obj.gateway.auto_update)
+    _report_auto_update(update_result)
+    if update_result.changed:
+        reexec_cli()
+
+    from krabobot.stt.model_manager import ensure_sherpa_stt_model
+    from krabobot.tts.model_manager import ensure_sherpa_tts_models
+
     ensure_sherpa_stt_model(config_obj.stt)
     ensure_sherpa_tts_models(config_obj.tts)
     port = port if port is not None else config_obj.gateway.port

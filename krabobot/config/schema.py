@@ -100,6 +100,8 @@ class GatewayConfig(Base):
 
     host: str = "0.0.0.0"
     port: int = 18790
+    # Before serve/gateway start: git fetch+pull (ff-only) if working tree is clean.
+    auto_update: bool = False
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
 
 
