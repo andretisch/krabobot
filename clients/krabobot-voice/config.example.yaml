@@ -7,26 +7,34 @@ token: ""
 timeout_s: 120
 sample_rate: 16000
 
-# Wake phrase «Эй, Арнольд»
+# ---------------------------------------------------------------------------
+# Wake phrase — set YOUR phrase here (loaded from this file on start)
+# Primary key: wake.phrase (one string). Optional: wake.phrases (list).
+# Example custom:
+#   wake:
+#     phrase: "Ок, Бот"
+# ---------------------------------------------------------------------------
 # mode: asr (default, local sherpa-onnx) | kws (optional MFCC embedding) | off
 wake:
   mode: asr
-  # Sliding window for local ASR wake / KWS
-  window_s: 2.0
-  hop_s: 0.5
-  # Ignore quiet ambient before decoding a wake window
-  energy_threshold: 0.012
-  # Full-phrase matches (also fuzzy «Арнольд» + greetings below)
-  phrases:
-    - эй арнольд
-    - ей арнольд
-    - привет арнольд
-    - hey arnold
-  greetings:
-    - эй
-    - ей
-    - привет
-    - hey
+  # Primary wake line (punctuation OK). Also accepts wake.phrases: [...]
+  # Env override (wins over YAML): KRABOBOT_VOICE_WAKE_PHRASE="Ок, Бот"
+  #   alias: VOICE_WAKE_PHRASE
+  phrase: "Эй, Арнольд"
+  # Optional aliases (merged with phrase, deduped). Leave empty to use only phrase.
+  phrases: []
+  # VAD-segmented wake: speech_start → buffer until silence → one ASR/KWS per utterance
+  # Shorter silence_end than talk so wake feels snappy; max_s caps endless buffer.
+  silence_end_s: 0.55
+  max_s: 9.0
+  min_speech_s: 0.45
+  # Energy-gate for VAD speech_start (lower = more sensitive / quiet mics)
+  # For audio.listen_source=loopback the client auto-lowers this (~0.4×)
+  energy_threshold: 0.006
+  # Optional greetings used with fuzzy name match (auto-derived from phrase if omitted)
+  # greetings:
+  #   - эй
+  #   - привет
   # KWS-only (wake.mode: kws)
   threshold: 0.90
   # Empty = %LOCALAPPDATA%\krabobot-voice\wake_refs
@@ -68,13 +76,20 @@ talk:
     - пока
 
 # Optional device hints (name substring or device index as string)
-# audio:
-#   input_device: ""      # mic for talk + meeting.capture=mic|mix
-#   output_device: ""     # playback device whose WASAPI loopback to use
+audio:
+  # mic (default) | loopback — источник для wake + Talk/follow-up/PTT
+  # loopback = WASAPI system audio (то, что играет в колонки/наушники).
+  # Удобно тестировать wake без микрофона: проигрывайте TTS с фразой wake.
+  # Env override (wins over YAML): KRABOBOT_VOICE_LISTEN_SOURCE=mic|loopback
+  #   alias: VOICE_LISTEN_SOURCE
+  listen_source: mic
+  # input_device: ""      # mic (если listen_source=mic)
+  # output_device: ""     # playback device whose WASAPI loopback to use
+  # Alias: wake.input: mic|loopback (то же самое)
 
 # Meeting recording (toggle hotkey → background thread → upload WAV + instruct)
 # Also start/stop via talk.meeting_start / talk.meeting_stop voice commands.
-# Wake/PTT remain microphone-only. Meeting can capture system audio (Teams).
+# Meeting can capture system audio (Teams) independently of audio.listen_source.
 meeting:
   enabled: true
   # mic | loopback | mix — default mix = mic + WASAPI loopback (remote + local)

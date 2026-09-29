@@ -73,7 +73,14 @@ class LocalWakeAsr:
         )
         self.model_dir = base
 
-    def transcribe_pcm16(self, pcm16: np.ndarray | bytes, *, sample_rate: int = 16000) -> str:
+    def transcribe_pcm16(
+        self,
+        pcm16: np.ndarray | bytes,
+        *,
+        sample_rate: int = 16000,
+        energy_threshold: float = 0.006,
+    ) -> str:
+        """Decode after alignment: DC → 16 kHz mono → trim → normalize → sherpa."""
         from krabobot_voice.preprocess import TARGET_SR, preprocess_pcm16
 
         if isinstance(pcm16, (bytes, bytearray)):
@@ -82,7 +89,12 @@ class LocalWakeAsr:
             arr = np.asarray(pcm16, dtype=np.int16).reshape(-1)
         if arr.size < max(1, int(sample_rate) // 10):
             return ""
-        aligned, sr = preprocess_pcm16(arr, sample_rate=int(sample_rate))
+        # Alignment MUST run before sherpa (quiet mic / DC / wrong rate).
+        aligned, sr = preprocess_pcm16(
+            arr,
+            sample_rate=int(sample_rate),
+            energy_threshold=float(energy_threshold),
+        )
         if aligned.size < TARGET_SR // 10:
             return ""
         waveform = (aligned.astype(np.float32) / 32768.0).tolist()
@@ -92,13 +104,18 @@ class LocalWakeAsr:
         result = stream.result
         return str(getattr(result, "text", "") or "").strip()
 
-    def transcribe_wav_bytes(self, wav_bytes: bytes) -> str:
+    def transcribe_wav_bytes(
+        self,
+        wav_bytes: bytes,
+        *,
+        energy_threshold: float = 0.006,
+    ) -> str:
         from krabobot_voice.preprocess import preprocess_wav_bytes
 
         # Align header/rate/level first, then decode.
-        aligned = preprocess_wav_bytes(wav_bytes)
+        aligned = preprocess_wav_bytes(wav_bytes, energy_threshold=float(energy_threshold))
         with wave.open(io.BytesIO(aligned), "rb") as wf:
             rate = wf.getframerate()
             frames = wf.readframes(wf.getnframes())
             pcm = np.frombuffer(frames, dtype=np.int16)
-        return self.transcribe_pcm16(pcm, sample_rate=rate)
+        return self.transcribe_pcm16(pcm, sample_rate=rate, energy_threshold=energy_threshold)

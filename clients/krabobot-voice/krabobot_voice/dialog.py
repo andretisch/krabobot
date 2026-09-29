@@ -28,13 +28,25 @@ def plan_initial_listen(
     *,
     no_speech_timeout_s: float,
     settle_s: float,
+    listen_source: str = "mic",
+    play_beep: bool | None = None,
 ) -> ListenPlan:
-    """After wake/PTT: beep + normal utterance window."""
+    """After wake/PTT: plan the first Talk capture.
+
+    Loopback: skip beep (it fights WASAPI + loses continuous playback) and use
+    settle_s=0 — stream keepalive already drained backlog during ASR.
+    """
+    is_loopback = (listen_source or "").strip().lower() == "loopback"
+    if play_beep is None:
+        beep = not is_loopback
+    else:
+        beep = bool(play_beep)
+    settle = 0.0 if is_loopback else max(0.0, float(settle_s))
     return ListenPlan(
         phase=TalkPhase.LISTEN,
-        play_beep=True,
+        play_beep=beep,
         no_speech_timeout_s=max(0.1, float(no_speech_timeout_s)),
-        settle_s=max(0.0, float(settle_s)),
+        settle_s=settle,
     )
 
 

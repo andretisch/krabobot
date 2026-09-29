@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -85,8 +86,18 @@ def record_utterance(
     silence_run = 0
     started = False
     speech_blocks = 0  # voiced frames since (re)start
+    # Wall-clock deadline — survives hung/slow reads that still eventually return.
+    listen_deadline = time.monotonic() + max(0.1, float(no_speech_timeout_s))
 
     for elapsed in range(max_blocks):
+        if time.monotonic() >= listen_deadline and not started:
+            return None
+        if (
+            time.monotonic() >= listen_deadline
+            and started
+            and speech_blocks < min_speech_blocks
+        ):
+            return None
         chunk = np.asarray(read_block(), dtype=np.int16).reshape(-1)
         speaking = frame_rms(chunk) >= energy_threshold
 
@@ -108,6 +119,10 @@ def record_utterance(
             continue
 
         buf.append(chunk)
+        # Hard listen deadline while utterance is still unconfirmed (false starts /
+        # loopback noise) — do not hang past no_speech_timeout_s.
+        if speech_blocks < min_speech_blocks and elapsed + 1 >= no_speech_blocks:
+            return None
         if speaking:
             silence_run = 0
             speech_blocks += 1
@@ -133,6 +148,10 @@ def record_utterance(
             speech_blocks = 0
             if len(buf) > preroll_blocks:
                 buf = buf[-preroll_blocks:]
+            if elapsed + 1 >= no_speech_blocks:
+                return None
+            if time.monotonic() >= listen_deadline:
+                return None
 
     if not started or not buf:
         return None

@@ -23,6 +23,19 @@ def test_initial_listen_beeps() -> None:
     assert plan.phase is TalkPhase.LISTEN
     assert plan.play_beep is True
     assert plan.no_speech_timeout_s == 5.0
+    assert plan.settle_s == 0.35
+
+
+def test_initial_listen_loopback_skips_beep() -> None:
+    """Loopback: no beep/settle — continuous playback must not be discarded."""
+    plan = plan_initial_listen(
+        no_speech_timeout_s=5.0,
+        settle_s=0.35,
+        listen_source="loopback",
+    )
+    assert plan.play_beep is False
+    assert plan.settle_s == 0.0
+    assert plan.no_speech_timeout_s == 5.0
 
 
 def test_follow_up_after_ok_turn() -> None:

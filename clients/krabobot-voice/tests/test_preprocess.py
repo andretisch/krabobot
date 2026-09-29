@@ -41,7 +41,7 @@ def test_remove_dc_offset() -> None:
 
 
 def test_normalize_raises_quiet_speech() -> None:
-    quiet = (_tone(1.0, amp=0.02).astype(np.float32) / 32768.0)
+    quiet = _tone(1.0, amp=0.02).astype(np.float32) / 32768.0
     loud = normalize_level(quiet)
     assert frame_rms_float(loud) > frame_rms_float(quiet) * 2
     assert float(np.max(np.abs(loud))) <= 0.95
@@ -92,4 +92,61 @@ def test_pcm16_to_wav_bytes_roundtrip() -> None:
     wav = pcm16_to_wav_bytes(pcm, sample_rate=SR)
     with wave.open(io.BytesIO(wav), "rb") as wf:
         assert wf.getframerate() == SR
+        assert wf.getnchannels() == 1
+
+
+def test_local_asr_calls_preprocess_before_decode(monkeypatch) -> None:
+    """Proof: wake ASR path always runs preprocess_pcm16 before sherpa."""
+    from krabobot_voice import local_asr as la
+
+    calls: list[dict] = []
+    real = preprocess_pcm16
+
+    def spy_preprocess(pcm, **kwargs):
+        calls.append({"pcm_len": len(np.asarray(pcm).reshape(-1)), **kwargs})
+        return real(pcm, **kwargs)
+
+    monkeypatch.setattr(
+        "krabobot_voice.preprocess.preprocess_pcm16",
+        spy_preprocess,
+    )
+
+    class _Stream:
+        def accept_waveform(self, *_a, **_k):
+            return None
+
+        @property
+        def result(self):
+            class R:
+                text = "ок"
+
+            return R()
+
+    class _Rec:
+        def create_stream(self):
+            return _Stream()
+
+        def decode_stream(self, _stream):
+            return None
+
+    asr = object.__new__(la.LocalWakeAsr)
+    asr._recognizer = _Rec()
+    pcm = _tone(0.8, amp=0.04)
+    text = asr.transcribe_pcm16(pcm, sample_rate=SR, energy_threshold=0.006)
+    assert text == "ок"
+    assert len(calls) == 1
+    assert calls[0]["sample_rate"] == SR
+    assert calls[0]["energy_threshold"] == 0.006
+
+
+def test_upload_path_calls_preprocess() -> None:
+    """Proof: Talk upload wraps preprocess_pcm16 → WAV."""
+    from krabobot_voice.app import _pcm_to_upload_wav
+
+    pcm = _tone(0.6, amp=0.03)
+    wav, stats = _pcm_to_upload_wav(pcm, sample_rate=SR)
+    assert len(wav) > 44  # header + frames
+    assert stats.duration_ms > 0
+    with wave.open(io.BytesIO(wav), "rb") as wf:
+        assert wf.getframerate() == TARGET_SR
         assert wf.getnchannels() == 1

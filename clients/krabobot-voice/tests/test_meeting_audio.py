@@ -16,6 +16,7 @@ from krabobot_voice.audio_io import (  # noqa: E402
     downmix_to_mono_float,
     float_to_pcm16,
     mix_pcm16_average,
+    open_capture_stream,
     pcm16_to_wav_bytes,
     resample_mono,
 )
@@ -111,6 +112,155 @@ def test_config_rejects_bad_capture_to_mix(tmp_path: Path) -> None:
     path.write_text("meeting:\n  capture: stereo\n", encoding="utf-8")
     cfg = VoiceClientConfig.load(path)
     assert cfg.meeting_capture == "mix"
+
+
+def test_listen_source_default_is_mic() -> None:
+    cfg = VoiceClientConfig()
+    assert cfg.audio_listen_source == "mic"
+
+
+def test_config_loads_audio_listen_source(tmp_path: Path) -> None:
+    path = tmp_path / "cfg.yaml"
+    path.write_text(
+        "\n".join(
+            [
+                "audio:",
+                "  listen_source: loopback",
+                "  output_device: Headphones",
+                "meeting:",
+                "  loopback_device: Headset Loopback",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cfg = VoiceClientConfig.load(path)
+    assert cfg.audio_listen_source == "loopback"
+    assert cfg.audio_output_device == "Headphones"
+    assert cfg.meeting_loopback_device == "Headset Loopback"
+
+
+def test_config_loads_wake_input_alias(tmp_path: Path) -> None:
+    path = tmp_path / "cfg.yaml"
+    path.write_text("wake:\n  input: loopback\n", encoding="utf-8")
+    cfg = VoiceClientConfig.load(path)
+    assert cfg.audio_listen_source == "loopback"
+
+
+def test_config_audio_listen_source_wins_over_wake_input(tmp_path: Path) -> None:
+    path = tmp_path / "cfg.yaml"
+    path.write_text(
+        "audio:\n  listen_source: mic\nwake:\n  input: loopback\n",
+        encoding="utf-8",
+    )
+    cfg = VoiceClientConfig.load(path)
+    assert cfg.audio_listen_source == "mic"
+
+
+def test_config_rejects_bad_listen_source_to_mic(tmp_path: Path) -> None:
+    path = tmp_path / "cfg.yaml"
+    path.write_text("audio:\n  listen_source: speakers\n", encoding="utf-8")
+    cfg = VoiceClientConfig.load(path)
+    assert cfg.audio_listen_source == "mic"
+
+
+def test_env_listen_source_overrides_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "cfg.yaml"
+    path.write_text("audio:\n  listen_source: mic\n", encoding="utf-8")
+    monkeypatch.setenv("KRABOBOT_VOICE_LISTEN_SOURCE", "loopback")
+    cfg = VoiceClientConfig.load(path)
+    assert cfg.audio_listen_source == "loopback"
+
+
+def test_env_wake_phrase_overrides_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "cfg.yaml"
+    path.write_text('wake:\n  phrase: "Эй, Арнольд"\n', encoding="utf-8")
+    monkeypatch.setenv("KRABOBOT_VOICE_WAKE_PHRASE", "Ок, Бот")
+    cfg = VoiceClientConfig.load(path)
+    assert cfg.wake_phrases[0] == "Ок, Бот"
+
+
+def test_open_capture_stream_mic_vs_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    class FakeMic:
+        def __init__(self, **kwargs):
+            calls.append(("mic", kwargs))
+
+    class FakeLb:
+        def __init__(self, **kwargs):
+            calls.append(("loopback", kwargs))
+
+    monkeypatch.setattr("krabobot_voice.audio_io.MicStream", FakeMic)
+    monkeypatch.setattr("krabobot_voice.audio_io.LoopbackStream", FakeLb)
+
+    mic = open_capture_stream("mic", sample_rate=16000, input_device="USB Mic")
+    assert isinstance(mic, FakeMic)
+    assert calls[-1][0] == "mic"
+    assert calls[-1][1]["device"] == "USB Mic"
+
+    lb = open_capture_stream(
+        "loopback",
+        sample_rate=16000,
+        loopback_device="Headset",
+        output_device="Speakers",
+    )
+    assert isinstance(lb, FakeLb)
+    assert calls[-1][0] == "loopback"
+    assert calls[-1][1]["device"] == "Headset"
+    assert calls[-1][1]["output_device"] == "Speakers"
+    assert calls[-1][1].get("gain", 1.0) > 1.0
+
+    # Unknown → mic
+    open_capture_stream("weird")
+    assert calls[-1][0] == "mic"
+
+
+def test_resolve_loopback_prefers_default_wasapi_helper(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Device selection must use PyAudioWPatch loopback analogues (not mic)."""
+    from krabobot_voice import audio_io
+
+    class FakePa:
+        def get_loopback_device_info_generator(self):
+            yield {
+                "index": 16,
+                "name": "Speakers (USB Headset) [Loopback]",
+                "maxInputChannels": 2,
+                "defaultSampleRate": 48000.0,
+                "isLoopbackDevice": True,
+            }
+
+        def get_default_wasapi_loopback(self):
+            return {
+                "index": 16,
+                "name": "Speakers (USB Headset) [Loopback]",
+                "maxInputChannels": 2,
+                "defaultSampleRate": 48000.0,
+                "isLoopbackDevice": True,
+            }
+
+        def get_wasapi_loopback_analogue_by_index(self, idx: int):
+            raise LookupError(idx)
+
+        def get_wasapi_loopback_analogue_by_dict(self, info: dict):
+            raise LookupError(info)
+
+        def get_device_info_generator_by_host_api(self, host_api_type=None):
+            return iter(())
+
+        def terminate(self):
+            return None
+
+    monkeypatch.setattr(audio_io, "pyaudio", type("M", (), {"PyAudio": FakePa, "paWASAPI": 2})())
+    monkeypatch.setattr(audio_io, "require_pyaudiowpatch", lambda: None)
+
+    info = audio_io.resolve_loopback_device_info()
+    assert info["index"] == 16
+    assert info["isLoopbackDevice"] is True
+    assert "Loopback" in info["name"]
 
 
 def test_meeting_recorder_mic_with_mocked_stream(monkeypatch: pytest.MonkeyPatch) -> None:

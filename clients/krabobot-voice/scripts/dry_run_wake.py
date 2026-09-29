@@ -20,7 +20,7 @@ from krabobot_voice.wake import matches_wake_phrase  # noqa: E402
 
 
 class _FakeMic:
-    def __init__(self, *, sample_rate: int = 16000, block: int = 800, loud_blocks: int = 80):
+    def __init__(self, *, sample_rate: int = 16000, block: int = 800, loud_blocks: int = 40):
         self.sample_rate = sample_rate
         self.block = block
         self._i = 0
@@ -38,7 +38,7 @@ class _FakeAsr:
         self.text = text
         self.calls = 0
 
-    def transcribe_pcm16(self, pcm: np.ndarray, sample_rate: int = 16000) -> str:
+    def transcribe_pcm16(self, pcm: np.ndarray, sample_rate: int = 16000, **_: object) -> str:
         self.calls += 1
         return self.text
 
@@ -50,6 +50,7 @@ def main() -> int:
         "Привет",
         "Привет, Арнольд!",
         "Арнольд.",
+        "Давай скажем эй арнольд",
     ]
     print("Matcher vs log strings:")
     for s in log_strings:
@@ -57,6 +58,7 @@ def main() -> int:
 
     assert matches_wake_phrase("Привет, Арнольд.") is True
     assert matches_wake_phrase("Привет, Арнольд!") is True
+    assert matches_wake_phrase("Давай скажем эй арнольд") is True
     assert matches_wake_phrase("Привет") is False
     assert matches_wake_phrase("Арнольд.") is False
 
@@ -65,9 +67,12 @@ def main() -> int:
     trigger, detail = _wait_for_wake_asr(
         mic,  # type: ignore[arg-type]
         asr,
-        window_s=2.0,
-        hop_s=0.5,
         energy_threshold=0.012,
+        silence_end_s=0.4,
+        max_s=4.0,
+        min_speech_s=0.35,
+        speech_start_s=0.15,
+        preroll_s=0.2,
         ptt=None,
         meeting=None,
     )
@@ -75,7 +80,7 @@ def main() -> int:
     if trigger is not Trigger.WAKE or asr.calls != 1:
         print("FAIL: expected single WAKE transition")
         return 1
-    print("OK: transitioned to wake/listening path once")
+    print("OK: VAD segment -> ASR once -> wake")
     return 0
 
 

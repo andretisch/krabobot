@@ -5,11 +5,20 @@ from __future__ import annotations
 import io
 import sys
 import tempfile
+import threading
+import time
 import wave
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, TypeVar, runtime_checkable
 
 import numpy as np
+
+_T = TypeVar("_T")
+
+# Max time a single PortAudio/sounddevice read may spend in C without returning
+# to Python (so Ctrl+C / wall-clock VAD timeouts can fire).
+_DEFAULT_READ_TIMEOUT_S = 0.35
 
 try:
     import sounddevice as sd
@@ -39,9 +48,57 @@ def require_sounddevice() -> None:
 def require_pyaudiowpatch() -> None:
     if pyaudio is None:
         raise RuntimeError(
-            "PyAudioWPatch is required for WASAPI loopback (meeting.capture=loopback|mix). "
+            "PyAudioWPatch is required for WASAPI loopback "
+            "(audio.listen_source=loopback or meeting.capture=loopback|mix). "
             f"Install with: pip install PyAudioWPatch  ({_PA_ERR})"
         )
+
+
+@runtime_checkable
+class PcmBlockSource(Protocol):
+    """MicStream / LoopbackStream duck type: blocking int16 mono blocks."""
+
+    sample_rate: int
+    block: int
+
+    def read_block(self) -> np.ndarray: ...
+
+    def __enter__(self) -> PcmBlockSource: ...
+
+    def __exit__(self, *exc: object) -> None: ...
+
+
+def with_stream_keepalive(mic: object, fn: Callable[[], _T]) -> _T:
+    """Run ``fn`` while continuously draining ``mic`` so PortAudio does not overflow.
+
+    While sherpa ASR (or any slow work) runs, the capture thread must keep
+    calling ``read_block`` / ``drain_available``. Otherwise WASAPI loopback
+    buffers fill and the *next* ``stream.read`` can hang forever in C — where
+    Ctrl+C cannot interrupt.
+    """
+    stop = threading.Event()
+
+    def _drain() -> None:
+        while not stop.is_set():
+            try:
+                drain = getattr(mic, "drain_available", None)
+                if callable(drain):
+                    drain()
+                else:
+                    getattr(mic, "read_block")()
+            except Exception:
+                break
+            # Short sleep so Ctrl+C / stop can land between drains.
+            if stop.wait(0.005):
+                break
+
+    t = threading.Thread(target=_drain, name="krabobot-voice-keepalive", daemon=True)
+    t.start()
+    try:
+        return fn()
+    finally:
+        stop.set()
+        t.join(timeout=1.5)
 
 
 def pcm16_to_wav_bytes(pcm16: bytes | np.ndarray, *, sample_rate: int = 16000) -> bytes:
@@ -263,12 +320,12 @@ def resolve_loopback_device_info(
     device: str | int | None = None,
     output_device: str | int | None = None,
 ) -> dict[str, Any]:
-    """Pick a WASAPI loopback device via PyAudioWPatch.
+    """Pick a WASAPI loopback device via PyAudioWPatch (same path as meeting).
 
     Priority:
     1. ``device`` / ``meeting.loopback_device`` (index or name substring)
     2. Loopback matching ``output_device`` / ``audio.output_device``
-    3. Loopback for the default WASAPI output device
+    3. ``get_default_wasapi_loopback()`` / loopback for default WASAPI output
     """
     require_pyaudiowpatch()
     assert pyaudio is not None
@@ -288,21 +345,40 @@ def resolve_loopback_device_info(
                 idx = int(pref)
                 for lb in loopbacks:
                     if int(lb["index"]) == idx:
-                        return lb
-                # Also allow selecting by output device index → matching loopback name
+                        return dict(lb)
+                # Output device index → matching loopback analogue
                 try:
-                    out_info = pa.get_device_info_by_index(idx)
-                    out_name = str(out_info.get("name") or "")
-                    for lb in loopbacks:
-                        if out_name and out_name in str(lb.get("name") or ""):
-                            return lb
+                    return dict(pa.get_wasapi_loopback_analogue_by_index(idx))
                 except Exception:
-                    pass
+                    try:
+                        out_info = pa.get_device_info_by_index(idx)
+                        out_name = str(out_info.get("name") or "")
+                        for lb in loopbacks:
+                            if out_name and out_name in str(lb.get("name") or ""):
+                                return dict(lb)
+                    except Exception:
+                        pass
                 return None
             needle = str(pref).strip()
             for lb in loopbacks:
                 if _match_device_name(str(lb.get("name") or ""), needle):
-                    return lb
+                    return dict(lb)
+            # Name may refer to a playback device — map to its loopback analogue.
+            try:
+                for info in pa.get_device_info_generator_by_host_api(
+                    host_api_type=pyaudio.paWASAPI
+                ):
+                    if int(info.get("maxOutputChannels") or 0) < 1:
+                        continue
+                    if info.get("isLoopbackDevice"):
+                        continue
+                    if _match_device_name(str(info.get("name") or ""), needle):
+                        try:
+                            return dict(pa.get_wasapi_loopback_analogue_by_dict(info))
+                        except Exception:
+                            pass
+            except Exception:
+                pass
             return None
 
         chosen = by_pref(device)
@@ -310,20 +386,30 @@ def resolve_loopback_device_info(
             chosen = by_pref(output_device)
         if chosen is None:
             try:
-                wasapi = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
-                default_out = pa.get_device_info_by_index(int(wasapi["defaultOutputDevice"]))
-                out_name = str(default_out.get("name") or "")
-                for lb in loopbacks:
-                    if out_name and out_name in str(lb.get("name") or ""):
-                        chosen = lb
-                        break
+                chosen = dict(pa.get_default_wasapi_loopback())
             except Exception:
                 chosen = None
         if chosen is None:
-            chosen = loopbacks[0]
-        return dict(chosen)
+            try:
+                wasapi = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
+                default_out = pa.get_device_info_by_index(int(wasapi["defaultOutputDevice"]))
+                chosen = dict(pa.get_wasapi_loopback_analogue_by_dict(default_out))
+            except Exception:
+                chosen = None
+        if chosen is None:
+            chosen = dict(loopbacks[0])
+        if not chosen.get("isLoopbackDevice", True):
+            raise RuntimeError(
+                f"Resolved device is not WASAPI loopback: {chosen.get('name')!r}. "
+                "Задайте meeting.loopback_device / audio.output_device."
+            )
+        return chosen
     finally:
         pa.terminate()
+
+
+# Soft boost for WASAPI loopback (often quieter than a close mic after downmix).
+DEFAULT_LOOPBACK_GAIN = 2.5
 
 
 class MicStream:
@@ -344,6 +430,8 @@ class MicStream:
         self._capture_rate = sample_rate
         self._channels = 1
         self._carry = np.zeros(0, dtype=np.float32)
+        self._device_name = ""
+        self._device_index: int | None = None
 
     def __enter__(self) -> MicStream:
         last_err: Exception | None = None
@@ -364,6 +452,14 @@ class MicStream:
                 self._stream = stream
                 self._capture_rate = rate
                 self._channels = channels
+                self._device_index = int(device) if device is not None else None
+                try:
+                    info = sd.query_devices(device) if device is not None else sd.query_devices(
+                        kind="input"
+                    )
+                    self._device_name = str(info.get("name") or "")
+                except Exception:
+                    self._device_name = ""
                 return self
             except Exception as e:
                 last_err = e
@@ -391,6 +487,14 @@ class MicStream:
                 pass
             self._stream = None
 
+    @property
+    def device_name(self) -> str:
+        return self._device_name
+
+    @property
+    def device_index(self) -> int | None:
+        return self._device_index
+
     def read_block(self) -> np.ndarray:
         assert self._stream is not None
         # Read enough raw frames so after resample we cover ~one output block
@@ -401,7 +505,7 @@ class MicStream:
             256,
             int(np.ceil(need_out * float(self._capture_rate) / float(self.sample_rate))),
         )
-        data, _overflowed = self._stream.read(raw_n)
+        data = self._read_raw_interruptible(raw_n, timeout_s=_DEFAULT_READ_TIMEOUT_S)
         arr = downmix_to_mono_float(np.asarray(data, dtype=np.float32))
         if self._capture_rate != self.sample_rate:
             arr = resample_mono(arr, self._capture_rate, self.sample_rate)
@@ -411,17 +515,61 @@ class MicStream:
             out = arr[: self.block]
             self._carry = arr[self.block :]
         else:
-            # pad rare short reads
+            # pad rare short reads / timeouts
             out = np.zeros(self.block, dtype=np.float32)
             out[: arr.size] = arr
             self._carry = np.zeros(0, dtype=np.float32)
         return float_to_pcm16(out)
+
+    def _read_raw_interruptible(self, raw_n: int, *, timeout_s: float) -> np.ndarray:
+        """Read via read_available; sleep in Python so Ctrl+C works."""
+        assert self._stream is not None
+        deadline = time.monotonic() + max(0.05, float(timeout_s))
+        parts: list[np.ndarray] = []
+        got = 0
+        while got < raw_n:
+            try:
+                avail = int(getattr(self._stream, "read_available", 0) or 0)
+            except Exception:
+                avail = 0
+            if avail > 0:
+                n = min(avail, raw_n - got)
+                try:
+                    chunk, _overflowed = self._stream.read(n)
+                except Exception:
+                    break
+                parts.append(np.asarray(chunk, dtype=np.float32))
+                got += int(np.asarray(chunk).shape[0])
+                continue
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.005)
+        if not parts:
+            return np.zeros((0, max(1, self._channels)), dtype=np.float32)
+        return np.concatenate(parts, axis=0)
+
+    def drain_available(self) -> None:
+        """Discard buffered mic frames without blocking long (ASR keepalive)."""
+        assert self._stream is not None
+        try:
+            avail = int(getattr(self._stream, "read_available", 0) or 0)
+        except Exception:
+            avail = 0
+        if avail <= 0:
+            return
+        n = min(avail, max(256, int(self._capture_rate * 0.05)))
+        try:
+            self._stream.read(n)
+        except Exception:
+            return
+        self._carry = np.zeros(0, dtype=np.float32)
 
 
 class LoopbackStream:
     """WASAPI loopback reader (system / Teams playback) → int16 mono @ sample_rate.
 
     Uses PyAudioWPatch; stock sounddevice PortAudio wheels lack loopback.
+    Same capture path as ``meeting.capture=loopback|mix``.
     """
 
     def __init__(
@@ -431,18 +579,22 @@ class LoopbackStream:
         block_ms: int = 30,
         device: str | int | None = None,
         output_device: str | int | None = None,
+        gain: float = DEFAULT_LOOPBACK_GAIN,
     ) -> None:
         require_pyaudiowpatch()
         self.sample_rate = sample_rate
         self.block = max(1, int(sample_rate * block_ms / 1000))
         self._device_pref = device
         self._output_pref = output_device
+        self._gain = float(gain) if gain and gain > 0 else 1.0
         self._pa = None
         self._stream = None
         self._capture_rate = sample_rate
         self._channels = 1
         self._carry = np.zeros(0, dtype=np.float32)
         self._device_name = ""
+        self._device_index: int | None = None
+        self._fmt = "int16"
 
     def __enter__(self) -> LoopbackStream:
         assert pyaudio is not None
@@ -452,34 +604,46 @@ class LoopbackStream:
         )
         self._pa = pyaudio.PyAudio()
         idx = int(info["index"])
-        channels = max(1, int(info.get("maxInputChannels") or 1))
+        channels = max(1, int(info.get("maxInputChannels") or 2))
         rate = int(info.get("defaultSampleRate") or 48000)
         self._device_name = str(info.get("name") or "")
-        try:
-            stream = self._pa.open(
-                format=pyaudio.paFloat32,
-                channels=channels,
-                rate=rate,
-                input=True,
-                input_device_index=idx,
-                frames_per_buffer=max(256, int(rate * 0.03)),
-            )
-        except Exception:
-            # Some devices prefer int16
-            stream = self._pa.open(
-                format=pyaudio.paInt16,
-                channels=channels,
-                rate=rate,
-                input=True,
-                input_device_index=idx,
-                frames_per_buffer=max(256, int(rate * 0.03)),
-            )
-            self._fmt = "int16"
-        else:
-            self._fmt = "float32"
+        self._device_index = idx
+        # Official PyAudioWPatch examples prefer int16 + exact device channel count.
+        last_err: Exception | None = None
+        stream = None
+        for fmt, fmt_name in (
+            (pyaudio.paInt16, "int16"),
+            (pyaudio.paFloat32, "float32"),
+        ):
+            for ch in (channels, 2, 1):
+                if ch < 1:
+                    continue
+                try:
+                    stream = self._pa.open(
+                        format=fmt,
+                        channels=ch,
+                        rate=rate,
+                        input=True,
+                        input_device_index=idx,
+                        frames_per_buffer=max(512, int(rate * 0.03)),
+                    )
+                    self._fmt = fmt_name
+                    self._channels = ch
+                    break
+                except Exception as e:
+                    last_err = e
+                    stream = None
+            if stream is not None:
+                break
+        if stream is None:
+            raise RuntimeError(
+                f"Не удалось открыть WASAPI loopback "
+                f"idx={idx} name={self._device_name!r}. "
+                f"Проверьте Privacy->Microphone и устройство воспроизведения. "
+                f"Детали: {last_err}"
+            ) from last_err
         self._stream = stream
         self._capture_rate = rate
-        self._channels = channels
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -501,6 +665,65 @@ class LoopbackStream:
     def device_name(self) -> str:
         return self._device_name
 
+    @property
+    def device_index(self) -> int | None:
+        return self._device_index
+
+    def drain_available(self) -> None:
+        """Discard currently buffered loopback frames without blocking forever.
+
+        Used as ASR keepalive: while sherpa runs, keep PortAudio drained so the
+        next talk ``read`` does not hang after an overflow.
+        """
+        assert self._stream is not None
+        try:
+            avail = int(self._stream.get_read_available())
+        except Exception:
+            avail = 0
+        if avail <= 0:
+            return
+        # Cap one drain burst so keepalive stays responsive to stop events.
+        n = min(avail, max(512, int(self._capture_rate * 0.05)))
+        try:
+            self._stream.read(n, exception_on_overflow=False)
+        except Exception:
+            return
+        self._carry = np.zeros(0, dtype=np.float32)
+
+    def _read_raw_interruptible(self, raw_n: int, *, timeout_s: float) -> bytes:
+        """Read ``raw_n`` frames using get_read_available; never block forever in C.
+
+        Sleeps in Python while waiting so KeyboardInterrupt can fire. On timeout
+        returns whatever was collected (caller pads with silence).
+        """
+        assert self._stream is not None
+        deadline = time.monotonic() + max(0.05, float(timeout_s))
+        chunks: list[bytes] = []
+        got = 0
+        sample_width = 4 if self._fmt == "float32" else 2
+        while got < raw_n:
+            try:
+                avail = int(self._stream.get_read_available())
+            except Exception:
+                avail = 0
+            if avail > 0:
+                n = min(avail, raw_n - got)
+                try:
+                    raw = self._stream.read(n, exception_on_overflow=False)
+                except Exception:
+                    break
+                chunks.append(raw)
+                # Frame count from byte length (stereo = channels samples per frame).
+                frame_bytes = sample_width * self._channels
+                if frame_bytes > 0:
+                    got += len(raw) // frame_bytes
+                continue
+            if time.monotonic() >= deadline:
+                break
+            # Yield to interpreter — Ctrl+C lands here, not inside PortAudio.
+            time.sleep(0.005)
+        return b"".join(chunks)
+
     def read_block(self) -> np.ndarray:
         assert self._stream is not None
         need_out = self.block - self._carry.size
@@ -510,7 +733,10 @@ class LoopbackStream:
             256,
             int(np.ceil(need_out * float(self._capture_rate) / float(self.sample_rate))),
         )
-        raw = self._stream.read(raw_n, exception_on_overflow=False)
+        raw = self._read_raw_interruptible(raw_n, timeout_s=_DEFAULT_READ_TIMEOUT_S)
+        if not raw:
+            # Timed out with no frames — return silence so VAD/timeouts advance.
+            return np.zeros(self.block, dtype=np.int16)
         if self._fmt == "float32":
             data = np.frombuffer(raw, dtype=np.float32)
         else:
@@ -519,6 +745,8 @@ class LoopbackStream:
             usable = (data.size // self._channels) * self._channels
             data = data[:usable].reshape(-1, self._channels)
         arr = downmix_to_mono_float(data)
+        if self._gain != 1.0:
+            arr = arr * self._gain
         if self._capture_rate != self.sample_rate:
             arr = resample_mono(arr, self._capture_rate, self.sample_rate)
         if self._carry.size:
@@ -531,3 +759,75 @@ class LoopbackStream:
             out[: arr.size] = arr
             self._carry = np.zeros(0, dtype=np.float32)
         return float_to_pcm16(out)
+
+
+def probe_capture_rms(
+    source: str = "loopback",
+    *,
+    duration_s: float = 1.0,
+    sample_rate: int = 16000,
+    input_device: str | int | None = None,
+    loopback_device: str | int | None = None,
+    output_device: str | int | None = None,
+) -> dict[str, Any]:
+    """Open capture briefly and return device info + RMS stats (for diagnostics)."""
+    import time
+
+    from krabobot_voice.vad import frame_rms
+
+    with open_capture_stream(
+        source,
+        sample_rate=sample_rate,
+        input_device=input_device,
+        loopback_device=loopback_device,
+        output_device=output_device,
+    ) as stream:
+        name = str(getattr(stream, "device_name", "") or "")
+        idx = getattr(stream, "device_index", None)
+        rmss: list[float] = []
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < max(0.2, float(duration_s)):
+            pcm = stream.read_block()
+            rmss.append(frame_rms(pcm))
+    peak = max(rmss) if rmss else 0.0
+    mean = (sum(rmss) / len(rmss)) if rmss else 0.0
+    return {
+        "source": (source or "mic").strip().lower(),
+        "device_name": name,
+        "device_index": idx,
+        "blocks": len(rmss),
+        "rms_mean": mean,
+        "rms_max": peak,
+        "ok": peak >= 0.002,
+    }
+
+
+def open_capture_stream(
+    source: str = "mic",
+    *,
+    sample_rate: int = 16000,
+    block_ms: int = 30,
+    input_device: str | int | None = None,
+    loopback_device: str | int | None = None,
+    output_device: str | int | None = None,
+    loopback_gain: float = DEFAULT_LOOPBACK_GAIN,
+) -> MicStream | LoopbackStream:
+    """Open mic or WASAPI loopback with the same ``read_block`` contract.
+
+    ``source``: ``mic`` (default) | ``loopback``.
+    Loopback reuses the same PyAudioWPatch path as meeting capture.
+    """
+    mode = (source or "mic").strip().lower()
+    if mode == "loopback":
+        return LoopbackStream(
+            sample_rate=sample_rate,
+            block_ms=block_ms,
+            device=loopback_device,
+            output_device=output_device,
+            gain=loopback_gain,
+        )
+    return MicStream(
+        sample_rate=sample_rate,
+        block_ms=block_ms,
+        device=input_device,
+    )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -119,3 +120,75 @@ def test_detect_speech_segment_min_duration() -> None:
         min_speech_s=1.0,
     )
     assert out is None
+
+
+def test_record_no_speech_timeout_with_intermittent_noise() -> None:
+    """Brief energy spikes must not hang past no_speech_timeout_s."""
+    # Pattern: settle, then repeating short bursts that never reach min_speech.
+    blocks: list[np.ndarray] = [_silence() for _ in range(15)]
+    for _ in range(40):
+        blocks.extend([_tone(amp=0.15) for _ in range(3)])  # ~90 ms
+        blocks.extend([_silence() for _ in range(20)])  # ~600 ms silence
+
+    pcm = record_utterance(
+        _BlockQueue(blocks),
+        sample_rate=SR,
+        block=BLOCK,
+        settle_s=0.2,
+        speech_start_s=0.08,
+        min_speech_s=1.2,
+        silence_end_s=0.4,
+        energy_threshold=0.01,
+        preroll_s=0.15,
+        no_speech_timeout_s=1.5,
+        max_s=20.0,  # would hang here without hard no-speech deadline
+    )
+    assert pcm is None
+    # Queue should not have been drained for the full max_s window.
+    q = _BlockQueue(blocks)
+    record_utterance(
+        q,
+        sample_rate=SR,
+        block=BLOCK,
+        settle_s=0.2,
+        speech_start_s=0.08,
+        min_speech_s=1.2,
+        silence_end_s=0.4,
+        energy_threshold=0.01,
+        preroll_s=0.15,
+        no_speech_timeout_s=1.5,
+        max_s=20.0,
+    )
+    # ~1.5s + settle ≈ far fewer than all intermittent blocks.
+    assert q.i < len(blocks)
+
+
+def test_record_wall_clock_timeout_when_reads_are_slow() -> None:
+    """Even if block counting is slow, wall-clock no_speech must return."""
+
+    class _SlowSilence:
+        def __init__(self) -> None:
+            self.i = 0
+
+        def __call__(self) -> np.ndarray:
+            self.i += 1
+            time.sleep(0.05)
+            return _silence()
+
+    t0 = time.monotonic()
+    pcm = record_utterance(
+        _SlowSilence(),
+        sample_rate=SR,
+        block=BLOCK,
+        settle_s=0.0,
+        speech_start_s=0.2,
+        min_speech_s=1.0,
+        silence_end_s=0.5,
+        energy_threshold=0.01,
+        preroll_s=0.1,
+        no_speech_timeout_s=0.35,
+        max_s=30.0,
+    )
+    elapsed = time.monotonic() - t0
+    assert pcm is None
+    assert elapsed < 2.0

@@ -4,11 +4,11 @@
 
 Цикл:
 
-1. Ждёт wake-фразу **«Эй, Арнольд»** / **«Привет, Арнольд»** (локальный **sherpa-onnx ASR** по умолчанию), **PTT** hotkey **или** toggle **Meeting**
+1. Ждёт **вашу** wake-фразу из конфига (локальный **sherpa-onnx ASR** по умолчанию), **PTT** hotkey **или** toggle **Meeting**
 2. Короткий **beep** (`winsound.Beep` на Windows) — только на первом входе в реплику (не на follow-up)
 3. Запись:
-   - после wake / follow-up → energy VAD до тишины (до ~15 с), **только микрофон**
-   - после PTT → hold-to-talk (пока зажата комбинация), **только микрофон**
+   - после wake / follow-up → energy VAD до тишины (до ~15 с); источник = `audio.listen_source` (`mic` \| `loopback`)
+   - после PTT → hold-to-talk (пока зажата комбинация); тот же источник
    - Meeting → фон.поток до повторного hotkey или голосовой «стоп запись»; `meeting.capture`: `mic` | `loopback` | `mix` (по умолчанию **`mix`**)
 4. Локальный sherpa на клипе: если фраза — команда (совещание / выход) → обработать **без** сервера
 5. Иначе клиент **выравнивает** WAV → `POST /v1/voice/turn` (STT → агент → TTS; для meeting — ещё `instruct`)
@@ -19,12 +19,33 @@
 
 По умолчанию `wake.mode: asr`:
 
-1. Energy-gate на скользящем окне (~2 с)
-2. **Preprocess** (DC → 16 kHz mono → trim silence → peak/RMS normalize)
-3. Локальный **sherpa-onnx** decode (та же русская модель, что у сервера в `~/.krabobot/models/stt/…`)
-4. Fuzzy-match текста на «эй» + «арнольд»
+1. Energy VAD: `speech_start` → буфер до `speech_end` (+ preroll), cap `wake.max_s`
+2. **Preprocess** (DC → 16 kHz mono → trim silence → peak/RMS normalize) — внутри `LocalWakeAsr.transcribe_pcm16`
+3. **Один** локальный **sherpa-onnx** decode на закрытый сегмент (не sliding window)
+4. Fuzzy-match текста на вашу `wake.phrase` / `wake.phrases` (части фразы + edit-distance)
+5. Miss → discard; сразу готов к следующему VAD-сегменту (PTT / meeting hotkey опрашиваются параллельно)
 
-Опционально лёгкий **KWS** (`wake.mode: kws`) — MFCC embedding + cosine к reference WAV, без локального sherpa.
+Опционально лёгкий **KWS** (`wake.mode: kws`) — тот же VAD, затем один MFCC cosine score к reference WAV (без spam по hop).
+
+### Своя wake-фраза
+
+Конфиг: `%LOCALAPPDATA%\krabobot-voice\config.yaml` (см. [`config.example.yaml`](config.example.yaml)).
+
+```yaml
+wake:
+  mode: asr
+  phrase: "Эй, Арнольд"   # ← задайте свою: "Ок, Бот", "Привет, Краб" …
+  # phrases:               # опциональные алиасы
+  #   - hey arnold
+  silence_end_s: 0.55      # короче talk — snappy wake
+  max_s: 9.0               # cap одной фразы (filler + wake)
+  min_speech_s: 0.45
+  energy_threshold: 0.006  # ниже = чувствительнее к тихому микрофону
+```
+
+`wake.phrase` — **основной** ключ (одна строка, запятая внутри — пунктуация).  
+`wake.phrases` — список алиасов; если оба заданы, `phrase` идёт первым.  
+`wake.greetings` можно не писать: клиент выведет приветствия из первых слов `phrase`.
 
 ## Выравнивание аудио
 
@@ -34,6 +55,14 @@
 - убирает DC offset
 - аккуратно обрезает тишину по краям
 - поднимает тихий микрофон (RMS/peak normalize без жёсткого клиппинга)
+
+Точки вызова:
+
+| Путь | Функция |
+|------|---------|
+| Wake ASR | `local_asr.LocalWakeAsr.transcribe_pcm16` → `preprocess.preprocess_pcm16` |
+| Talk upload | `app._pcm_to_upload_wav` → `preprocess.preprocess_pcm16` |
+| Meeting upload | `app._handle_meeting_upload` → `preprocess.preprocess_wav_bytes` |
 
 Сервер дополнительно прогоняет тот же alignment в `voice_io` / sherpa STT — защита от «байты есть, transcription empty».
 
@@ -68,11 +97,11 @@ pip install -e ".\clients\krabobot-voice"
 python -m krabobot_voice
 ```
 
-Статус: `waiting for wake…` → `listening…` → (`local command` \| `thinking…` → `playing…` → `follow-up listening…`) → снова wake.
+Статус (один раз при входе в idle): `waiting for wake / PTT / meeting…` → на каждом закрытом VAD-сегменте одна строка `[wake-asr] …` → при match `wake: …` → `listening…` → (`local command` \| `thinking…` → `playing…` → `follow-up listening…`) → снова wake. Строка `waiting…` не печатается каждые N секунд / hop.
 
 ### Dialog follow-up
 
-После успешного Talk-turn (wake/PTT → ответ проигран) клиент **не** ждёт «Эй, Арнольд» снова: окно VAD на `talk.follow_up_s` секунд (default `8`). Beep на follow-up по умолчанию выключен (`talk.follow_up_beep: false`). `talk.follow_up_s: 0` — старое поведение (сразу wake). Meeting не затрагивается.
+После успешного Talk-turn (wake/PTT → ответ проигран) клиент **не** ждёт wake снова: окно VAD на `talk.follow_up_s` секунд (default `8`). Beep на follow-up по умолчанию выключен (`talk.follow_up_beep: false`). `talk.follow_up_s: 0` — старое поведение (сразу wake). Meeting не затрагивается.
 
 ### Локальные команды
 
@@ -88,12 +117,53 @@ Hotkey **Ctrl+Alt+M** по-прежнему стартует/останавли�
 
 ### Wake (ASR)
 
-Фраза: **«Эй, Арнольд»**. Нужна модель в `~/.krabobot/models/stt/…` (как у gateway).
+Фраза задаётся в `wake.phrase` / `wake.phrases`. Нужна модель в `~/.krabobot/models/stt/…` (как у gateway).
+
+Чувствительность (defaults):
+
+| Параметр | Default | Зачем |
+|----------|---------|--------|
+| `wake.energy_threshold` | `0.006` | Тихий mic всё ещё попадает в VAD (loopback: автониже) |
+| `wake.silence_end_s` | `0.55` | Короче talk — быстрый закрытие wake-фразы |
+| `wake.max_s` | `9.0` | Cap сегмента (filler + wake); без endless buffer |
+| `wake.min_speech_s` | `0.45` | Короткие «эй арнольд» не отбрасываются |
 
 ### Wake (KWS, optional)
 
 `wake.mode: kws`. Reference WAV в `%LOCALAPPDATA%\krabobot-voice\wake_refs\`.  
 Лучше 2–5 своих записей; SAPI auto-enroll — только запасной вариант.
+
+### Wake без микрофона (loopback + TTS)
+
+Чтобы не говорить wake каждый раз при отладке ASR:
+
+1. В `%LOCALAPPDATA%\krabobot-voice\config.yaml`:
+
+```yaml
+audio:
+  listen_source: loopback   # mic | loopback (default: mic)
+  # output_device: ""       # подстрока имени playback, если нужно
+```
+
+Алиас: `wake.input: loopback` (то же поле).
+
+2. **Проверьте, что loopback слышит звук** (видео/TTS должно играть на том же выходе):
+
+```powershell
+python -m krabobot_voice --test-loopback
+```
+
+Ожидание: `RMS max` заметно больше `0` (примерно `> 0.01` при нормальной громкости). Если `RMS≈0` — звук играет на другом устройстве: задайте `audio.output_device` / `meeting.loopback_device` (подстрока имени) или смените default playback в Windows.
+
+3. Перезапустите клиент. В логе старта: `audio.listen_source=loopback`, имя/index loopback-устройства и `loopback probe 1s: rms_…`.
+4. Воспроизведите речь с колонками/наушников (TTS / зацикленное видео), например:
+   «Давай скажем: Эй, Арнольд» — wake ASR должен услышать фразу через **WASAPI loopback** и сработать даже с filler в начале.
+5. Для повседневной работы верните `listen_source: mic`.
+
+**Наушники vs колонки:** при loopback-тесте наушники удобнее (меньше шума комнаты).  
+Если позже смешиваете mic+loopback (meeting `mix`), **рекомендуются наушники** — иначе echo: ваш голос попадает и в mic, и в loopback с колонок.
+
+В режиме `loopback` тот же источник используется и для Talk/follow-up/PTT (удобно для теста). Meeting по-прежнему задаётся отдельно через `meeting.capture`.
 
 ### PTT
 
@@ -101,7 +171,7 @@ Hotkey **Ctrl+Alt+M** по-прежнему стартует/останавли�
 
 ### Meeting (Teams / звонок)
 
-Wake и PTT **всегда** пишут только микрофон. Для записи встречи (удалённые участники + ваш голос) используйте Meeting:
+Для записи встречи (удалённые участники + ваш голос) используйте Meeting (независимо от `audio.listen_source`):
 
 | `meeting.capture` | Что пишется |
 |-------------------|-------------|
@@ -126,7 +196,7 @@ Loopback идёт через **PyAudioWPatch** (ставится с клиент
 
 1. Путь аргументом: `python -m krabobot_voice C:\path\config.yaml`
 2. `%LOCALAPPDATA%\krabobot-voice\config.yaml`
-3. Env: `KRABOBOT_URL`, `KRABOBOT_TOKEN`, `KRABOBOT_DEVICE_ID` (также `KRABOBOT_VOICE_*`)
+3. Env (часть переменных **перекрывает** YAML, если заданы — см. таблицу)
 4. Пустой `token` → `~/.krabobot/config.json` → `api.auth.adminToken`
 
 Пример: [`config.example.yaml`](config.example.yaml).
@@ -134,9 +204,11 @@ Loopback идёт через **PyAudioWPatch** (ставится с клиент
 | Ключ / переменная | Смысл |
 |-------------------|--------|
 | `wake.mode` / `KRABOBOT_VOICE_WAKE_MODE` | `asr` (default) \| `kws` \| `off` |
-| `wake.energy_threshold` | Energy-gate перед wake decode |
-| `wake.window_s` / `wake.hop_s` | Окно / шаг локального wake |
-| `wake.phrases` / `wake.greetings` | Фразы wake и приветствия рядом с «Арнольд» |
+| `wake.phrase` / `KRABOBOT_VOICE_WAKE_PHRASE` | **Основная** wake-фраза (строка); env перекрывает YAML |
+| `wake.phrases` | Алиасы (список); мержится с `phrase` |
+| `wake.greetings` | Приветствия для fuzzy name; иначе из `phrase` |
+| `wake.energy_threshold` | Energy-gate для VAD speech_start (loopback: автониже) |
+| `wake.silence_end_s` / `wake.max_s` / `wake.min_speech_s` | VAD wake: тишина / cap / min voiced |
 | `wake.threshold` | Cosine threshold для KWS |
 | `wake.refs_dir` | Папка reference WAV (KWS) |
 | `ptt.hotkey` / `KRABOBOT_VOICE_PTT_HOTKEY` | Например `ctrl+alt+space` |
@@ -147,16 +219,43 @@ Loopback идёт через **PyAudioWPatch** (ставится с клиент
 | `meeting.hotkey` | Toggle старт/стоп (default `ctrl+alt+m`) |
 | `meeting.loopback_device` | Имя/индекс loopback; пусто → default output |
 | `meeting.instruct` | Текст к upload на стопе |
+| `audio.listen_source` / `KRABOBOT_VOICE_LISTEN_SOURCE` | `mic` (default) \| `loopback` — wake + Talk/PTT; env перекрывает YAML |
 | `audio.input_device` / `audio.output_device` | Подсказка устройств (подстрока имени) |
 | `KRABOBOT_URL` | Base URL (по умолчанию `http://127.0.0.1:8900`) |
 | `KRABOBOT_DEVICE_ID` | Стабильный device id |
 | `KRABOBOT_TOKEN` | Bearer |
+
+Быстрый override без правки файла:
+
+```powershell
+$env:KRABOBOT_VOICE_LISTEN_SOURCE = "loopback"   # или VOICE_LISTEN_SOURCE
+$env:KRABOBOT_VOICE_WAKE_PHRASE = "Эй, Арнольд"  # или VOICE_WAKE_PHRASE
+python -m krabobot_voice
+```
 
 При старте клиент:
 
 - берёт `device_id` (по умолчанию `local-<hostname>`)
 - читает Bearer-токен из конфига / env / `api.auth.adminToken`
 - **автоматически привязывает** `voice:<device_id>` к owner через `GET /v1/web/users` + `POST .../links`
+
+## Если процесс завис (Ctrl+C не помогает)
+
+Старые версии могли зависнуть в `PyAudio.stream.read` (C-вызов) после wake ASR —
+Python не доставляет `KeyboardInterrupt`, пока PortAudio не вернётся.
+
+1. Закройте окно терминала **или** убейте процесс:
+   ```powershell
+   # найти PID
+   Get-Process python* | Format-Table Id, ProcessName, Path
+   # или по командной строке:
+   Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+     Where-Object { $_.CommandLine -match 'krabobot_voice' } |
+     Select-Object ProcessId, CommandLine
+   taskkill /PID <pid> /F
+   ```
+2. Task Manager → завершить `python.exe` с `krabobot_voice`.
+3. Обновите клиент на эту ветку: чтение loopback/mic теперь с таймаутом + drain во время ASR, Ctrl+C снова работает.
 
 ## Layout
 
@@ -169,7 +268,7 @@ krabobot_voice/
   kws.py         # MFCC embedding KWS (optional)
   ptt.py         # hold-to-talk hotkey
   meeting.py     # meeting start/stop thread + upload
-  wake.py        # текстовый fuzzy-match «Эй, Арнольд»
+  wake.py        # текстовый fuzzy-match по wake.phrase
   local_asr.py   # sherpa-onnx offline wake + commands
   vad.py         # energy VAD
   audio_io.py    # mic / WASAPI loopback / mix / beep / play

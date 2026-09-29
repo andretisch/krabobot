@@ -1,9 +1,8 @@
-"""Unit tests for wake phrase matching and decode-window advance (no mic)."""
+"""Unit tests for wake phrase matching and VAD-segmented wake ASR (no mic)."""
 
 from __future__ import annotations
 
 import sys
-from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -15,8 +14,7 @@ if str(ROOT) not in sys.path:
 
 from krabobot_voice.app import Trigger, _wait_for_wake_asr  # noqa: E402
 from krabobot_voice.wake import (  # noqa: E402
-    decide_after_wake_decode,
-    drop_ring_samples,
+    command_after_wake,
     matches_wake_phrase,
     normalize_text,
 )
@@ -49,9 +47,111 @@ def test_matches_wake_phrase(text: str, expected: bool) -> None:
     assert matches_wake_phrase(text) is expected
 
 
+def test_matches_wake_with_leading_filler() -> None:
+    """Full VAD utterance «Давай скажем эй арнольд» must still wake."""
+    assert matches_wake_phrase(
+        "Давай скажем эй арнольд",
+        phrases=["Эй, Арнольд"],
+    )
+    assert matches_wake_phrase(
+        "давай скажем эй арнольд",
+        phrases=["эй арнольд", "привет арнольд"],
+    )
+    assert not matches_wake_phrase("Давай скажем.", phrases=["Эй, Арнольд"])
+
+
 def test_custom_phrases() -> None:
     assert matches_wake_phrase("ок арнольд", phrases=["ок арнольд"])
     assert not matches_wake_phrase("привет арнольд", phrases=["ок арнольд"], greetings=[])
+
+
+def test_custom_wake_phrase_ok_bot() -> None:
+    phrases = ["ок бот"]
+    assert matches_wake_phrase("Ок, Бот!", phrases=phrases, greetings=["ок"])
+    assert matches_wake_phrase("ок ботт", phrases=phrases, greetings=["ок"])  # ASR glitch
+    assert matches_wake_phrase("ну ок бот скажи", phrases=phrases, greetings=["ок"])
+    assert not matches_wake_phrase("привет арнольд", phrases=phrases, greetings=["ок"])
+    assert not matches_wake_phrase("бот", phrases=phrases, greetings=["ок"])  # name alone
+
+
+def test_custom_wake_phrase_fuzzy_token_order() -> None:
+    phrases = ["привет краб"]
+    # Order-independent token cover
+    assert matches_wake_phrase("краб привет", phrases=phrases, greetings=["привет"])
+    assert matches_wake_phrase("приветт краб", phrases=phrases, greetings=["привет"])
+
+
+def test_wake_phrase_from_config_primary() -> None:
+    """wake.phrase string with comma is one phrase, not a list split."""
+    from krabobot_voice.config import _resolve_wake_phrases
+
+    out = _resolve_wake_phrases(
+        {"phrase": "Эй, Арнольд"},
+        {},
+        ["fallback"],
+    )
+    assert out == ["Эй, Арнольд"]
+
+
+def test_wake_phrase_merges_aliases() -> None:
+    from krabobot_voice.config import _resolve_wake_phrases
+
+    out = _resolve_wake_phrases(
+        {"phrase": "Ок, Бот", "phrases": ["hey bot", "ок бот"]},
+        {},
+        ["fallback"],
+    )
+    assert out[0] == "Ок, Бот"
+    assert "hey bot" in out
+
+
+def test_load_config_wake_vad_params(tmp_path: Path) -> None:
+    import yaml
+    from krabobot_voice.config import VoiceClientConfig
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        yaml.safe_dump(
+            {
+                "base_url": "http://127.0.0.1:8900",
+                "wake": {
+                    "phrase": "Привет, Краб",
+                    "max_s": 8.0,
+                    "silence_end_s": 0.5,
+                    "min_speech_s": 0.4,
+                    "energy_threshold": 0.006,
+                },
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    cfg = VoiceClientConfig.load(cfg_path)
+    assert cfg.wake_phrases[0] == "Привет, Краб"
+    assert "привет" in [g.lower() for g in cfg.wake_greetings]
+    assert cfg.wake_max_s == 8.0
+    assert cfg.wake_silence_end_s == 0.5
+    assert cfg.wake_min_speech_s == 0.4
+    assert cfg.wake_energy_threshold == 0.006
+    assert matches_wake_phrase(
+        "привет краб",
+        phrases=cfg.wake_phrases,
+        greetings=cfg.wake_greetings,
+    )
+
+
+def test_load_config_legacy_window_s_maps_to_max_s(tmp_path: Path) -> None:
+    """Old wake.window_s is accepted as wake.max_s alias."""
+    import yaml
+    from krabobot_voice.config import VoiceClientConfig
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        yaml.safe_dump({"wake": {"window_s": 4.0}}, allow_unicode=True),
+        encoding="utf-8",
+    )
+    cfg = VoiceClientConfig.load(cfg_path)
+    assert cfg.wake_max_s == 4.0
 
 
 def test_normalize_yo() -> None:
@@ -59,70 +159,27 @@ def test_normalize_yo() -> None:
     assert normalize_text("Эй, Арнольд!") == "эй арнольд"
 
 
-def test_decide_match_consumes_and_prints_once() -> None:
-    d1 = decide_after_wake_decode(
-        "Привет, Арнольд.",
-        last_printed="",
-        window_n=32000,
-        sample_rate=16000,
-    )
-    assert d1.matched is True
-    assert d1.print_text == "Привет, Арнольд."
-    assert d1.consume_samples >= 32000
-    assert d1.cooldown_samples > 0
-
-    d2 = decide_after_wake_decode(
-        "Привет, Арнольд.",
-        last_printed="Привет, Арнольд.",
-        window_n=32000,
-        sample_rate=16000,
-    )
-    assert d2.matched is True
-    assert d2.print_text is None  # debounced
-
-
-def test_decide_miss_still_consumes() -> None:
-    d = decide_after_wake_decode(
-        "шум в комнате",
-        last_printed="",
-        window_n=32000,
-        sample_rate=16000,
-        cooldown_s=0.8,
-    )
-    assert d.matched is False
-    assert d.print_text == "шум в комнате"
-    assert d.consume_samples >= 32000
-    assert d.cooldown_samples == int(0.8 * 16000)
-
-
-def test_drop_ring_samples_advances_past_window() -> None:
-    sr = 16000
-    block = 800
-    ring: deque[np.ndarray] = deque()
-    total = 0
-    for _ in range(50):
-        chunk = np.ones(block, dtype=np.int16)
-        ring.append(chunk)
-        total += chunk.size
-    before = total
-    total = drop_ring_samples(ring, total, window_n := 2 * sr)
-    assert total == before - window_n
-    assert sum(c.size for c in ring) == total
-
-
 class _FakeMic:
-    """Loud PCM then silence — enough for one wake window, then idle."""
+    """Loud PCM then silence — one VAD-closed utterance, then idle."""
 
-    def __init__(self, *, sample_rate: int = 16000, block: int = 800, loud_blocks: int = 50):
+    def __init__(
+        self,
+        *,
+        sample_rate: int = 16000,
+        block: int = 800,
+        loud_blocks: int = 40,
+        silence_blocks: int = 80,
+    ):
         self.sample_rate = sample_rate
         self.block = block
         self._i = 0
         self._loud_blocks = loud_blocks
+        self._silence_blocks = silence_blocks
 
     def read_block(self) -> np.ndarray:
         self._i += 1
         if self._i <= self._loud_blocks:
-            return (np.ones(self.block, dtype=np.int16) * 12000)
+            return np.ones(self.block, dtype=np.int16) * 12000
         return np.zeros(self.block, dtype=np.int16)
 
 
@@ -130,91 +187,141 @@ class _FakeAsr:
     def __init__(self, text: str):
         self.text = text
         self.calls = 0
-        self.texts_seen: list[str] = []
+        self.pcm_sizes: list[int] = []
 
-    def transcribe_pcm16(self, pcm: np.ndarray, sample_rate: int = 16000) -> str:
+    def transcribe_pcm16(self, pcm: np.ndarray, sample_rate: int = 16000, **_: object) -> str:
         self.calls += 1
-        self.texts_seen.append(self.text)
+        self.pcm_sizes.append(int(np.asarray(pcm).size))
         return self.text
 
 
-def test_wait_for_wake_asr_transitions_once_on_privet_arnold() -> None:
-    """Dry-run: mock ASR returns log line; must wake once, not N times."""
-    mic = _FakeMic(loud_blocks=80)
+def _wake_vad_kwargs() -> dict:
+    return dict(
+        energy_threshold=0.012,
+        silence_end_s=0.4,
+        max_s=4.0,
+        min_speech_s=0.35,
+        speech_start_s=0.15,
+        preroll_s=0.2,
+        ptt=None,
+        meeting=None,
+    )
+
+
+def test_wait_for_wake_asr_vad_segment_wakes_once() -> None:
+    """Simulate VAD-closed utterance → mock ASR → single WAKE."""
+    mic = _FakeMic(loud_blocks=40)
     asr = _FakeAsr("Привет, Арнольд.")
     trigger, detail = _wait_for_wake_asr(
         mic,  # type: ignore[arg-type]
         asr,
-        window_s=2.0,
-        hop_s=0.5,
-        energy_threshold=0.012,
-        ptt=None,
-        meeting=None,
-        cooldown_s=0.8,
+        phrases=["Эй, Арнольд", "привет арнольд"],
+        **_wake_vad_kwargs(),
     )
     assert trigger is Trigger.WAKE
     assert "Арнольд" in detail
-    # Match on first successful decode — must not rescore the same utterance forever.
+    assert asr.calls == 1
+    assert asr.pcm_sizes[0] > 0
+
+
+def test_wait_for_wake_asr_full_phrase_with_filler() -> None:
+    """One closed VAD segment with filler+phrase must wake (no sliding hop)."""
+    mic = _FakeMic(loud_blocks=50)
+    asr = _FakeAsr("Давай скажем эй арнольд")
+    trigger, detail = _wait_for_wake_asr(
+        mic,  # type: ignore[arg-type]
+        asr,
+        phrases=["Эй, Арнольд"],
+        **_wake_vad_kwargs(),
+    )
+    assert trigger is Trigger.WAKE
+    assert "арнольд" in detail.lower()
     assert asr.calls == 1
 
 
-def _run_wake_miss_loop(*, consume: bool, loud_blocks: int = 40) -> tuple[int, int]:
-    """Drive fake mic; return (asr_calls, print_count)."""
-    from krabobot_voice.vad import frame_rms
+def test_wait_for_wake_asr_miss_then_match_next_utterance() -> None:
+    """Non-wake VAD segment is discarded; next closed utterance can wake."""
 
-    mic = _FakeMic(loud_blocks=loud_blocks)
-    asr = _FakeAsr("шум в комнате")
-    sr = mic.sample_rate
-    window_n = int(2.0 * sr)
-    hop_n = int(0.5 * sr)
-    ring: deque[np.ndarray] = deque()
-    total = 0
-    since_hop = 0
-    cooldown = 0
-    last_print = ""
-    prints = 0
+    class _ProgressiveMic(_FakeMic):
+        """Utterance 1 (loud→silence) then utterance 2 (loud→silence)."""
 
-    for _ in range(200):
-        chunk = mic.read_block()
-        ring.append(chunk)
-        total += chunk.size
-        since_hop += chunk.size
-        if cooldown > 0:
-            cooldown = max(0, cooldown - chunk.size)
-        while total > window_n + mic.block * 2:
-            dropped = ring.popleft()
-            total -= dropped.size
-        if cooldown > 0 or since_hop < hop_n or total < int(0.6 * sr):
-            continue
-        since_hop = 0
-        pcm = np.concatenate(list(ring))[-window_n:]
-        if frame_rms(pcm) < 0.012:
-            continue
-        text = asr.transcribe_pcm16(pcm, sample_rate=sr)
-        decision = decide_after_wake_decode(
-            text,
-            last_printed=last_print,
-            window_n=window_n,
-            sample_rate=sr,
-            cooldown_s=0.8,
-        )
-        if decision.print_text is not None:
-            prints += 1
-            last_print = decision.print_text
-        if consume:
-            total = drop_ring_samples(ring, total, decision.consume_samples)
-            cooldown = decision.cooldown_samples
-            since_hop = 0
-    return asr.calls, prints
+        def __init__(self) -> None:
+            super().__init__(loud_blocks=35, silence_blocks=30)
+            self._phase = 0
+
+        def read_block(self) -> np.ndarray:
+            # Phase 0: first speech, Phase 1: trailing silence, Phase 2: second speech…
+            self._i += 1
+            # 35 loud + 25 silence + 35 loud + silence…
+            if self._i <= 35 or (60 < self._i <= 95):
+                return np.ones(self.block, dtype=np.int16) * 12000
+            return np.zeros(self.block, dtype=np.int16)
+
+    class _ProgressiveAsr:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.texts_seen: list[str] = []
+
+        def transcribe_pcm16(
+            self, pcm: np.ndarray, sample_rate: int = 16000, **_: object
+        ) -> str:
+            self.calls += 1
+            text = "шум в комнате" if self.calls == 1 else "эй арнольд"
+            self.texts_seen.append(text)
+            return text
+
+    mic = _ProgressiveMic()
+    asr = _ProgressiveAsr()
+    trigger, detail = _wait_for_wake_asr(
+        mic,  # type: ignore[arg-type]
+        asr,
+        phrases=["Эй, Арнольд"],
+        **_wake_vad_kwargs(),
+    )
+    assert trigger is Trigger.WAKE
+    assert "арнольд" in detail.lower()
+    assert asr.calls == 2
+    assert asr.texts_seen[0] == "шум в комнате"
 
 
-def test_wait_for_wake_asr_miss_does_not_rescore_forever() -> None:
-    """Same loud utterance: without consume → many ASC rescored; with fix → few + 1 print."""
-    buggy_calls, buggy_prints = _run_wake_miss_loop(consume=False)
-    fixed_calls, fixed_prints = _run_wake_miss_loop(consume=True)
+def test_effective_wake_energy_lower_for_loopback() -> None:
+    from krabobot_voice.app import effective_wake_energy
 
-    assert buggy_calls >= 5, f"baseline spam expected, got {buggy_calls}"
-    assert buggy_prints >= 1
-    assert fixed_prints == 1
-    assert fixed_calls < buggy_calls
-    assert fixed_calls <= 3
+    assert effective_wake_energy(0.006, listen_source="mic") == 0.006
+    lb = effective_wake_energy(0.006, listen_source="loopback")
+    assert lb < 0.006
+    assert lb >= 0.0015
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("Эй, Арнольд", ""),
+        ("эй арнольд", ""),
+        ("Эй, Арнольд, какая погода?", "какая погода"),
+        ("эй арнольд включи свет", "включи свет"),
+        ("Hey Arnold open the door", "open the door"),
+        # Wake at the end of a long clip — leading filler is NOT the command.
+        (
+            "Попробовать протестировать агента. Давай скажем: «Эй, Арнольд!»",
+            "",
+        ),
+        ("Давай скажем эй арнольд", ""),
+        ("Ну эй арнольд как дела", "как дела"),
+        ("привет арнольд начни запись", "начни запись"),
+        ("шум без wake", ""),
+        ("", ""),
+    ],
+)
+def test_command_after_wake(text: str, expected: str) -> None:
+    assert command_after_wake(text) == expected
+
+
+def test_command_after_wake_custom_phrase() -> None:
+    phrases = ["ок бот"]
+    assert command_after_wake("ок бот статус", phrases=phrases, greetings=["ок"]) == "статус"
+    assert command_after_wake("скажи ок бот", phrases=phrases, greetings=["ок"]) == ""
+    assert (
+        command_after_wake("ок бот начни совещание", phrases=phrases, greetings=["ок"])
+        == "начни совещание"
+    )
