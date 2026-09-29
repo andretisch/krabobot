@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
@@ -10,6 +10,7 @@ from urllib.parse import unquote
 import httpx
 
 from krabobot_voice.config import VoiceClientConfig
+from krabobot_voice.protocol import ClientState, parse_actions
 
 
 @dataclass
@@ -23,6 +24,7 @@ class VoiceTurnResult:
     device_id: str
     json_body: dict[str, Any] | None = None
     error_message: str = ""
+    actions: list[str] = field(default_factory=list)
 
 
 class VoiceHttpClient:
@@ -40,6 +42,7 @@ class VoiceHttpClient:
         instruct: str | None = None,
         files: list[str | Path] | None = None,
         device_id: str | None = None,
+        client_state: ClientState | str | dict[str, Any] | None = None,
     ) -> VoiceTurnResult:
         """Send one turn. Provide audio and/or instruct (and optional files)."""
         did = (device_id or self.config.device_id).strip()
@@ -49,6 +52,10 @@ class VoiceHttpClient:
         multipart: list[tuple[str, Any]] = [("device_id", (None, did))]
         if instruct:
             multipart.append(("instruct", (None, instruct)))
+
+        state_json = _client_state_json(client_state)
+        if state_json:
+            multipart.append(("client_state", (None, state_json)))
 
         if audio_bytes is not None:
             multipart.append(("audio", (audio_filename, audio_bytes, "audio/wav")))
@@ -94,6 +101,8 @@ class VoiceHttpClient:
             elif resp.status_code >= 400:
                 err = resp.text[:300]
 
+        actions = parse_actions(resp.headers, json_body if isinstance(json_body, dict) else None)
+
         return VoiceTurnResult(
             status_code=resp.status_code,
             audio_wav=audio_wav,
@@ -102,4 +111,21 @@ class VoiceHttpClient:
             device_id=did,
             json_body=json_body,
             error_message=err,
+            actions=actions,
         )
+
+
+def _client_state_json(
+    client_state: ClientState | str | dict[str, Any] | None,
+) -> str:
+    if client_state is None:
+        return ""
+    if isinstance(client_state, ClientState):
+        return client_state.to_json()
+    if isinstance(client_state, str):
+        return client_state.strip()
+    if isinstance(client_state, dict):
+        import json
+
+        return json.dumps(client_state, ensure_ascii=False, separators=(",", ":"))
+    return ""

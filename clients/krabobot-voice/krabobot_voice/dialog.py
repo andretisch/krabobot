@@ -1,90 +1,346 @@
-"""Pure Talk dialog / follow-up state transitions (unit-testable, no I/O)."""
+"""Pure VoiceSession state machine (no I/O)."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
+from typing import Union
+
+from krabobot_voice.commands import LocalCommand, match_local_command
+from krabobot_voice.wake import command_after_wake, matches_wake_phrase
 
 
-class TalkPhase(str, Enum):
-    """High-level Talk loop phases (Meeting is separate)."""
-
-    WAIT_WAKE = "wait_wake"
+class Mode(str, Enum):
+    IDLE = "idle"
     LISTEN = "listen"
-    FOLLOW_UP = "follow_up"
+    DIALOG = "dialog"
+    MEETING = "meeting"
+
+
+# --- Events -----------------------------------------------------------------
 
 
 @dataclass(frozen=True)
-class ListenPlan:
-    """How the next mic capture should behave."""
+class Segment:
+    """ASR text for one VAD (or PTT) utterance."""
 
-    phase: TalkPhase
-    play_beep: bool
-    no_speech_timeout_s: float
-    settle_s: float
+    text: str
+    source: str = "vad"  # vad | ptt
 
 
-def plan_initial_listen(
-    *,
-    no_speech_timeout_s: float,
-    settle_s: float,
-    listen_source: str = "mic",
-    play_beep: bool | None = None,
-) -> ListenPlan:
-    """After wake/PTT: plan the first Talk capture.
-
-    Loopback: skip beep (it fights WASAPI + loses continuous playback) and use
-    settle_s=0 — stream keepalive already drained backlog during ASR.
-    """
-    is_loopback = (listen_source or "").strip().lower() == "loopback"
-    if play_beep is None:
-        beep = not is_loopback
-    else:
-        beep = bool(play_beep)
-    settle = 0.0 if is_loopback else max(0.0, float(settle_s))
-    return ListenPlan(
-        phase=TalkPhase.LISTEN,
-        play_beep=beep,
-        no_speech_timeout_s=max(0.1, float(no_speech_timeout_s)),
-        settle_s=settle,
-    )
+@dataclass(frozen=True)
+class Timeout:
+    """Listen / follow-up deadline fired with no speech started."""
 
 
-def plan_after_turn(
-    *,
-    turn_ok: bool,
-    follow_up_s: float,
-    follow_up_beep: bool,
-    settle_s: float,
-    default_no_speech_s: float,
-) -> ListenPlan:
-    """After TTS/playback: stay in conversation listen or return to wake wait.
+@dataclass(frozen=True)
+class TurnDone:
+    """Server turn finished (TTS played or failed)."""
 
-    ``follow_up_s <= 0`` disables dialog mode.
-    """
-    if turn_ok and float(follow_up_s) > 0:
-        return ListenPlan(
-            phase=TalkPhase.FOLLOW_UP,
-            play_beep=bool(follow_up_beep),
-            no_speech_timeout_s=float(follow_up_s),
-            # Slightly shorter settle when no wake beep (flush TTS echo / buffer).
-            settle_s=max(0.0, min(float(settle_s), 0.25) if not follow_up_beep else float(settle_s)),
+    ok: bool
+    actions: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Hotkey:
+    """Hardware hotkey edge."""
+
+    kind: str  # ptt | meeting
+
+
+Event = Union[Segment, Timeout, TurnDone, Hotkey]
+
+
+# --- Effects ----------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Beep:
+    count: int
+
+
+@dataclass(frozen=True)
+class SendAudio:
+    """Driver should upload the latest PCM segment."""
+
+
+@dataclass(frozen=True)
+class SendText:
+    text: str
+
+
+@dataclass(frozen=True)
+class StartMeeting:
+    pass
+
+
+@dataclass(frozen=True)
+class StopMeeting:
+    pass
+
+
+@dataclass(frozen=True)
+class SetDeadline:
+    """Seconds from now for the next listen window; None = wait forever (idle)."""
+
+    seconds: float | None
+
+
+Effect = Union[Beep, SendAudio, SendText, StartMeeting, StopMeeting, SetDeadline]
+
+
+@dataclass
+class VoiceSessionConfig:
+    """Tunables the state machine needs (mirrors talk.* / wake.*)."""
+
+    listen_timeout_s: float = 10.0
+    follow_up_s: float = 10.0
+    wake_phrases: list[str] = field(default_factory=list)
+    wake_greetings: list[str] = field(default_factory=list)
+    cmd_meeting_start: list[str] = field(default_factory=list)
+    cmd_meeting_stop: list[str] = field(default_factory=list)
+    cmd_exit: list[str] = field(default_factory=list)
+    meeting_enabled: bool = True
+
+
+class VoiceSession:
+    """Idle → Listen → Dialog (+ Meeting) without touching mic/HTTP."""
+
+    def __init__(self, cfg: VoiceSessionConfig) -> None:
+        self.cfg = cfg
+        self.mode = Mode.IDLE
+        # While MEETING: after wake-only, wait for the next command segment.
+        self._meeting_listen = False
+
+    # -- public --------------------------------------------------------------
+
+    def client_mode(self) -> str:
+        return self.mode.value
+
+    def meeting_state(self) -> str:
+        return "recording" if self.mode is Mode.MEETING else "idle"
+
+    def on_event(self, event: Event) -> list[Effect]:
+        if isinstance(event, Hotkey):
+            return self._on_hotkey(event)
+        if isinstance(event, Timeout):
+            return self._on_timeout()
+        if isinstance(event, TurnDone):
+            return self._on_turn_done(event)
+        if isinstance(event, Segment):
+            return self._on_segment(event)
+        return []
+
+    # -- hotkey --------------------------------------------------------------
+
+    def _on_hotkey(self, event: Hotkey) -> list[Effect]:
+        kind = (event.kind or "").strip().lower()
+        if kind == "meeting":
+            if self.mode is Mode.MEETING:
+                return self._enter_idle(beep=1, stop_meeting=True)
+            if not self.cfg.meeting_enabled:
+                return []
+            self.mode = Mode.MEETING
+            self._meeting_listen = False
+            return [StartMeeting(), SetDeadline(None)]
+        if kind == "ptt":
+            # Driver records while held, then feeds Segment(source="ptt").
+            # Arm listen so the next segment is trusted without wake.
+            if self.mode is Mode.IDLE:
+                self.mode = Mode.LISTEN
+                return [Beep(2), SetDeadline(self.cfg.listen_timeout_s)]
+            return [Beep(2)]
+        return []
+
+    # -- timeout -------------------------------------------------------------
+
+    def _on_timeout(self) -> list[Effect]:
+        if self.mode is Mode.LISTEN:
+            return self._enter_idle(beep=1)
+        if self.mode is Mode.DIALOG:
+            return self._enter_idle(beep=1)
+        if self.mode is Mode.MEETING and self._meeting_listen:
+            self._meeting_listen = False
+            return [SetDeadline(None)]
+        # IDLE / MEETING unarmed: ignore (should not be scheduled).
+        return [SetDeadline(None)]
+
+    # -- turn done -----------------------------------------------------------
+
+    def _on_turn_done(self, event: TurnDone) -> list[Effect]:
+        effects: list[Effect] = []
+        actions = tuple(event.actions or ())
+
+        if "meeting_stop" in actions and self.mode is Mode.MEETING:
+            return self._enter_idle(beep=1, stop_meeting=True)
+        if "end_dialog" in actions:
+            return self._enter_idle(beep=1)
+        if "meeting_start" in actions:
+            if not self.cfg.meeting_enabled:
+                return self._enter_idle(beep=1)
+            self.mode = Mode.MEETING
+            self._meeting_listen = False
+            effects.append(StartMeeting())
+            effects.append(SetDeadline(None))
+            return effects
+
+        if not event.ok:
+            return self._enter_idle(beep=1)
+
+        # Successful reply → dialog follow-up (unless disabled).
+        if float(self.cfg.follow_up_s) > 0:
+            if self.mode is Mode.MEETING:
+                self._meeting_listen = False
+                return [SetDeadline(None)]
+            self.mode = Mode.DIALOG
+            self._meeting_listen = False
+            return [SetDeadline(float(self.cfg.follow_up_s))]
+
+        return self._enter_idle(beep=1)
+
+    # -- segment -------------------------------------------------------------
+
+    def _on_segment(self, event: Segment) -> list[Effect]:
+        text = (event.text or "").strip()
+        source = (event.source or "vad").strip().lower()
+
+        if self.mode is Mode.IDLE:
+            return self._segment_idle(text, source=source)
+        if self.mode is Mode.LISTEN:
+            return self._segment_execute(text, beep_first=False)
+        if self.mode is Mode.DIALOG:
+            return self._segment_execute(text, beep_first=False)
+        if self.mode is Mode.MEETING:
+            return self._segment_meeting(text, source=source)
+        return []
+
+    def _segment_idle(self, text: str, *, source: str) -> list[Effect]:
+        if source == "ptt":
+            # PTT arm may have already moved to LISTEN; still accept from idle.
+            return self._segment_execute(text, beep_first=True, beep_n=2)
+
+        if not text or not self._is_wake(text):
+            # Miss — stay idle, nothing to the server.
+            return []
+
+        trailing = self._wake_trailing(text)
+        effects: list[Effect] = [Beep(2)]
+        if trailing.strip():
+            return effects + self._execute_command(trailing, prefer_text=True)
+
+        self.mode = Mode.LISTEN
+        effects.append(SetDeadline(float(self.cfg.listen_timeout_s)))
+        return effects
+
+    def _segment_meeting(self, text: str, *, source: str) -> list[Effect]:
+        # Local stop always wins (no wake required).
+        cmd = self._match_cmd(text)
+        if cmd is LocalCommand.MEETING_STOP:
+            return self._enter_idle(beep=1, stop_meeting=True)
+
+        if self._meeting_listen or source == "ptt":
+            self._meeting_listen = False
+            return self._segment_execute(text, beep_first=False, in_meeting=True)
+
+        if not text or not self._is_wake(text):
+            return []
+
+        trailing = self._wake_trailing(text)
+        effects: list[Effect] = [Beep(2)]
+        if trailing.strip():
+            return effects + self._execute_command(
+                trailing, prefer_text=True, in_meeting=True
+            )
+
+        self._meeting_listen = True
+        effects.append(SetDeadline(float(self.cfg.listen_timeout_s)))
+        return effects
+
+    def _segment_execute(
+        self,
+        text: str,
+        *,
+        beep_first: bool,
+        beep_n: int = 2,
+        in_meeting: bool = False,
+    ) -> list[Effect]:
+        effects: list[Effect] = []
+        if beep_first:
+            effects.append(Beep(beep_n))
+        effects.extend(self._execute_command(text, prefer_text=False, in_meeting=in_meeting))
+        return effects
+
+    def _execute_command(
+        self,
+        text: str,
+        *,
+        prefer_text: bool,
+        in_meeting: bool = False,
+    ) -> list[Effect]:
+        cmd = self._match_cmd(text)
+        if cmd is LocalCommand.EXIT:
+            return self._enter_idle(beep=1, stop_meeting=in_meeting)
+        if cmd is LocalCommand.MEETING_START:
+            if in_meeting:
+                # Already recording — ignore start.
+                return [SetDeadline(None)] if self.mode is Mode.MEETING else []
+            if not self.cfg.meeting_enabled:
+                return self._enter_idle(beep=1)
+            self.mode = Mode.MEETING
+            self._meeting_listen = False
+            return [StartMeeting(), SetDeadline(None)]
+        if cmd is LocalCommand.MEETING_STOP:
+            if in_meeting or self.mode is Mode.MEETING:
+                return self._enter_idle(beep=1, stop_meeting=True)
+            # Not recording — ignore, back to idle.
+            return self._enter_idle(beep=1)
+
+        cleaned = (text or "").strip()
+        if not cleaned:
+            if prefer_text:
+                # Wake trailing was empty — should not reach here.
+                if self.mode is Mode.LISTEN:
+                    return self._enter_idle(beep=1)
+                return []
+            # Local ASR empty / failed — still upload PCM for server STT.
+            return [SendAudio()]
+
+        if prefer_text:
+            return [SendText(cleaned)]
+        return [SendAudio()]
+
+    # -- helpers -------------------------------------------------------------
+
+    def _enter_idle(self, *, beep: int, stop_meeting: bool = False) -> list[Effect]:
+        was_meeting = self.mode is Mode.MEETING
+        self.mode = Mode.IDLE
+        self._meeting_listen = False
+        effects: list[Effect] = []
+        if stop_meeting and was_meeting:
+            effects.append(StopMeeting())
+        if beep > 0:
+            effects.append(Beep(beep))
+        effects.append(SetDeadline(None))
+        return effects
+
+    def _is_wake(self, text: str) -> bool:
+        return matches_wake_phrase(
+            text,
+            phrases=self.cfg.wake_phrases or None,
+            greetings=self.cfg.wake_greetings or None,
         )
-    return ListenPlan(
-        phase=TalkPhase.WAIT_WAKE,
-        play_beep=False,
-        no_speech_timeout_s=max(0.1, float(default_no_speech_s)),
-        settle_s=max(0.0, float(settle_s)),
-    )
 
+    def _wake_trailing(self, text: str) -> str:
+        return command_after_wake(
+            text,
+            phrases=self.cfg.wake_phrases or None,
+            greetings=self.cfg.wake_greetings or None,
+        )
 
-def plan_after_no_speech(*, was_follow_up: bool) -> TalkPhase:
-    """No utterance within the listen window → always back to wake wait."""
-    _ = was_follow_up
-    return TalkPhase.WAIT_WAKE
-
-
-def plan_after_local_command(*, command: str) -> TalkPhase:
-    """Local commands never stay in follow-up (exit / meeting leave dialog)."""
-    _ = command
-    return TalkPhase.WAIT_WAKE
+    def _match_cmd(self, text: str) -> LocalCommand | None:
+        return match_local_command(
+            text,
+            meeting_start=self.cfg.cmd_meeting_start,
+            meeting_stop=self.cfg.cmd_meeting_stop,
+            exit_dialog=self.cfg.cmd_exit,
+        )

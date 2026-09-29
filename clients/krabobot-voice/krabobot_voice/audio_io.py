@@ -68,24 +68,39 @@ class PcmBlockSource(Protocol):
     def __exit__(self, *exc: object) -> None: ...
 
 
-def with_stream_keepalive(mic: object, fn: Callable[[], _T]) -> _T:
+def with_stream_keepalive(
+    mic: object,
+    fn: Callable[[], _T],
+    sink: Any | None = None,
+) -> _T:
     """Run ``fn`` while continuously draining ``mic`` so PortAudio does not overflow.
 
     While sherpa ASR (or any slow work) runs, the capture thread must keep
     calling ``read_block`` / ``drain_available``. Otherwise WASAPI loopback
     buffers fill and the *next* ``stream.read`` can hang forever in C — where
     Ctrl+C cannot interrupt.
+
+    When ``sink`` is given (typically a bounded ``deque``), drained blocks are
+    appended instead of discarded so the segmenter can ``feed_backlog`` them.
+    Reads stay nonblocking / Ctrl+C-friendly.
     """
     stop = threading.Event()
 
     def _drain() -> None:
         while not stop.is_set():
             try:
-                drain = getattr(mic, "drain_available", None)
-                if callable(drain):
-                    drain()
+                if sink is not None:
+                    block = getattr(mic, "read_block")()
+                    try:
+                        sink.append(block)
+                    except Exception:
+                        pass
                 else:
-                    getattr(mic, "read_block")()
+                    drain = getattr(mic, "drain_available", None)
+                    if callable(drain):
+                        drain()
+                    else:
+                        getattr(mic, "read_block")()
             except Exception:
                 break
             # Short sleep so Ctrl+C / stop can land between drains.
@@ -178,6 +193,21 @@ def play_beep(*, freq: int = 1000, duration_ms: int = 150) -> None:
     tone = (0.25 * np.sin(2 * np.pi * freq * t)).astype(np.float32)
     sd.play(tone, sr)
     sd.wait()
+
+
+def play_beeps(
+    count: int,
+    *,
+    freq: int = 1000,
+    duration_ms: int = 120,
+    gap_ms: int = 80,
+) -> None:
+    """Play ``count`` acknowledgment beeps (wake=2, idle-return=1)."""
+    n = max(0, int(count))
+    for i in range(n):
+        play_beep(freq=freq, duration_ms=duration_ms)
+        if i + 1 < n and gap_ms > 0:
+            time.sleep(max(0.0, float(gap_ms) / 1000.0))
 
 
 def play_wav_bytes(wav_bytes: bytes) -> None:

@@ -5,15 +5,15 @@
 Цикл:
 
 1. Ждёт **вашу** wake-фразу из конфига (локальный **sherpa-onnx ASR** по умолчанию), **PTT** hotkey **или** toggle **Meeting**
-2. Короткий **beep** (`winsound.Beep` на Windows) — только на первом входе в реплику (не на follow-up)
-3. Запись:
-   - после wake / follow-up → energy VAD до тишины (до ~15 с); источник = `audio.listen_source` (`mic` \| `loopback`)
-   - после PTT → hold-to-talk (пока зажата комбинация); тот же источник
-   - Meeting → фон.поток до повторного hotkey или голосовой «стоп запись»; `meeting.capture`: `mic` | `loopback` | `mix` (по умолчанию **`mix`**)
-4. Локальный sherpa на клипе: если фраза — команда (совещание / выход) → обработать **без** сервера
-5. Иначе клиент **выравнивает** WAV → `POST /v1/voice/turn` (STT → агент → TTS; для meeting — ещё `instruct`)
-6. Проигрывает ответный WAV
-7. **Dialog follow-up:** снова слушает ~`talk.follow_up_s` секунд без wake; при тишине — обратно к шагу 1
+2. **2 beep** при wake (фраза или wake+команда в одном сегменте)
+3. Запись одним persistent VAD-сегментером (preroll/state не сбрасываются между фазами):
+   - wake only → окно `talk.listen_timeout_s` (default 10 с) до следующей реплики
+   - wake + текст после фразы → команда сразу (без второго listen)
+   - PTT → hold-to-talk; тот же `audio.listen_source` (`mic` \| `loopback`)
+   - Meeting → фон.поток + тот же сегментер на mic-tap; `meeting.capture`: `mic` | `loopback` | `mix`
+4. Локальный sherpa: команда (совещание / выход) → локально; иначе `POST /v1/voice/turn` (+ `client_state`)
+5. Проигрывает ответный WAV; сервер может вернуть actions (`meeting_stop` / `end_dialog` / …)
+6. **Dialog follow-up:** сегменты без wake до `talk.follow_up_s` тишины → **1 beep** → idle
 
 ## Wake: sherpa ASR (default)
 
@@ -101,7 +101,7 @@ python -m krabobot_voice
 
 ### Dialog follow-up
 
-После успешного Talk-turn (wake/PTT → ответ проигран) клиент **не** ждёт wake снова: окно VAD на `talk.follow_up_s` секунд (default `8`). Beep на follow-up по умолчанию выключен (`talk.follow_up_beep: false`). `talk.follow_up_s: 0` — старое поведение (сразу wake). Meeting не затрагивается.
+После успешного Talk-turn клиент слушает без wake окно `talk.follow_up_s` (default `10`). Тишина → **1 beep** → idle. `talk.follow_up_s: 0` — сразу idle после ответа. Post-wake окно: `talk.listen_timeout_s` (default `10`; fallback `no_speech_timeout_s`). Cues: `talk.beeps` (default `true`) — 2 beep на wake, 1 на возврат в idle.
 
 ### Локальные команды
 

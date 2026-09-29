@@ -335,6 +335,161 @@ async def test_voice_turn_with_mocks(tmp_path: Path, monkeypatch) -> None:
 
 @pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
 @pytest.mark.asyncio
+async def test_voice_turn_client_state_and_actions_header(tmp_path: Path, monkeypatch) -> None:
+    from urllib.parse import unquote
+
+    from krabobot.agent.tools.voice import queue_voice_action
+
+    krabot = tmp_path / ".krabobot"
+    krabot.mkdir()
+    cfg = krabot / "config.json"
+    data = _minimal_config(tmp_path / "workspace")
+    data["api"]["auth"] = {"adminToken": "tok-admin"}
+    cfg.write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(
+        "krabobot.config.loader.get_config_path",
+        lambda: cfg.resolve(),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "krabobot.api.web_auth.get_config_path",
+        lambda: cfg.resolve(),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "krabobot.config.loader.load_config",
+        lambda: MagicMock(
+            stt=MagicMock(),
+            tts=MagicMock(),
+        ),
+        raising=True,
+    )
+
+    loop = _make_loop(tmp_path / "workspace")
+    seed = InboundMessage(channel="cli", sender_id="owner", chat_id="d", content="")
+    await loop._ensure_identity(seed)
+    owner = seed.user_id
+    assert owner
+    await loop.user_resolver.link_account(owner, "voice", "pi-state")
+
+    async def _process_with_action(content, **kwargs):
+        queue_voice_action("pi-state", "meeting_stop")
+        return OutboundMessage(channel="voice", chat_id="pi-state", content="Стоп")
+
+    loop.process_direct = AsyncMock(side_effect=_process_with_action)
+    fake_wav = _tiny_wav_bytes()
+
+    async def _fake_tts(text, *, tts=None):
+        return fake_wav
+
+    app = create_app(loop, model_name="t", request_timeout=5)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        with patch("krabobot.api.server.synthesize_speech_wav", side_effect=_fake_tts):
+            form = FormData()
+            form.add_field("device_id", "pi-state")
+            form.add_field("instruct", "останови запись")
+            form.add_field(
+                "client_state",
+                json.dumps(
+                    {
+                        "mode": "dialog",
+                        "meeting": "recording",
+                        "capabilities": ["meeting_start", "meeting_stop", "end_dialog"],
+                    }
+                ),
+            )
+            r = await client.post(
+                "/v1/voice/turn",
+                data=form,
+                headers={"Authorization": "Bearer tok-admin"},
+            )
+        assert r.status == 200, await r.text()
+        assert r.headers.get("Content-Type", "").startswith("audio/wav")
+        raw_actions = r.headers.get("X-Krabobot-Voice-Actions")
+        assert raw_actions is not None
+        actions = json.loads(unquote(raw_actions))
+        assert actions == [{"action": "meeting_stop"}]
+
+        content = loop.process_direct.await_args.args[0]
+        assert "останови запись" in content
+        assert "[voice client: mode=dialog, meeting=recording]" in content
+    finally:
+        await client.close()
+
+
+@pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
+@pytest.mark.asyncio
+async def test_voice_turn_tts_unavailable_includes_actions_json(tmp_path: Path, monkeypatch) -> None:
+    from urllib.parse import unquote
+
+    from krabobot.agent.tools.voice import queue_voice_action
+
+    krabot = tmp_path / ".krabobot"
+    krabot.mkdir()
+    cfg = krabot / "config.json"
+    data = _minimal_config(tmp_path / "workspace")
+    data["api"]["auth"] = {"adminToken": "tok-admin"}
+    cfg.write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(
+        "krabobot.config.loader.get_config_path",
+        lambda: cfg.resolve(),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "krabobot.api.web_auth.get_config_path",
+        lambda: cfg.resolve(),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "krabobot.config.loader.load_config",
+        lambda: MagicMock(stt=MagicMock(), tts=MagicMock()),
+        raising=True,
+    )
+
+    loop = _make_loop(tmp_path / "workspace")
+    seed = InboundMessage(channel="cli", sender_id="owner", chat_id="d", content="")
+    await loop._ensure_identity(seed)
+    owner = seed.user_id
+    assert owner
+    await loop.user_resolver.link_account(owner, "voice", "pi-tts")
+
+    async def _process_with_action(content, **kwargs):
+        queue_voice_action("pi-tts", "end_dialog")
+        return OutboundMessage(channel="voice", chat_id="pi-tts", content="Пока")
+
+    loop.process_direct = AsyncMock(side_effect=_process_with_action)
+
+    async def _no_tts(text, *, tts=None):
+        return None
+
+    app = create_app(loop, model_name="t", request_timeout=5)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        with patch("krabobot.api.server.synthesize_speech_wav", side_effect=_no_tts):
+            form = FormData()
+            form.add_field("device_id", "pi-tts")
+            form.add_field("instruct", "закончи диалог")
+            r = await client.post(
+                "/v1/voice/turn",
+                data=form,
+                headers={"Authorization": "Bearer tok-admin"},
+            )
+        assert r.status == 200, await r.text()
+        body = await r.json()
+        assert body.get("actions") == [{"action": "end_dialog"}]
+        assert body.get("error") == "TTS unavailable"
+        raw_actions = r.headers.get("X-Krabobot-Voice-Actions")
+        assert raw_actions is not None
+        assert json.loads(unquote(raw_actions)) == [{"action": "end_dialog"}]
+    finally:
+        await client.close()
+
+
+@pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
+@pytest.mark.asyncio
 async def test_voice_turn_empty_stt_returns_clear_error(tmp_path: Path, monkeypatch) -> None:
     krabot = tmp_path / ".krabobot"
     krabot.mkdir()

@@ -1,4 +1,4 @@
-"""Unit tests for wake phrase matching and VAD-segmented wake ASR (no mic)."""
+"""Unit tests for wake phrase matching and VAD-segmented wake (no mic)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,15 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from krabobot_voice.app import Trigger, _wait_for_wake_asr  # noqa: E402
+from krabobot_voice.app import effective_wake_energy  # noqa: E402
+from krabobot_voice.dialog import (  # noqa: E402
+    Beep,
+    Mode,
+    Segment,
+    VoiceSession,
+    VoiceSessionConfig,
+)
+from krabobot_voice.segmenter import VadSegmenter  # noqa: E402
 from krabobot_voice.wake import (  # noqa: E402
     command_after_wake,
     matches_wake_phrase,
@@ -203,22 +211,54 @@ def _wake_vad_kwargs() -> dict:
         min_speech_s=0.35,
         speech_start_s=0.15,
         preroll_s=0.2,
-        ptt=None,
-        meeting=None,
     )
 
 
+def _idle_wake_loop(
+    mic: object,
+    asr: object,
+    *,
+    phrases: list[str],
+    **vad_kwargs: object,
+) -> tuple[str, VoiceSession]:
+    """Driver-shaped idle loop: segment → ASR → VoiceSession until wake."""
+    seg = VadSegmenter(
+        mic.read_block,  # type: ignore[attr-defined]
+        sample_rate=int(mic.sample_rate),  # type: ignore[attr-defined]
+        block=int(mic.block),  # type: ignore[attr-defined]
+        **vad_kwargs,  # type: ignore[arg-type]
+    )
+    session = VoiceSession(
+        VoiceSessionConfig(
+            listen_timeout_s=10.0,
+            follow_up_s=10.0,
+            wake_phrases=list(phrases),
+            wake_greetings=["эй", "привет", "hey"],
+        )
+    )
+    deadline = None  # idle forever until match
+    for _ in range(20):
+        pcm = seg.next_segment(deadline)
+        if pcm is None:
+            continue
+        text = asr.transcribe_pcm16(pcm, sample_rate=int(mic.sample_rate))  # type: ignore[attr-defined]
+        effects = session.on_event(Segment(text))
+        if session.mode is not Mode.IDLE or any(isinstance(e, Beep) for e in effects):
+            return text, session
+    raise AssertionError("wake not reached")
+
+
 def test_wait_for_wake_asr_vad_segment_wakes_once() -> None:
-    """Simulate VAD-closed utterance → mock ASR → single WAKE."""
+    """Simulate VAD-closed utterance → mock ASR → VoiceSession wake."""
     mic = _FakeMic(loud_blocks=40)
     asr = _FakeAsr("Привет, Арнольд.")
-    trigger, detail = _wait_for_wake_asr(
-        mic,  # type: ignore[arg-type]
+    detail, session = _idle_wake_loop(
+        mic,
         asr,
         phrases=["Эй, Арнольд", "привет арнольд"],
         **_wake_vad_kwargs(),
     )
-    assert trigger is Trigger.WAKE
+    assert session.mode is Mode.LISTEN
     assert "Арнольд" in detail
     assert asr.calls == 1
     assert asr.pcm_sizes[0] > 0
@@ -228,13 +268,13 @@ def test_wait_for_wake_asr_full_phrase_with_filler() -> None:
     """One closed VAD segment with filler+phrase must wake (no sliding hop)."""
     mic = _FakeMic(loud_blocks=50)
     asr = _FakeAsr("Давай скажем эй арнольд")
-    trigger, detail = _wait_for_wake_asr(
-        mic,  # type: ignore[arg-type]
+    detail, session = _idle_wake_loop(
+        mic,
         asr,
         phrases=["Эй, Арнольд"],
         **_wake_vad_kwargs(),
     )
-    assert trigger is Trigger.WAKE
+    assert session.mode is Mode.LISTEN
     assert "арнольд" in detail.lower()
     assert asr.calls == 1
 
@@ -250,9 +290,7 @@ def test_wait_for_wake_asr_miss_then_match_next_utterance() -> None:
             self._phase = 0
 
         def read_block(self) -> np.ndarray:
-            # Phase 0: first speech, Phase 1: trailing silence, Phase 2: second speech…
             self._i += 1
-            # 35 loud + 25 silence + 35 loud + silence…
             if self._i <= 35 or (60 < self._i <= 95):
                 return np.ones(self.block, dtype=np.int16) * 12000
             return np.zeros(self.block, dtype=np.int16)
@@ -272,21 +310,19 @@ def test_wait_for_wake_asr_miss_then_match_next_utterance() -> None:
 
     mic = _ProgressiveMic()
     asr = _ProgressiveAsr()
-    trigger, detail = _wait_for_wake_asr(
-        mic,  # type: ignore[arg-type]
+    detail, session = _idle_wake_loop(
+        mic,
         asr,
         phrases=["Эй, Арнольд"],
         **_wake_vad_kwargs(),
     )
-    assert trigger is Trigger.WAKE
+    assert session.mode is Mode.LISTEN
     assert "арнольд" in detail.lower()
     assert asr.calls == 2
     assert asr.texts_seen[0] == "шум в комнате"
 
 
 def test_effective_wake_energy_lower_for_loopback() -> None:
-    from krabobot_voice.app import effective_wake_energy
-
     assert effective_wake_energy(0.006, listen_source="mic") == 0.006
     lb = effective_wake_energy(0.006, listen_source="loopback")
     assert lb < 0.006

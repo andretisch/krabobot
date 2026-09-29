@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import mimetypes
 import re
 import shutil
@@ -25,6 +26,7 @@ from pydantic import ValidationError
 
 from krabobot.agent.context import ContextBuilder
 from krabobot.agent.loop import AgentLoop
+from krabobot.agent.tools.voice import pop_voice_actions
 from krabobot.api.voice_io import synthesize_speech_wav, transcribe_audio
 from krabobot.api.web_auth import (
     auth_middleware,
@@ -123,6 +125,27 @@ def _chat_completion_response(content: str, model: str) -> dict[str, Any]:
         ],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
+
+
+def _format_voice_client_state_line(raw: str) -> str | None:
+    """Build a short context line from client_state JSON, or None if unusable."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    mode = str(data.get("mode") or "").strip() or "unknown"
+    meeting = str(data.get("meeting") or "").strip() or "idle"
+    return f"[voice client: mode={mode}, meeting={meeting}]"
+
+
+def _encode_voice_actions_header(actions: list[dict[str, str]]) -> str:
+    """URL-encode JSON list for X-Krabobot-Voice-Actions (latin-1-safe)."""
+    return quote(json.dumps(actions, ensure_ascii=False, separators=(",", ":")), safe="")
 
 
 def _response_text(value: Any) -> str:
@@ -1058,10 +1081,14 @@ async def handle_voice_turn(request: web.Request) -> web.Response:
       - device_id (required): stable sender_id for channel ``voice``
       - audio (optional): speech clip for server STT
       - instruct (optional): text override/addition (meeting upload+instruct path)
+      - client_state (optional): JSON string with mode/meeting/capabilities
       - files / file (optional): saved under the linked user's workspace
 
     Accepts ``multipart/form-data`` (preferred) or ``application/x-www-form-urlencoded``
     for text-only instruct turns.
+
+    Successful WAV responses may include ``X-Krabobot-Voice-Actions`` (URL-encoded JSON
+    list of ``{"action": "..."}``). JSON bodies (e.g. TTS unavailable) include ``actions``.
     """
     ctype = (request.content_type or "").lower()
     agent_loop: AgentLoop = request.app["agent_loop"]
@@ -1070,6 +1097,7 @@ async def handle_voice_turn(request: web.Request) -> web.Response:
 
     device_id = ""
     instruct = ""
+    client_state_raw = ""
     audio_path: Path | None = None
     media_paths: list[str] = []
     tmp_dir = Path(tempfile.mkdtemp(prefix="voice_turn_"))
@@ -1089,6 +1117,9 @@ async def handle_voice_turn(request: web.Request) -> web.Response:
                     continue
                 if name == "instruct":
                     instruct = (await part.text()).strip()
+                    continue
+                if name == "client_state":
+                    client_state_raw = (await part.text()).strip()
                     continue
                 if name == "audio":
                     filename = Path(part.filename or "audio.wav").name
@@ -1127,6 +1158,7 @@ async def handle_voice_turn(request: web.Request) -> web.Response:
             post = await request.post()
             device_id = str(post.get("device_id") or "").strip()
             instruct = str(post.get("instruct") or "").strip()
+            client_state_raw = str(post.get("client_state") or "").strip()
         else:
             return _error_json(400, "Ожидается multipart/form-data")
 
@@ -1197,9 +1229,15 @@ async def handle_voice_turn(request: web.Request) -> web.Response:
                 )
 
         content_parts = [p for p in (transcript, instruct) if p]
+        state_line = _format_voice_client_state_line(client_state_raw)
+        if state_line:
+            content_parts.append(state_line)
         if not content_parts and not final_media:
             return _error_json(400, "Нужен audio, instruct или файл")
         content = "\n\n".join(content_parts) if content_parts else "Обработай приложенные файлы."
+
+        # Drop any stale actions from a previous failed turn for this device.
+        pop_voice_actions(device_id)
 
         session_key = f"voice:{device_id}"
         try:
@@ -1215,11 +1253,14 @@ async def handle_voice_turn(request: web.Request) -> web.Response:
                 timeout=timeout_s,
             )
         except asyncio.TimeoutError:
+            pop_voice_actions(device_id)
             return _error_json(504, f"Request timed out after {timeout_s}s")
         except Exception:
+            pop_voice_actions(device_id)
             logger.exception("voice turn failed for device_id={}", device_id)
             return _error_json(500, "Internal server error", err_type="server_error")
 
+        actions = pop_voice_actions(device_id)
         reply = _response_text(result).strip()
         if not reply:
             reply = "[empty message]"
@@ -1236,6 +1277,7 @@ async def handle_voice_turn(request: web.Request) -> web.Response:
             "X-Krabobot-Device-Id": device_id,
             "X-Krabobot-Transcript": quote(transcript[:2000], safe=""),
             "X-Krabobot-Reply": quote(reply[:2000], safe=""),
+            "X-Krabobot-Voice-Actions": _encode_voice_actions_header(actions),
         }
         if wav is None:
             return web.json_response(
@@ -1246,7 +1288,9 @@ async def handle_voice_turn(request: web.Request) -> web.Response:
                     "reply": reply,
                     "audio": None,
                     "error": "TTS unavailable",
+                    "actions": actions,
                 },
+                headers=headers,
             )
         return web.Response(
             body=wav,

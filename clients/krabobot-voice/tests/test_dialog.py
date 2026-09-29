@@ -1,4 +1,4 @@
-"""Unit tests for Talk dialog follow-up planning (no mic / no server)."""
+"""Unit tests for VoiceSession state machine (no mic / no server)."""
 
 from __future__ import annotations
 
@@ -10,76 +10,185 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from krabobot_voice.dialog import (  # noqa: E402
-    TalkPhase,
-    plan_after_local_command,
-    plan_after_no_speech,
-    plan_after_turn,
-    plan_initial_listen,
+    Beep,
+    Hotkey,
+    Mode,
+    Segment,
+    SendAudio,
+    SendText,
+    SetDeadline,
+    StartMeeting,
+    StopMeeting,
+    Timeout,
+    TurnDone,
+    VoiceSession,
+    VoiceSessionConfig,
 )
 
 
-def test_initial_listen_beeps() -> None:
-    plan = plan_initial_listen(no_speech_timeout_s=5.0, settle_s=0.35)
-    assert plan.phase is TalkPhase.LISTEN
-    assert plan.play_beep is True
-    assert plan.no_speech_timeout_s == 5.0
-    assert plan.settle_s == 0.35
-
-
-def test_initial_listen_loopback_skips_beep() -> None:
-    """Loopback: no beep/settle — continuous playback must not be discarded."""
-    plan = plan_initial_listen(
-        no_speech_timeout_s=5.0,
-        settle_s=0.35,
-        listen_source="loopback",
+def _cfg(**kwargs: object) -> VoiceSessionConfig:
+    base = VoiceSessionConfig(
+        listen_timeout_s=10.0,
+        follow_up_s=10.0,
+        wake_phrases=["эй арнольд", "hey arnold"],
+        wake_greetings=["эй", "hey"],
+        cmd_meeting_start=["начать запись", "начни запись"],
+        cmd_meeting_stop=["стоп запись", "завершить запись"],
+        cmd_exit=["хватит", "выход"],
+        meeting_enabled=True,
     )
-    assert plan.play_beep is False
-    assert plan.settle_s == 0.0
-    assert plan.no_speech_timeout_s == 5.0
+    for k, v in kwargs.items():
+        setattr(base, k, v)
+    return base
 
 
-def test_follow_up_after_ok_turn() -> None:
-    plan = plan_after_turn(
-        turn_ok=True,
-        follow_up_s=8.0,
-        follow_up_beep=False,
-        settle_s=0.35,
-        default_no_speech_s=5.0,
-    )
-    assert plan.phase is TalkPhase.FOLLOW_UP
-    assert plan.play_beep is False
-    assert plan.no_speech_timeout_s == 8.0
-    assert plan.settle_s <= 0.25
+def _effects(session: VoiceSession, event: object) -> list[object]:
+    return session.on_event(event)  # type: ignore[arg-type]
+
+
+def test_idle_miss_stays_idle() -> None:
+    s = VoiceSession(_cfg())
+    effects = _effects(s, Segment("просто шум"))
+    assert effects == []
+    assert s.mode is Mode.IDLE
+
+
+def test_wake_only_two_beeps_listen() -> None:
+    s = VoiceSession(_cfg())
+    effects = _effects(s, Segment("эй арнольд"))
+    assert any(isinstance(e, Beep) and e.count == 2 for e in effects)
+    assert any(isinstance(e, SetDeadline) and e.seconds == 10.0 for e in effects)
+    assert s.mode is Mode.LISTEN
+
+
+def test_wake_trailing_send_text() -> None:
+    s = VoiceSession(_cfg())
+    effects = _effects(s, Segment("эй арнольд который час"))
+    assert any(isinstance(e, Beep) and e.count == 2 for e in effects)
+    texts = [e for e in effects if isinstance(e, SendText)]
+    assert len(texts) == 1
+    assert "час" in texts[0].text.lower() or texts[0].text
+
+
+def test_wake_trailing_local_meeting_start() -> None:
+    s = VoiceSession(_cfg())
+    effects = _effects(s, Segment("эй арнольд начни запись"))
+    assert any(isinstance(e, Beep) and e.count == 2 for e in effects)
+    assert any(isinstance(e, StartMeeting) for e in effects)
+    assert s.mode is Mode.MEETING
+
+
+def test_listen_timeout_one_beep_idle() -> None:
+    s = VoiceSession(_cfg())
+    _effects(s, Segment("эй арнольд"))
+    assert s.mode is Mode.LISTEN
+    effects = _effects(s, Timeout())
+    assert any(isinstance(e, Beep) and e.count == 1 for e in effects)
+    assert s.mode is Mode.IDLE
+
+
+def test_listen_segment_send_audio() -> None:
+    s = VoiceSession(_cfg())
+    _effects(s, Segment("эй арнольд"))
+    effects = _effects(s, Segment("какой сегодня день"))
+    assert any(isinstance(e, SendAudio) for e in effects)
+    assert not any(isinstance(e, Beep) for e in effects)
+
+
+def test_listen_local_exit() -> None:
+    s = VoiceSession(_cfg())
+    _effects(s, Segment("эй арнольд"))
+    effects = _effects(s, Segment("хватит"))
+    assert any(isinstance(e, Beep) and e.count == 1 for e in effects)
+    assert s.mode is Mode.IDLE
+
+
+def test_turn_ok_enters_dialog() -> None:
+    s = VoiceSession(_cfg())
+    _effects(s, Segment("эй арнольд"))
+    _effects(s, Segment("привет"))
+    effects = _effects(s, TurnDone(ok=True))
+    assert s.mode is Mode.DIALOG
+    assert any(isinstance(e, SetDeadline) and e.seconds == 10.0 for e in effects)
+
+
+def test_dialog_timeout_one_beep() -> None:
+    s = VoiceSession(_cfg())
+    s.mode = Mode.DIALOG
+    effects = _effects(s, Timeout())
+    assert any(isinstance(e, Beep) and e.count == 1 for e in effects)
+    assert s.mode is Mode.IDLE
+
+
+def test_dialog_segment_send_audio() -> None:
+    s = VoiceSession(_cfg())
+    s.mode = Mode.DIALOG
+    effects = _effects(s, Segment("ещё вопрос"))
+    assert any(isinstance(e, SendAudio) for e in effects)
+
+
+def test_end_dialog_action() -> None:
+    s = VoiceSession(_cfg())
+    s.mode = Mode.DIALOG
+    effects = _effects(s, TurnDone(ok=True, actions=("end_dialog",)))
+    assert any(isinstance(e, Beep) and e.count == 1 for e in effects)
+    assert s.mode is Mode.IDLE
 
 
 def test_follow_up_disabled() -> None:
-    plan = plan_after_turn(
-        turn_ok=True,
-        follow_up_s=0,
-        follow_up_beep=False,
-        settle_s=0.35,
-        default_no_speech_s=5.0,
-    )
-    assert plan.phase is TalkPhase.WAIT_WAKE
+    s = VoiceSession(_cfg(follow_up_s=0))
+    s.mode = Mode.LISTEN
+    effects = _effects(s, TurnDone(ok=True))
+    assert s.mode is Mode.IDLE
+    assert any(isinstance(e, Beep) and e.count == 1 for e in effects)
 
 
-def test_failed_turn_back_to_wake() -> None:
-    plan = plan_after_turn(
-        turn_ok=False,
-        follow_up_s=8.0,
-        follow_up_beep=True,
-        settle_s=0.35,
-        default_no_speech_s=5.0,
-    )
-    assert plan.phase is TalkPhase.WAIT_WAKE
-    assert plan.play_beep is False
+def test_failed_turn_idle() -> None:
+    s = VoiceSession(_cfg())
+    s.mode = Mode.LISTEN
+    effects = _effects(s, TurnDone(ok=False))
+    assert s.mode is Mode.IDLE
+    assert any(isinstance(e, Beep) and e.count == 1 for e in effects)
 
 
-def test_no_speech_leaves_follow_up() -> None:
-    assert plan_after_no_speech(was_follow_up=True) is TalkPhase.WAIT_WAKE
-    assert plan_after_no_speech(was_follow_up=False) is TalkPhase.WAIT_WAKE
+def test_meeting_hotkey_start_stop() -> None:
+    s = VoiceSession(_cfg())
+    effects = _effects(s, Hotkey("meeting"))
+    assert any(isinstance(e, StartMeeting) for e in effects)
+    assert s.mode is Mode.MEETING
+    effects = _effects(s, Hotkey("meeting"))
+    assert any(isinstance(e, StopMeeting) for e in effects)
+    assert any(isinstance(e, Beep) and e.count == 1 for e in effects)
+    assert s.mode is Mode.IDLE
 
 
-def test_local_command_exits_dialog() -> None:
-    assert plan_after_local_command(command="exit") is TalkPhase.WAIT_WAKE
-    assert plan_after_local_command(command="meeting_start") is TalkPhase.WAIT_WAKE
+def test_meeting_local_stop_without_wake() -> None:
+    s = VoiceSession(_cfg())
+    s.mode = Mode.MEETING
+    effects = _effects(s, Segment("стоп запись"))
+    assert any(isinstance(e, StopMeeting) for e in effects)
+    assert s.mode is Mode.IDLE
+
+
+def test_meeting_server_stop_action() -> None:
+    s = VoiceSession(_cfg())
+    s.mode = Mode.MEETING
+    effects = _effects(s, TurnDone(ok=True, actions=("meeting_stop",)))
+    assert any(isinstance(e, StopMeeting) for e in effects)
+    assert s.mode is Mode.IDLE
+
+
+def test_ptt_hotkey_arms_listen() -> None:
+    s = VoiceSession(_cfg())
+    effects = _effects(s, Hotkey("ptt"))
+    assert s.mode is Mode.LISTEN
+    assert any(isinstance(e, Beep) and e.count == 2 for e in effects)
+
+
+def test_client_mode_meeting_state() -> None:
+    s = VoiceSession(_cfg())
+    assert s.client_mode() == "idle"
+    assert s.meeting_state() == "idle"
+    s.mode = Mode.MEETING
+    assert s.client_mode() == "meeting"
+    assert s.meeting_state() == "recording"

@@ -1,8 +1,7 @@
-"""Console ASR/PTT → beep → record → POST /v1/voice/turn → play loop.
+﻿"""Console ASR/PTT → segment stream → VoiceSession → effects driver.
 
-Wake default: VAD utterance → local sherpa-onnx ASR (user-configured wake.phrase).
-Optional KWS mode scores the same VAD segments. Dialog follow-up after Talk reply.
-Meeting: toggle capture.
+Wake default: persistent VAD segmenter → local sherpa ASR → pure state machine.
+Dialog follow-up after Talk reply. Meeting: same segmenter on mic tap.
 """
 
 from __future__ import annotations
@@ -10,32 +9,48 @@ from __future__ import annotations
 import os
 import sys
 import time
-from enum import Enum
+from collections import deque
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 
-from krabobot_voice.audio_io import open_capture_stream, play_beep, play_wav_bytes, with_stream_keepalive
-from krabobot_voice.commands import LocalCommand, match_local_command
+from krabobot_voice.audio_io import (
+    open_capture_stream,
+    play_beeps,
+    play_wav_bytes,
+    with_stream_keepalive,
+)
 from krabobot_voice.config import VoiceClientConfig
 from krabobot_voice.dialog import (
-    TalkPhase,
-    plan_after_no_speech,
-    plan_after_turn,
-    plan_initial_listen,
+    Beep,
+    Hotkey,
+    Mode,
+    Segment,
+    SendAudio,
+    SendText,
+    SetDeadline,
+    StartMeeting,
+    StopMeeting,
+    Timeout,
+    TurnDone,
+    VoiceSession,
+    VoiceSessionConfig,
 )
 from krabobot_voice.http_client import VoiceHttpClient
 from krabobot_voice.kws import EmbeddingKws, default_refs_dir
 from krabobot_voice.link import ensure_device_linked
 from krabobot_voice.meeting import MeetingCaptureConfig, MeetingRecorder
+from krabobot_voice.protocol import ClientState
 from krabobot_voice.ptt import PttHotkey
-from krabobot_voice.vad import frame_rms, pcm_stats, record_utterance
-from krabobot_voice.wake import command_after_wake, matches_wake_phrase
+from krabobot_voice.segmenter import VadSegmenter
+from krabobot_voice.vad import frame_rms, pcm_stats
 
 # Loopback after downmix/resample is often quieter than a close mic.
 _LOOPBACK_WAKE_ENERGY_SCALE = 0.4
 _LOOPBACK_WAKE_ENERGY_FLOOR = 0.0015
 _WAKE_DEBUG_HEARTBEAT_S = 30.0
-_LOOPBACK_SILENCE_WARN_S = 25.0
+_KEEPALIVE_SINK_MAX = 200
 
 
 def _log(msg: str) -> None:
@@ -64,217 +79,51 @@ def effective_wake_energy(threshold: float, *, listen_source: str) -> float:
     return min(thr, max(_LOOPBACK_WAKE_ENERGY_FLOOR, thr * _LOOPBACK_WAKE_ENERGY_SCALE))
 
 
-class Trigger(str, Enum):
-    WAKE = "wake"
-    PTT = "ptt"
-    MEETING = "meeting"
-
-
-class _AbortWakeWaitError(Exception):
-    """Raised from a wrapped read_block when PTT / meeting wins the wake wait."""
-
-    def __init__(self, trigger: Trigger, detail: str) -> None:
-        super().__init__(detail)
-        self.trigger = trigger
-        self.detail = detail
-
-
-def _interruptible_read_block(
-    mic: object,
-    *,
-    ptt: PttHotkey | None,
-    meeting: PttHotkey | None,
-):
-    """Return a read_block that also polls PTT / meeting hotkeys."""
-    read_block = getattr(mic, "read_block")
-
-    def _read() -> np.ndarray:
-        if meeting is not None and meeting.consume_edge_down():
-            raise _AbortWakeWaitError(Trigger.MEETING, "meeting")
-        if ptt is not None and ptt.consume_edge_down():
-            raise _AbortWakeWaitError(Trigger.PTT, "ptt")
-        return read_block()
-
-    return _read
-
-
-def _capture_wake_utterance(
-    mic: object,
-    *,
-    energy_threshold: float,
-    silence_end_s: float,
-    max_s: float,
-    min_speech_s: float,
-    speech_start_s: float,
-    preroll_s: float,
-    ptt: PttHotkey | None,
-    meeting: PttHotkey | None,
-) -> np.ndarray | None:
-    """One VAD-closed utterance for wake, or None on silence timeout / near-silent.
-
-    Raises ``_AbortWakeWaitError`` if PTT or meeting fires while capturing.
-    """
-    sr = int(getattr(mic, "sample_rate"))
-    block = int(getattr(mic, "block"))
-    return record_utterance(
-        _interruptible_read_block(mic, ptt=ptt, meeting=meeting),
-        sample_rate=sr,
-        block=block,
-        max_s=max_s,
-        silence_end_s=silence_end_s,
-        speech_start_s=speech_start_s,
-        min_speech_s=min_speech_s,
-        energy_threshold=energy_threshold,
-        settle_s=0.0,
-        preroll_s=preroll_s,
-        # Outer loop restarts on None so idle wake keeps listening forever.
-        no_speech_timeout_s=max(8.0, max_s),
+def _session_config(cfg: VoiceClientConfig) -> VoiceSessionConfig:
+    return VoiceSessionConfig(
+        listen_timeout_s=float(cfg.talk_listen_timeout_s),
+        follow_up_s=float(cfg.talk_follow_up_s),
+        wake_phrases=list(cfg.wake_phrases),
+        wake_greetings=list(cfg.wake_greetings),
+        cmd_meeting_start=list(cfg.cmd_meeting_start),
+        cmd_meeting_stop=list(cfg.cmd_meeting_stop),
+        cmd_exit=list(cfg.cmd_exit),
+        meeting_enabled=bool(cfg.meeting_enabled),
     )
 
 
-def _wait_for_wake_asr(
-    mic: object,
-    asr: object,
+def _client_state(session: VoiceSession) -> ClientState:
+    return ClientState(
+        mode=session.client_mode(),
+        meeting=session.meeting_state(),
+    )
+
+
+def _make_segmenter(
+    read_block: Callable[[], np.ndarray],
     *,
+    sample_rate: int,
+    block: int,
+    cfg: VoiceClientConfig,
     energy_threshold: float,
-    silence_end_s: float,
-    max_s: float,
-    min_speech_s: float,
-    speech_start_s: float,
-    preroll_s: float,
-    ptt: PttHotkey | None,
-    meeting: PttHotkey | None,
-    phrases: list[str] | tuple[str, ...] | None = None,
-    greetings: list[str] | tuple[str, ...] | None = None,
-    listen_source: str = "mic",
-) -> tuple[Trigger, str]:
-    """Wake path: VAD speech_start→end → one sherpa ASR → phrase match.
-
-    Misses discard the segment and immediately listen for the next VAD utterance.
-    Status line is printed by the caller once on enter — not every hop.
-    """
-    phrase_list = tuple(phrases) if phrases is not None else None
-    greet_list = tuple(greetings) if greetings is not None else None
-    is_loopback = (listen_source or "").strip().lower() == "loopback"
-    entered_at = time.monotonic()
-    last_heartbeat = entered_at
-    silence_warned = False
-    saw_energy = False
-
-    while True:
-        try:
-            pcm = _capture_wake_utterance(
-                mic,
-                energy_threshold=energy_threshold,
-                silence_end_s=silence_end_s,
-                max_s=max_s,
-                min_speech_s=min_speech_s,
-                speech_start_s=speech_start_s,
-                preroll_s=preroll_s,
-                ptt=ptt,
-                meeting=meeting,
-            )
-        except _AbortWakeWaitError as abort:
-            return abort.trigger, abort.detail
-
-        now = time.monotonic()
-        if now - last_heartbeat >= _WAKE_DEBUG_HEARTBEAT_S:
-            _log_debug("still waiting for wake…")
-            last_heartbeat = now
-
-        if pcm is None:
-            if is_loopback and not silence_warned and not saw_energy:
-                if now - entered_at >= _LOOPBACK_SILENCE_WARN_S:
-                    silence_warned = True
-                    _log(
-                        "WARNING: loopback RMS ниже wake energy — "
-                        "увеличьте громкость видео / выберите audio.output_device "
-                        "того выхода, куда играет звук "
-                        f"(thr={energy_threshold:.4f}). "
-                        "Диагностика: python -m krabobot_voice --test-loopback"
-                    )
-            continue
-
-        if frame_rms(pcm) >= energy_threshold:
-            saw_energy = True
-
-        # Keep draining loopback/mic while sherpa runs — otherwise PortAudio
-        # overflows and the next stream.read can hang forever (Ctrl+C ignored).
-        def _transcribe() -> str:
-            return asr.transcribe_pcm16(  # type: ignore[attr-defined]
-                pcm,
-                sample_rate=int(getattr(mic, "sample_rate")),
-                energy_threshold=min(energy_threshold, 0.006),
-            )
-
-        text = with_stream_keepalive(mic, _transcribe)
-        stripped = (text or "").strip()
-        if stripped:
-            _log(f"  [wake-asr] {stripped}")
-        if matches_wake_phrase(stripped, phrases=phrase_list, greetings=greet_list):
-            return Trigger.WAKE, stripped
-        # Miss: discard segment; immediately ready for the next VAD utterance.
-
-
-def _wait_for_wake_kws(
-    mic: object,
-    kws: EmbeddingKws,
-    *,
-    energy_threshold: float,
-    silence_end_s: float,
-    max_s: float,
-    min_speech_s: float,
-    speech_start_s: float,
-    preroll_s: float,
-    ptt: PttHotkey | None,
-    meeting: PttHotkey | None,
-) -> tuple[Trigger, str]:
-    """KWS wake: VAD segment → one embedding score (no sliding-window spam)."""
-    while True:
-        try:
-            pcm = _capture_wake_utterance(
-                mic,
-                energy_threshold=energy_threshold,
-                silence_end_s=silence_end_s,
-                max_s=max_s,
-                min_speech_s=min_speech_s,
-                speech_start_s=speech_start_s,
-                preroll_s=preroll_s,
-                ptt=ptt,
-                meeting=meeting,
-            )
-        except _AbortWakeWaitError as abort:
-            return abort.trigger, abort.detail
-
-        if pcm is None:
-            continue
-
-        score = kws.best_score(pcm)
-        if score >= kws.threshold:
-            _log(f"  [kws] score={score:.3f} (thr={kws.threshold:.3f})")
-            kws.reset()
-            return Trigger.WAKE, f"kws:{score:.3f}"
-
-
-def _wait_for_ptt_or_meeting(
-    mic: object,
-    *,
-    ptt: PttHotkey | None,
-    meeting: PttHotkey | None,
-) -> Trigger:
-    """Block until PTT or meeting (wake_mode=off)."""
-    last_heartbeat = time.monotonic()
-    read_block = getattr(mic, "read_block")
-    while True:
-        if meeting is not None and meeting.consume_edge_down():
-            return Trigger.MEETING
-        if ptt is not None and ptt.consume_edge_down():
-            return Trigger.PTT
-        read_block()
-        now = time.monotonic()
-        if now - last_heartbeat >= _WAKE_DEBUG_HEARTBEAT_S:
-            _log_debug("still waiting for PTT / meeting…")
-            last_heartbeat = now
+    max_s: float | None = None,
+    silence_end_s: float | None = None,
+    min_speech_s: float | None = None,
+) -> VadSegmenter:
+    min_speech = float(min_speech_s if min_speech_s is not None else cfg.min_speech_s)
+    return VadSegmenter(
+        read_block,
+        sample_rate=sample_rate,
+        block=block,
+        max_s=float(max_s if max_s is not None else cfg.utterance_max_s),
+        silence_end_s=float(
+            silence_end_s if silence_end_s is not None else cfg.silence_end_s
+        ),
+        speech_start_s=cfg.speech_start_s,
+        min_speech_s=min_speech,
+        energy_threshold=float(energy_threshold),
+        preroll_s=cfg.preroll_s,
+    )
 
 
 def _record_while_held(
@@ -282,25 +131,16 @@ def _record_while_held(
     ptt: PttHotkey,
     *,
     max_s: float,
-    settle_s: float,
 ) -> np.ndarray | None:
     """Hold-to-talk: capture PCM while PTT chord is down."""
     sr = int(getattr(mic, "sample_rate"))
-    block = int(getattr(mic, "block"))
     read_block = getattr(mic, "read_block")
-    settle_blocks = max(0, int(settle_s * sr / block))
-    for _ in range(settle_blocks):
-        read_block()
-        if not ptt.is_down():
-            return None
-
     chunks: list[np.ndarray] = []
-    max_blocks = max(1, int(max_s * sr / block))
+    max_blocks = max(1, int(max_s * sr / max(1, int(getattr(mic, "block")))))
     for _ in range(max_blocks):
         if not ptt.is_down():
             break
         chunks.append(read_block())
-    # Drain edge-up
     ptt.consume_edge_up()
     if not chunks:
         return None
@@ -312,7 +152,6 @@ def _record_while_held(
 
 
 def _pcm_to_upload_wav(pcm: np.ndarray, *, sample_rate: int) -> tuple[bytes, object]:
-    """Align PCM (16 kHz mono, level, trim) and wrap as WAV for /v1/voice/turn."""
     from krabobot_voice.preprocess import pcm16_to_wav_bytes, preprocess_pcm16
 
     aligned, sr = preprocess_pcm16(pcm, sample_rate=sample_rate)
@@ -321,7 +160,6 @@ def _pcm_to_upload_wav(pcm: np.ndarray, *, sample_rate: int) -> tuple[bytes, obj
 
 
 def _play_turn_result(result: object) -> bool:
-    """Log transcript/reply and play TTS. True if playback succeeded (or none)."""
     transcript = getattr(result, "transcript", "") or ""
     reply = getattr(result, "reply", "") or ""
     audio_wav = getattr(result, "audio_wav", None)
@@ -341,249 +179,598 @@ def _play_turn_result(result: object) -> bool:
     return True
 
 
-def _handle_turn(
-    cfg: VoiceClientConfig,
-    http: VoiceHttpClient,
-    pcm: np.ndarray,
-) -> bool:
-    """Upload utterance and play reply. True if the turn completed successfully."""
-    wav, stats = _pcm_to_upload_wav(pcm, sample_rate=cfg.sample_rate)
-    _log(
-        f"upload: {len(wav)} bytes, {stats.duration_ms:.0f} ms, "
-        f"rms={stats.rms:.4f}, peak={stats.peak:.4f}"
-    )
-    if stats.near_silent:
-        _log("WARNING: clip looks near-silent — speak louder / closer after beep")
-    _log("thinking…")
-    try:
-        result = http.turn(audio_bytes=wav, audio_filename="utterance.wav")
-    except Exception as e:
-        _log(f"ERROR: запрос /v1/voice/turn: {e}")
-        return False
-
-    if result.status_code >= 400:
-        _log(
-            f"ERROR HTTP {result.status_code}: "
-            f"{result.error_message or result.reply or 'unknown'}"
-        )
-        return False
-    return _play_turn_result(result)
-
-
-def _handle_text_turn(
-    cfg: VoiceClientConfig,
-    http: VoiceHttpClient,
-    text: str,
-) -> bool:
-    """Send wake leftover / text-only instruct to /v1/voice/turn (no second listen)."""
-    cleaned = (text or "").strip()
-    if not cleaned:
-        return False
-    _log(f"  you (wake): {cleaned}")
-    _log("thinking…")
-    try:
-        result = http.turn(instruct=cleaned)
-    except Exception as e:
-        _log(f"ERROR: запрос /v1/voice/turn: {e}")
-        return False
-
-    if result.status_code >= 400:
-        _log(
-            f"ERROR HTTP {result.status_code}: "
-            f"{result.error_message or result.reply or 'unknown'}"
-        )
-        return False
-    return _play_turn_result(result)
-
-
-def _apply_local_command(
-    cfg: VoiceClientConfig,
-    cmd: LocalCommand,
-    *,
-    kws: EmbeddingKws | None,
-) -> tuple[bool, bool]:
-    """Handle a matched local command.
-
-    Returns ``(start_meeting, follow_up)``. ``follow_up`` is always False after
-    local commands (back to wake wait).
-    """
-    if cmd is LocalCommand.EXIT:
-        _log("local: exit dialog → wake")
-        if kws is not None:
-            kws.reset()
-        return False, False
-    if cmd is LocalCommand.MEETING_START:
-        if not cfg.meeting_enabled:
-            _log("local: meeting start ignored (meeting disabled)")
-            if kws is not None:
-                kws.reset()
-            return False, False
-        _log("local: meeting start")
-        if kws is not None:
-            kws.reset()
-        return True, False
-    if cmd is LocalCommand.MEETING_STOP:
-        _log("local: meeting stop (not recording) — ignored")
-        if kws is not None:
-            kws.reset()
-        return False, False
-    return False, False
-
-
-def _handle_meeting_upload(
-    cfg: VoiceClientConfig,
-    http: VoiceHttpClient,
-    wav: bytes,
-    *,
-    duration_s: float,
-    capture: str,
-) -> None:
-    from krabobot_voice.preprocess import preprocess_wav_bytes
-
-    aligned = preprocess_wav_bytes(wav)
-    _log(
-        f"meeting upload: {len(aligned)} bytes, {duration_s:.1f} s, capture={capture}"
-    )
-    _log("thinking (meeting)…")
-    try:
-        result = http.turn(
-            audio_bytes=aligned,
-            audio_filename="meeting.wav",
-            instruct=cfg.meeting_instruct or None,
-        )
-    except Exception as e:
-        _log(f"ERROR: запрос /v1/voice/turn (meeting): {e}")
-        return
-
-    if result.status_code >= 400:
-        _log(
-            f"ERROR HTTP {result.status_code}: "
-            f"{result.error_message or result.reply or 'unknown'}"
-        )
-        return
-    if result.transcript:
-        _log(f"  stt: {result.transcript[:200]}{'…' if len(result.transcript) > 200 else ''}")
-    if result.reply:
-        _log(f"  bot: {result.reply}")
-    if result.audio_wav:
-        _log("playing…")
+def _drain_mic(mic: object, blocks: int = 8) -> None:
+    """Drop a few blocks (beep / TTS echo) without feeding the segmenter."""
+    read = getattr(mic, "read_block", None)
+    drain = getattr(mic, "drain_available", None)
+    for _ in range(max(0, int(blocks))):
         try:
-            play_wav_bytes(result.audio_wav)
-        except Exception as e:
-            _log(f"ERROR: воспроизведение: {e}")
+            if callable(drain):
+                drain()
+            elif callable(read):
+                read()
+        except Exception:
+            break
 
 
-def _run_meeting_session(
-    cfg: VoiceClientConfig,
-    http: VoiceHttpClient,
-    meeting_hk: PttHotkey | None,
+def _transcribe(
+    asr: object | None,
+    pcm: np.ndarray,
     *,
-    asr: object | None = None,
-) -> None:
-    """Record until toggle / voice stop / max_s, then upload+instruct."""
-    recorder = MeetingRecorder(
-        MeetingCaptureConfig(
-            capture=cfg.meeting_capture,
-            sample_rate=cfg.sample_rate,
-            input_device=cfg.audio_input_device,
-            output_device=cfg.audio_output_device,
-            loopback_device=cfg.meeting_loopback_device,
-            max_s=cfg.meeting_max_s,
-        )
-    )
-    echo_hint = ""
-    if cfg.meeting_capture == "mix":
-        echo_hint = (
-            " (mix: лучше наушники — иначе локальный голос может задвоиться с колонок)"
-        )
-    _log(f"meeting START capture={cfg.meeting_capture}{echo_hint}")
-    play_beep(freq=880, duration_ms=120)
+    sample_rate: int,
+    energy_threshold: float | None = None,
+) -> str:
+    if asr is None:
+        return ""
+    kwargs: dict[str, Any] = {"sample_rate": sample_rate}
+    if energy_threshold is not None:
+        kwargs["energy_threshold"] = energy_threshold
     try:
-        recorder.start()
+        return str(asr.transcribe_pcm16(pcm, **kwargs) or "").strip()  # type: ignore[attr-defined]
+    except TypeError:
+        try:
+            return str(asr.transcribe_pcm16(pcm, sample_rate=sample_rate) or "").strip()  # type: ignore[attr-defined]
+        except Exception as e:
+            _log(f"WARNING: local ASR failed: {e}")
+            return ""
     except Exception as e:
-        _log(f"ERROR: не удалось начать запись встречи: {e}")
-        return
+        _log(f"WARNING: local ASR failed: {e}")
+        return ""
 
-    last_print = 0.0
-    last_asr = 0.0
-    stop_reason = "hotkey"
+
+def _kws_score(kws: EmbeddingKws, pcm: np.ndarray) -> float:
     try:
-        while recorder.active:
-            if meeting_hk is not None and meeting_hk.consume_edge_down():
-                stop_reason = "hotkey"
-                break
-            now = time.monotonic()
-            if now - last_print > 10.0:
-                hk = meeting_hk.hotkey_label if meeting_hk is not None else "voice"
-                _log(f"meeting recording… (stop: {hk} / «стоп запись»)")
-                last_print = now
-            # Voice stop via local ASR on mic tap (mic / mix only).
-            if asr is not None and now - last_asr >= 1.2:
-                last_asr = now
-                tap = recorder.recent_mic_pcm(2.5)
-                if tap is not None and frame_rms(tap) >= cfg.energy_threshold:
-                    try:
-                        text = asr.transcribe_pcm16(  # type: ignore[attr-defined]
-                            tap, sample_rate=cfg.sample_rate
-                        )
-                    except Exception:
-                        text = ""
-                    if text:
-                        cmd = match_local_command(
-                            text,
-                            meeting_start=cfg.cmd_meeting_start,
-                            meeting_stop=cfg.cmd_meeting_stop,
-                            exit_dialog=cfg.cmd_exit,
-                        )
-                        if cmd is LocalCommand.MEETING_STOP:
-                            _log(f"local stop: {text}")
-                            stop_reason = "voice"
-                            break
-            time.sleep(0.05)
+        return float(kws.best_score(pcm))
+    except Exception:
+        return 0.0
+
+
+class _Driver:
+    """Applies VoiceSession effects and owns the segment → ASR loop."""
+
+    def __init__(
+        self,
+        cfg: VoiceClientConfig,
+        http: VoiceHttpClient,
+        session: VoiceSession,
+        *,
+        asr: object | None,
+        kws: EmbeddingKws | None,
+        ptt: PttHotkey | None,
+        meeting_hk: PttHotkey | None,
+        wake_energy: float,
+    ) -> None:
+        self.cfg = cfg
+        self.http = http
+        self.session = session
+        self.asr = asr
+        self.kws = kws
+        self.ptt = ptt
+        self.meeting_hk = meeting_hk
+        self.wake_energy = wake_energy
+        self._deadline: float | None = None
+        self._pending_pcm: np.ndarray | None = None
+        self._recorder: MeetingRecorder | None = None
+        self._last_status = ""
+
+    def _status(self, msg: str) -> None:
+        if msg != self._last_status:
+            _log(msg)
+            self._last_status = msg
+
+    def _apply(self, effects: list[object], *, mic: object | None = None) -> None:
+        for eff in effects:
+            if isinstance(eff, Beep):
+                if self.cfg.talk_beeps and eff.count > 0:
+                    play_beeps(eff.count)
+                    if mic is not None:
+                        _drain_mic(mic)
+            elif isinstance(eff, SetDeadline):
+                if eff.seconds is None:
+                    self._deadline = None
+                else:
+                    self._deadline = time.monotonic() + max(0.1, float(eff.seconds))
+            elif isinstance(eff, SendText):
+                self._do_text_turn(eff.text, mic=mic)
+            elif isinstance(eff, SendAudio):
+                self._do_audio_turn(mic=mic)
+            elif isinstance(eff, StartMeeting):
+                self._start_meeting()
+            elif isinstance(eff, StopMeeting):
+                self._stop_meeting_and_upload()
+
+    def _do_text_turn(self, text: str, *, mic: object | None) -> None:
+        cleaned = (text or "").strip()
+        if not cleaned:
+            self._apply(
+                self.session.on_event(TurnDone(ok=False)),
+                mic=mic,
+            )
+            return
+        _log(f"  you (wake): {cleaned}")
+        _log("thinking…")
+        sink: deque[np.ndarray] | None = None
+        try:
+            if mic is not None:
+                sink = deque(maxlen=_KEEPALIVE_SINK_MAX)
+
+                def _call() -> object:
+                    return self.http.turn(
+                        instruct=cleaned,
+                        client_state=_client_state(self.session),
+                    )
+
+                result = with_stream_keepalive(mic, _call, sink=sink)
+            else:
+                result = self.http.turn(
+                    instruct=cleaned,
+                    client_state=_client_state(self.session),
+                )
+        except Exception as e:
+            _log(f"ERROR: запрос /v1/voice/turn: {e}")
+            self._apply(self.session.on_event(TurnDone(ok=False)), mic=mic)
+            return
+        finally:
+            # Backlog feed happens in the talk loop after apply returns if segmenter set.
+            self._last_sink = sink
+
+        ok = self._finish_turn(result, mic=mic)
+        self._apply(
+            self.session.on_event(
+                TurnDone(ok=ok, actions=tuple(getattr(result, "actions", None) or ()))
+            ),
+            mic=mic,
+        )
+
+    def _do_audio_turn(self, *, mic: object | None) -> None:
+        pcm = self._pending_pcm
+        self._pending_pcm = None
+        if pcm is None:
+            self._apply(self.session.on_event(TurnDone(ok=False)), mic=mic)
+            return
+        wav, stats = _pcm_to_upload_wav(pcm, sample_rate=self.cfg.sample_rate)
+        _log(
+            f"upload: {len(wav)} bytes, {stats.duration_ms:.0f} ms, "
+            f"rms={stats.rms:.4f}, peak={stats.peak:.4f}"
+        )
+        if stats.near_silent:
+            _log("WARNING: clip looks near-silent — speak louder / closer after beep")
+        _log("thinking…")
+        sink: deque[np.ndarray] | None = None
+        try:
+            if mic is not None:
+                sink = deque(maxlen=_KEEPALIVE_SINK_MAX)
+
+                def _call() -> object:
+                    return self.http.turn(
+                        audio_bytes=wav,
+                        audio_filename="utterance.wav",
+                        client_state=_client_state(self.session),
+                    )
+
+                result = with_stream_keepalive(mic, _call, sink=sink)
+            else:
+                result = self.http.turn(
+                    audio_bytes=wav,
+                    audio_filename="utterance.wav",
+                    client_state=_client_state(self.session),
+                )
+        except Exception as e:
+            _log(f"ERROR: запрос /v1/voice/turn: {e}")
+            self._apply(self.session.on_event(TurnDone(ok=False)), mic=mic)
+            return
+        finally:
+            self._last_sink = sink
+
+        ok = self._finish_turn(result, mic=mic)
+        self._apply(
+            self.session.on_event(
+                TurnDone(ok=ok, actions=tuple(getattr(result, "actions", None) or ()))
+            ),
+            mic=mic,
+        )
+
+    def _finish_turn(self, result: object, *, mic: object | None) -> bool:
+        status = int(getattr(result, "status_code", 500) or 500)
+        if status >= 400:
+            _log(
+                f"ERROR HTTP {status}: "
+                f"{getattr(result, 'error_message', None) or getattr(result, 'reply', None) or 'unknown'}"
+            )
+            return False
+        ok = _play_turn_result(result)
+        if mic is not None:
+            _drain_mic(mic, blocks=12)
+        return ok
+
+    def _start_meeting(self) -> None:
+        if self._recorder is not None and self._recorder.active:
+            return
+        recorder = MeetingRecorder(
+            MeetingCaptureConfig(
+                capture=self.cfg.meeting_capture,
+                sample_rate=self.cfg.sample_rate,
+                input_device=self.cfg.audio_input_device,
+                output_device=self.cfg.audio_output_device,
+                loopback_device=self.cfg.meeting_loopback_device,
+                max_s=self.cfg.meeting_max_s,
+            )
+        )
+        echo_hint = ""
+        if self.cfg.meeting_capture == "mix":
+            echo_hint = (
+                " (mix: лучше наушники — иначе локальный голос может задвоиться с колонок)"
+            )
+        _log(f"meeting START capture={self.cfg.meeting_capture}{echo_hint}")
+        try:
+            recorder.start()
+        except Exception as e:
+            _log(f"ERROR: не удалось начать запись встречи: {e}")
+            self.session.mode = Mode.IDLE
+            return
+        self._recorder = recorder
+
+    def _stop_meeting_and_upload(self) -> None:
+        recorder = self._recorder
+        self._recorder = None
+        if recorder is None:
+            return
         try:
             result = recorder.stop()
         except Exception as e:
             _log(f"ERROR: остановка записи встречи: {e}")
             return
-    except KeyboardInterrupt:
+        _log(f"meeting STOP ({result.duration_s:.1f} s)")
+        self._handle_meeting_upload(result.wav_bytes, duration_s=result.duration_s, capture=result.capture)
+
+    def _handle_meeting_upload(
+        self,
+        wav: bytes,
+        *,
+        duration_s: float,
+        capture: str,
+    ) -> None:
+        from krabobot_voice.preprocess import preprocess_wav_bytes
+
+        aligned = preprocess_wav_bytes(wav)
+        _log(
+            f"meeting upload: {len(aligned)} bytes, {duration_s:.1f} s, capture={capture}"
+        )
+        _log("thinking (meeting)…")
         try:
-            result = recorder.stop()
-        except Exception:
-            raise
-        raise
+            result = self.http.turn(
+                audio_bytes=aligned,
+                audio_filename="meeting.wav",
+                instruct=self.cfg.meeting_instruct or None,
+                client_state=ClientState(mode="idle", meeting="idle"),
+            )
+        except Exception as e:
+            _log(f"ERROR: запрос /v1/voice/turn (meeting): {e}")
+            return
+        if result.status_code >= 400:
+            _log(
+                f"ERROR HTTP {result.status_code}: "
+                f"{result.error_message or result.reply or 'unknown'}"
+            )
+            return
+        if result.transcript:
+            _log(
+                f"  stt: {result.transcript[:200]}"
+                f"{'…' if len(result.transcript) > 200 else ''}"
+            )
+        if result.reply:
+            _log(f"  bot: {result.reply}")
+        if result.audio_wav:
+            _log("playing…")
+            try:
+                play_wav_bytes(result.audio_wav)
+            except Exception as e:
+                _log(f"ERROR: воспроизведение: {e}")
 
-    play_beep(freq=660, duration_ms=120)
-    _log(f"meeting STOP ({result.duration_s:.1f} s, via {stop_reason})")
-    _handle_meeting_upload(
-        cfg,
-        http,
-        result.wav_bytes,
-        duration_s=result.duration_s,
-        capture=result.capture,
-    )
-
-
-def _resolve_local_command(
-    cfg: VoiceClientConfig,
-    asr: object | None,
-    pcm: np.ndarray,
-) -> LocalCommand | None:
-    """Transcribe utterance with local sherpa and match a command, if any."""
-    if asr is None:
+    def _poll_hotkeys(self) -> list[object] | None:
+        """Return effects if a hotkey was consumed; else None."""
+        if self.meeting_hk is not None and self.meeting_hk.consume_edge_down():
+            return self.session.on_event(Hotkey("meeting"))
+        if self.ptt is not None and self.ptt.consume_edge_down():
+            return self.session.on_event(Hotkey("ptt"))
         return None
-    try:
-        text = asr.transcribe_pcm16(pcm, sample_rate=cfg.sample_rate)  # type: ignore[attr-defined]
-    except Exception as e:
-        _log(f"WARNING: local ASR for commands failed: {e}")
-        return None
-    if text:
-        _log(f"  [local-asr] {text}")
-    return match_local_command(
-        text,
-        meeting_start=cfg.cmd_meeting_start,
-        meeting_stop=cfg.cmd_meeting_stop,
-        exit_dialog=cfg.cmd_exit,
-    )
+
+    def _asr_pcm(
+        self,
+        pcm: np.ndarray,
+        *,
+        mic: object,
+        segmenter: VadSegmenter,
+        for_wake: bool,
+    ) -> str:
+        sink: deque[np.ndarray] = deque(maxlen=_KEEPALIVE_SINK_MAX)
+        energy = min(self.wake_energy, 0.006) if for_wake else None
+
+        if self.cfg.wake_mode == "kws" and self.kws is not None and for_wake:
+            score = with_stream_keepalive(
+                mic, lambda: _kws_score(self.kws, pcm), sink=sink  # type: ignore[arg-type]
+            )
+            segmenter.feed_backlog(sink)
+            if score >= self.kws.threshold:
+                _log(f"  [kws] score={score:.3f} (thr={self.kws.threshold:.3f})")
+                self.kws.reset()
+                # Synthetic wake text so VoiceSession matches without ASR phrase.
+                phrase = (self.cfg.wake_phrases[0] if self.cfg.wake_phrases else "wake").strip()
+                return phrase or "wake"
+            return ""
+
+        if self.asr is None:
+            segmenter.feed_backlog(sink)
+            return ""
+
+        text = with_stream_keepalive(
+            mic,
+            lambda: _transcribe(
+                self.asr,
+                pcm,
+                sample_rate=self.cfg.sample_rate,
+                energy_threshold=energy,
+            ),
+            sink=sink,
+        )
+        segmenter.feed_backlog(sink)
+        return text
+
+    def run_talk_loop(self, mic: object) -> None:
+        """Drive one open capture stream until meeting starts or stream should reopen."""
+        self._last_sink = None
+        wake_max = max(2.0, float(self.cfg.wake_max_s))
+        wake_silence = max(0.25, float(self.cfg.wake_silence_end_s))
+        wake_min = max(0.2, float(self.cfg.wake_min_speech_s))
+        talk_min = float(self.cfg.min_speech_s)
+        if self.asr is not None:
+            talk_min = min(talk_min, 0.75)
+        talk_energy = (
+            self.wake_energy
+            if self.cfg.audio_listen_source == "loopback"
+            else effective_wake_energy(
+                self.cfg.energy_threshold, listen_source=self.cfg.audio_listen_source
+            )
+        )
+
+        # Idle uses wake VAD params; listen/dialog use talk params — switch energy
+        # via segmenter.energy_threshold per mode.
+        segmenter = _make_segmenter(
+            mic.read_block,
+            sample_rate=int(mic.sample_rate),
+            block=int(mic.block),
+            cfg=self.cfg,
+            energy_threshold=self.wake_energy,
+            max_s=wake_max,
+            silence_end_s=wake_silence,
+            min_speech_s=wake_min,
+        )
+        last_heartbeat = time.monotonic()
+
+        while True:
+            # Meeting session owns its own mic tap; leave the talk stream.
+            if self.session.mode is Mode.MEETING:
+                return
+
+            hot = self._poll_hotkeys()
+            if hot is not None:
+                # PTT: arm then capture while held.
+                if (
+                    self.ptt is not None
+                    and any(isinstance(e, Beep) for e in hot)
+                    and self.session.mode is Mode.LISTEN
+                    and self.ptt.is_down()
+                ):
+                    self._apply(hot, mic=mic)
+                    self._status("listening (PTT hold)…")
+                    pcm = _record_while_held(
+                        mic, self.ptt, max_s=self.cfg.utterance_max_s
+                    )
+                    if pcm is None:
+                        self._apply(self.session.on_event(Timeout()), mic=mic)
+                        continue
+                    self._pending_pcm = pcm
+                    text = self._asr_pcm(
+                        pcm, mic=mic, segmenter=segmenter, for_wake=False
+                    )
+                    if text:
+                        _log(f"  [local-asr] {text}")
+                    self._apply(
+                        self.session.on_event(Segment(text, source="ptt")),
+                        mic=mic,
+                    )
+                    self._feed_last_sink(segmenter)
+                    continue
+                self._apply(hot, mic=mic)
+                if self.session.mode is Mode.MEETING:
+                    return
+                continue
+
+            mode = self.session.mode
+            if mode is Mode.IDLE:
+                segmenter.configure(
+                    energy_threshold=self.wake_energy,
+                    max_s=wake_max,
+                    silence_end_s=wake_silence,
+                    min_speech_s=wake_min,
+                )
+                self._status("waiting for wake / PTT / meeting…")
+            else:
+                segmenter.configure(
+                    energy_threshold=talk_energy,
+                    max_s=float(self.cfg.utterance_max_s),
+                    silence_end_s=float(self.cfg.silence_end_s),
+                    min_speech_s=talk_min,
+                )
+                if mode is Mode.LISTEN:
+                    self._status(
+                        f"listening… ({self.cfg.talk_listen_timeout_s:.0f}s, "
+                        "no speech → idle)"
+                    )
+                elif mode is Mode.DIALOG:
+                    self._status(
+                        f"follow-up listening… ({self.cfg.talk_follow_up_s:.0f}s)"
+                    )
+
+            def _poll() -> None:
+                if self.meeting_hk is not None and self.meeting_hk.consume_edge_down():
+                    raise _HotkeyAbortError("meeting")
+                if self.ptt is not None and self.ptt.consume_edge_down():
+                    raise _HotkeyAbortError("ptt")
+
+            try:
+                pcm = segmenter.next_segment(self._deadline, poll=_poll)
+            except _HotkeyAbortError as abort:
+                effects = self.session.on_event(Hotkey(abort.kind))
+                if (
+                    abort.kind == "ptt"
+                    and self.ptt is not None
+                    and self.ptt.is_down()
+                ):
+                    self._apply(effects, mic=mic)
+                    self._status("listening (PTT hold)…")
+                    held = _record_while_held(
+                        mic, self.ptt, max_s=self.cfg.utterance_max_s
+                    )
+                    if held is None:
+                        self._apply(self.session.on_event(Timeout()), mic=mic)
+                        continue
+                    self._pending_pcm = held
+                    text = self._asr_pcm(
+                        held, mic=mic, segmenter=segmenter, for_wake=False
+                    )
+                    if text:
+                        _log(f"  [local-asr] {text}")
+                    self._apply(
+                        self.session.on_event(Segment(text, source="ptt")),
+                        mic=mic,
+                    )
+                    self._feed_last_sink(segmenter)
+                    continue
+                self._apply(effects, mic=mic)
+                if self.session.mode is Mode.MEETING:
+                    return
+                continue
+
+            now = time.monotonic()
+            if now - last_heartbeat >= _WAKE_DEBUG_HEARTBEAT_S:
+                _log_debug(f"still in {self.session.mode.value}…")
+                last_heartbeat = now
+
+            if pcm is None:
+                self._apply(self.session.on_event(Timeout()), mic=mic)
+                continue
+
+            for_wake = self.session.mode is Mode.IDLE
+            text = self._asr_pcm(pcm, mic=mic, segmenter=segmenter, for_wake=for_wake)
+            if text:
+                label = "wake-asr" if for_wake else "local-asr"
+                _log(f"  [{label}] {text}")
+            elif for_wake and self.cfg.wake_mode == "kws":
+                continue
+
+            self._pending_pcm = pcm
+            self._apply(self.session.on_event(Segment(text)), mic=mic)
+            self._feed_last_sink(segmenter)
+            if self.session.mode is Mode.MEETING:
+                return
+
+    def _feed_last_sink(self, segmenter: VadSegmenter) -> None:
+        sink = getattr(self, "_last_sink", None)
+        self._last_sink = None
+        if sink:
+            segmenter.feed_backlog(sink)
+
+    def run_meeting_loop(self) -> None:
+        """While recording: same VadSegmenter on mic tap for stop / wake / dialog."""
+        recorder = self._recorder
+        if recorder is None or not recorder.active:
+            self.session.mode = Mode.IDLE
+            return
+
+        tap = recorder.mic_tap_reader()
+        # Loopback-only meetings have no mic tap — poll hotkey only.
+        if self.cfg.meeting_capture == "loopback":
+            self._meeting_hotkey_only(recorder)
+            return
+
+        energy = effective_wake_energy(
+            self.cfg.wake_energy_threshold, listen_source="mic"
+        )
+        segmenter = _make_segmenter(
+            tap.read_block,
+            sample_rate=tap.sample_rate,
+            block=tap.block,
+            cfg=self.cfg,
+            energy_threshold=energy,
+            max_s=max(2.0, float(self.cfg.wake_max_s)),
+            silence_end_s=max(0.25, float(self.cfg.wake_silence_end_s)),
+            min_speech_s=max(0.2, float(self.cfg.wake_min_speech_s)),
+        )
+        last_print = 0.0
+        while self.session.mode is Mode.MEETING and recorder.active:
+            if self.meeting_hk is not None and self.meeting_hk.consume_edge_down():
+                self._apply(self.session.on_event(Hotkey("meeting")))
+                break
+            now = time.monotonic()
+            if now - last_print > 10.0:
+                hk = self.meeting_hk.hotkey_label if self.meeting_hk else "voice"
+                _log(f"meeting recording… (stop: {hk} / «стоп запись»)")
+                last_print = now
+
+            def _poll() -> None:
+                if self.meeting_hk is not None and self.meeting_hk.consume_edge_down():
+                    raise _HotkeyAbortError("meeting")
+                if not recorder.active:
+                    raise _HotkeyAbortError("meeting")
+
+            try:
+                pcm = segmenter.next_segment(self._deadline, poll=_poll)
+            except _HotkeyAbortError:
+                self._apply(self.session.on_event(Hotkey("meeting")))
+                break
+
+            if pcm is None:
+                self._apply(self.session.on_event(Timeout()))
+                continue
+            if frame_rms(pcm) < energy * 0.5:
+                continue
+
+            text = ""
+            if self.asr is not None:
+                try:
+                    text = _transcribe(self.asr, pcm, sample_rate=self.cfg.sample_rate)
+                except Exception:
+                    text = ""
+            if text:
+                _log(f"  [meeting-asr] {text}")
+            self._pending_pcm = pcm
+            self._apply(self.session.on_event(Segment(text)))
+            if self.session.mode is not Mode.MEETING:
+                break
+
+        if self._recorder is not None and self.session.mode is not Mode.MEETING:
+            # StopMeeting effect already handled upload.
+            pass
+
+    def _meeting_hotkey_only(self, recorder: MeetingRecorder) -> None:
+        last_print = 0.0
+        while self.session.mode is Mode.MEETING and recorder.active:
+            if self.meeting_hk is not None and self.meeting_hk.consume_edge_down():
+                self._apply(self.session.on_event(Hotkey("meeting")))
+                break
+            now = time.monotonic()
+            if now - last_print > 10.0:
+                hk = self.meeting_hk.hotkey_label if self.meeting_hk else "hotkey"
+                _log(f"meeting recording… (stop: {hk})")
+                last_print = now
+            time.sleep(0.05)
+
+
+class _HotkeyAbortError(Exception):
+    def __init__(self, kind: str) -> None:
+        super().__init__(kind)
+        self.kind = kind
 
 
 def run_test_loopback(config: VoiceClientConfig | None = None, *, duration_s: float = 3.0) -> int:
@@ -682,8 +869,12 @@ def run_loop(config: VoiceClientConfig | None = None) -> int:
     if cfg.talk_follow_up_s > 0:
         _log(
             f"dialog follow-up: {cfg.talk_follow_up_s:.0f}s "
-            f"(beep={'on' if cfg.talk_follow_up_beep else 'off'})"
+            f"(beeps={'on' if cfg.talk_beeps else 'off'})"
         )
+    _log(
+        f"listen_timeout: {cfg.talk_listen_timeout_s:.0f}s, "
+        f"beeps={'on' if cfg.talk_beeps else 'off'}"
+    )
     if cfg.meeting_enabled:
         _log(f"meeting: capture={cfg.meeting_capture}, hotkey={cfg.meeting_hotkey}")
 
@@ -738,6 +929,17 @@ def run_loop(config: VoiceClientConfig | None = None) -> int:
             _log(f"ERROR: не удалось загрузить sherpa-onnx: {e}")
             return 3
 
+    # Local commands during talk/meeting need sherpa even when wake_mode=kws.
+    if asr is None and cfg.wake_mode == "kws":
+        try:
+            from krabobot_voice.local_asr import LocalWakeAsr, resolve_stt_model_dir
+
+            model_dir = resolve_stt_model_dir(cfg.stt_model_dir)
+            asr = LocalWakeAsr(model_dir, num_threads=cfg.stt_num_threads)
+            _log(f"command ASR model: {model_dir.name}")
+        except Exception:
+            asr = None
+
     http = VoiceHttpClient(cfg)
     ptt: PttHotkey | None = None
     if cfg.ptt_enabled:
@@ -783,25 +985,35 @@ def run_loop(config: VoiceClientConfig | None = None) -> int:
         hints.append(f"или meeting {meeting_hk.hotkey_label}")
     _log("Готов. " + " ".join(hints) + ". Ctrl+C — выход.")
 
+    session = VoiceSession(_session_config(cfg))
+    driver = _Driver(
+        cfg,
+        http,
+        session,
+        asr=asr,
+        kws=kws,
+        ptt=ptt,
+        meeting_hk=meeting_hk,
+        wake_energy=wake_energy,
+    )
     talk_enabled = cfg.wake_mode != "off" or ptt is not None
 
     try:
         while True:
-            # Meeting can run without holding the wake MicStream (frees device for mix).
+            if session.mode is Mode.MEETING:
+                if driver._recorder is None:
+                    driver._start_meeting()
+                driver.run_meeting_loop()
+                continue
+
             if meeting_hk is not None and meeting_hk.consume_edge_down():
-                _run_meeting_session(cfg, http, meeting_hk, asr=asr)
-                if kws is not None:
-                    kws.reset()
+                driver._apply(session.on_event(Hotkey("meeting")))
                 continue
 
             if not talk_enabled:
-                # Meeting-only: poll hotkey without opening the mic.
                 time.sleep(0.05)
                 continue
 
-            start_meeting = False
-            follow_up = False
-            # Shared capture for wake + Talk/PTT/follow-up (mic default; loopback for wake tests).
             with open_capture_stream(
                 cfg.audio_listen_source,
                 sample_rate=cfg.sample_rate,
@@ -809,205 +1021,7 @@ def run_loop(config: VoiceClientConfig | None = None) -> int:
                 loopback_device=cfg.meeting_loopback_device or None,
                 output_device=cfg.audio_output_device or None,
             ) as mic:
-                while True:
-                    if meeting_hk is not None and meeting_hk.consume_edge_down():
-                        start_meeting = True
-                        break
-
-                    trigger: Trigger | None = None
-                    wake_detail = ""
-                    wake_command = ""
-                    if follow_up:
-                        plan = plan_after_turn(
-                            turn_ok=True,
-                            follow_up_s=cfg.talk_follow_up_s,
-                            follow_up_beep=cfg.talk_follow_up_beep,
-                            settle_s=cfg.settle_s,
-                            default_no_speech_s=cfg.no_speech_timeout_s,
-                        )
-                        _log(
-                            f"follow-up listening… ({plan.no_speech_timeout_s:.0f}s)"
-                        )
-                    else:
-                        _log("waiting for wake / PTT / meeting…")
-                        wake_kwargs = dict(
-                            energy_threshold=wake_energy,
-                            silence_end_s=max(0.25, float(cfg.wake_silence_end_s)),
-                            max_s=max(2.0, float(cfg.wake_max_s)),
-                            min_speech_s=max(0.2, float(cfg.wake_min_speech_s)),
-                            speech_start_s=cfg.speech_start_s,
-                            preroll_s=cfg.preroll_s,
-                            ptt=ptt,
-                            meeting=meeting_hk,
-                        )
-                        if cfg.wake_mode == "asr" and asr is not None:
-                            trigger, detail = _wait_for_wake_asr(
-                                mic,
-                                asr,
-                                phrases=cfg.wake_phrases,
-                                greetings=cfg.wake_greetings,
-                                listen_source=cfg.audio_listen_source,
-                                **wake_kwargs,
-                            )
-                            if trigger is Trigger.MEETING:
-                                start_meeting = True
-                                break
-                            if trigger is Trigger.WAKE:
-                                wake_detail = detail
-                                _log(f"wake: {detail}")
-                                wake_command = command_after_wake(
-                                    detail,
-                                    phrases=cfg.wake_phrases,
-                                    greetings=cfg.wake_greetings,
-                                )
-                        elif cfg.wake_mode == "kws" and kws is not None:
-                            trigger, detail = _wait_for_wake_kws(
-                                mic,
-                                kws,
-                                **wake_kwargs,
-                            )
-                            if trigger is Trigger.MEETING:
-                                start_meeting = True
-                                break
-                            if trigger is Trigger.WAKE:
-                                wake_detail = detail
-                                _log(f"wake: {detail}")
-                        else:
-                            trigger = _wait_for_ptt_or_meeting(
-                                mic, ptt=ptt, meeting=meeting_hk
-                            )
-                            if trigger is Trigger.MEETING:
-                                start_meeting = True
-                                break
-                        plan = plan_initial_listen(
-                            no_speech_timeout_s=cfg.no_speech_timeout_s,
-                            settle_s=cfg.settle_s,
-                            listen_source=cfg.audio_listen_source,
-                        )
-
-                    # Same-utterance command after wake phrase → skip second listen.
-                    if (
-                        not follow_up
-                        and trigger is Trigger.WAKE
-                        and wake_command.strip()
-                    ):
-                        _log(f"wake command: {wake_command}")
-                        cmd = match_local_command(
-                            wake_command,
-                            meeting_start=cfg.cmd_meeting_start,
-                            meeting_stop=cfg.cmd_meeting_stop,
-                            exit_dialog=cfg.cmd_exit,
-                        )
-                        if cmd is not None:
-                            start_meeting, follow_up = _apply_local_command(
-                                cfg, cmd, kws=kws
-                            )
-                            if start_meeting:
-                                break
-                            continue
-                        turn_ok = _handle_text_turn(cfg, http, wake_command)
-                        next_plan = plan_after_turn(
-                            turn_ok=turn_ok,
-                            follow_up_s=cfg.talk_follow_up_s,
-                            follow_up_beep=cfg.talk_follow_up_beep,
-                            settle_s=cfg.settle_s,
-                            default_no_speech_s=cfg.no_speech_timeout_s,
-                        )
-                        follow_up = next_plan.phase is TalkPhase.FOLLOW_UP
-                        if kws is not None:
-                            kws.reset()
-                        continue
-
-                    if plan.play_beep:
-                        play_beep(freq=1000, duration_ms=150)
-
-                    if (
-                        not follow_up
-                        and trigger is Trigger.PTT
-                        and ptt is not None
-                    ):
-                        _log("listening (PTT hold)…")
-                        pcm = _record_while_held(
-                            mic,
-                            ptt,
-                            max_s=cfg.utterance_max_s,
-                            settle_s=plan.settle_s,
-                        )
-                    else:
-                        if not follow_up:
-                            _log(
-                                f"listening… ({plan.no_speech_timeout_s:.0f}s, "
-                                "no speech → idle)"
-                            )
-                            if trigger is Trigger.WAKE and wake_detail:
-                                _log(
-                                    "  (wake phrase only — waiting for next utterance)"
-                                )
-                        # Slightly lower floor when local commands are available
-                        # so short exits («хватит») still pass VAD.
-                        min_speech = cfg.min_speech_s
-                        if asr is not None:
-                            min_speech = min(cfg.min_speech_s, 0.75)
-                        # Loopback: reuse wake energy gate — talk.energy_threshold is
-                        # tuned for close mics and misses quieter system audio.
-                        if cfg.audio_listen_source == "loopback":
-                            talk_energy = wake_energy
-                        else:
-                            talk_energy = effective_wake_energy(
-                                cfg.energy_threshold,
-                                listen_source=cfg.audio_listen_source,
-                            )
-                        pcm = record_utterance(
-                            mic.read_block,
-                            sample_rate=mic.sample_rate,
-                            block=mic.block,
-                            max_s=cfg.utterance_max_s,
-                            silence_end_s=cfg.silence_end_s,
-                            speech_start_s=cfg.speech_start_s,
-                            min_speech_s=min_speech,
-                            energy_threshold=talk_energy,
-                            settle_s=plan.settle_s,
-                            preroll_s=cfg.preroll_s,
-                            no_speech_timeout_s=plan.no_speech_timeout_s,
-                        )
-
-                    if pcm is None:
-                        phase = plan_after_no_speech(was_follow_up=follow_up)
-                        if follow_up:
-                            _log("follow-up timeout — back to wake")
-                        else:
-                            _log("no speech — back to idle")
-                        follow_up = phase is TalkPhase.FOLLOW_UP
-                        if kws is not None:
-                            kws.reset()
-                        continue
-
-                    # Local commands (sherpa) before any server upload.
-                    cmd = _resolve_local_command(cfg, asr, pcm)
-                    if cmd is not None:
-                        start_meeting, follow_up = _apply_local_command(
-                            cfg, cmd, kws=kws
-                        )
-                        if start_meeting:
-                            break
-                        continue
-
-                    turn_ok = _handle_turn(cfg, http, pcm)
-                    next_plan = plan_after_turn(
-                        turn_ok=turn_ok,
-                        follow_up_s=cfg.talk_follow_up_s,
-                        follow_up_beep=cfg.talk_follow_up_beep,
-                        settle_s=cfg.settle_s,
-                        default_no_speech_s=cfg.no_speech_timeout_s,
-                    )
-                    follow_up = next_plan.phase is TalkPhase.FOLLOW_UP
-                    if kws is not None:
-                        kws.reset()
-
-            if start_meeting:
-                _run_meeting_session(cfg, http, meeting_hk, asr=asr)
-                if kws is not None:
-                    kws.reset()
+                driver.run_talk_loop(mic)
     except KeyboardInterrupt:
         _log("stopped.")
         return 0
@@ -1015,6 +1029,11 @@ def run_loop(config: VoiceClientConfig | None = None) -> int:
         _log(f"ERROR: {e}")
         return 4
     finally:
+        if driver._recorder is not None:
+            try:
+                driver._recorder.stop()
+            except Exception:
+                pass
         if ptt is not None:
             ptt.stop()
         if meeting_hk is not None:

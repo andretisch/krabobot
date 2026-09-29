@@ -25,6 +25,7 @@ from krabobot.agent.tools.message import MessageTool
 from krabobot.agent.tools.registry import ToolRegistry
 from krabobot.agent.tools.shell import ExecTool
 from krabobot.agent.tools.spawn import SpawnTool
+from krabobot.agent.tools.voice import VoiceClientActionTool
 from krabobot.agent.tools.web import WebFetchTool, WebSearchTool
 from krabobot.bus.events import InboundMessage, OutboundMessage
 from krabobot.bus.queue import MessageBus
@@ -335,6 +336,7 @@ class AgentLoop:
             MessageTool(send_callback=self._send_tool_message, user_resolver=self.user_resolver)
         )
         runtime.tools.register(SpawnTool(manager=runtime.subagents))
+        runtime.tools.register(VoiceClientActionTool())
         if self.cron_service:
             runtime.tools.register(
                 CronTool(self.cron_service, default_timezone=runtime.context.timezone or "UTC")
@@ -454,7 +456,7 @@ class AgentLoop:
     ) -> None:
         """Update context for all tools that need routing info."""
         sid = sender_id or ""
-        for name in ("message", "spawn", "cron", "exec"):
+        for name in ("message", "spawn", "cron", "exec", "voice"):
             if tool := runtime.tools.get(name):
                 if hasattr(tool, "set_context"):
                     if name in ("spawn", "exec"):

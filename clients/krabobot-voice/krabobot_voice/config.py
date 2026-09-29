@@ -145,6 +145,23 @@ def _resolve_wake_greetings(
     return derived if derived else list(default)
 
 
+def _resolve_listen_timeout(
+    talk: dict[str, Any],
+    data: dict[str, Any],
+    default: float,
+) -> float:
+    """``talk.listen_timeout_s``, else explicit ``no_speech_timeout_s``, else default."""
+    if "listen_timeout_s" in talk and talk["listen_timeout_s"] not in (None, ""):
+        return float(talk["listen_timeout_s"])
+    if "talk_listen_timeout_s" in data and data["talk_listen_timeout_s"] not in (None, ""):
+        return float(data["talk_listen_timeout_s"])
+    if "no_speech_timeout_s" in talk and talk["no_speech_timeout_s"] not in (None, ""):
+        return float(talk["no_speech_timeout_s"])
+    if "no_speech_timeout_s" in data and data["no_speech_timeout_s"] not in (None, ""):
+        return float(data["no_speech_timeout_s"])
+    return float(default)
+
+
 @dataclass
 class VoiceClientConfig:
     """HTTP + local wake/listen / PTT settings."""
@@ -197,8 +214,10 @@ class VoiceClientConfig:
     no_speech_timeout_s: float = 5.0
     energy_threshold: float = 0.008
     # Dialog mode: after successful Talk turn, listen again without wake
-    talk_follow_up_s: float = 8.0  # 0 = disabled; typical 6–10
-    talk_follow_up_beep: bool = False  # prefer silent follow-up
+    talk_listen_timeout_s: float = 10.0  # post-wake window; falls back from no_speech_timeout_s
+    talk_follow_up_s: float = 10.0  # 0 = disabled; typical 6–10
+    talk_follow_up_beep: bool = False  # legacy; prefer talk.beeps
+    talk_beeps: bool = True  # 2 beeps on wake, 1 beep on return to idle
     # Local voice commands (sherpa ASR on utterance before server upload)
     cmd_meeting_start: list[str] = field(
         default_factory=lambda: [
@@ -477,6 +496,9 @@ class VoiceClientConfig:
                 pick("no_speech_timeout_s", default=cfg.no_speech_timeout_s)
             ),
             energy_threshold=float(pick("energy_threshold", default=cfg.energy_threshold)),
+            talk_listen_timeout_s=_resolve_listen_timeout(
+                talk, data, cfg.talk_listen_timeout_s
+            ),
             talk_follow_up_s=float(
                 pick_nested(talk, "follow_up_s", "talk_follow_up_s", cfg.talk_follow_up_s)
             ),
@@ -488,6 +510,10 @@ class VoiceClientConfig:
                     cfg.talk_follow_up_beep,
                 ),
                 cfg.talk_follow_up_beep,
+            ),
+            talk_beeps=_as_bool(
+                pick_nested(talk, "beeps", "talk_beeps", cfg.talk_beeps),
+                cfg.talk_beeps,
             ),
             cmd_meeting_start=_as_str_list(
                 pick_nested(

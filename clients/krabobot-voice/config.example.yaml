@@ -50,10 +50,12 @@ ptt:
 # Dialog mode + local voice commands (Talk only; Meeting hotkey still works)
 # After a successful reply, listen again without wake for follow_up_s seconds.
 # Each utterance is first decoded by local sherpa; matched commands stay local
-# (no POST /v1/voice/turn).
+# (no POST /v1/voice/turn). Cues: 2 beeps on wake, 1 beep on return to idle.
 talk:
-  follow_up_s: 8.0       # 0 = disable; typical 6–10
-  follow_up_beep: false  # true = soft beep on follow-up (default: silent)
+  listen_timeout_s: 10.0  # post-wake window (fallback: no_speech_timeout_s)
+  follow_up_s: 10.0       # 0 = disable; silence → 1 beep → idle
+  beeps: true             # 2 beeps on wake / wake+command; 1 beep on idle return
+  follow_up_beep: false   # legacy (unused when beeps handles cues)
   meeting_start:
     - начать совещание
     - начать запись
@@ -109,6 +111,7 @@ meeting:
 # After beep: discard settle_s (flush mic buffer), then require min_speech_s
 # before VAD may end on silence — avoids posting near-empty clips to STT.
 # Client also peak/RMS-normalizes + trims before POST /v1/voice/turn.
+# no_speech_timeout_s is legacy fallback for talk.listen_timeout_s.
 utterance_max_s: 15.0
 settle_s: 0.35
 preroll_s: 0.4

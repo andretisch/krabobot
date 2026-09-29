@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import queue
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -41,6 +43,32 @@ class MeetingSessionResult:
     frames: int = 0
 
 
+class _MicTapReader:
+    """Block source backed by MeetingRecorder mic-tap queue (VadSegmenter-compatible)."""
+
+    def __init__(
+        self,
+        q: queue.Queue[np.ndarray],
+        *,
+        sample_rate: int,
+        block: int,
+        active: Callable[[], bool],
+    ) -> None:
+        self.sample_rate = int(sample_rate)
+        self.block = max(1, int(block))
+        self._q = q
+        self._active = active
+
+    def read_block(self) -> np.ndarray:
+        while True:
+            try:
+                return self._q.get(timeout=0.35)
+            except queue.Empty:
+                if not self._active():
+                    return np.zeros(self.block, dtype=np.int16)
+                return np.zeros(self.block, dtype=np.int16)
+
+
 class MeetingRecorder:
     """Background meeting capture; toggle start/stop from the main loop."""
 
@@ -68,6 +96,7 @@ class MeetingRecorder:
         self._mic_ring: deque[np.ndarray] = deque()
         self._mic_samples = 0
         self._mic_ring_max = max(1, int(self.cfg.sample_rate * 3.0))
+        self._mic_tap_q: queue.Queue[np.ndarray] = queue.Queue(maxsize=200)
 
     @property
     def active(self) -> bool:
@@ -87,6 +116,11 @@ class MeetingRecorder:
             self._error = ""
             self._mic_ring.clear()
             self._mic_samples = 0
+            while True:
+                try:
+                    self._mic_tap_q.get_nowait()
+                except queue.Empty:
+                    break
             self._started_at = time.monotonic()
             self._active = True
             self._thread = threading.Thread(
@@ -128,6 +162,16 @@ class MeetingRecorder:
             frames=int(pcm.size),
         )
 
+    def mic_tap_reader(self) -> _MicTapReader:
+        """Adapter: blocking int16 mono blocks from the mic tap (for VadSegmenter)."""
+        block = max(1, int(self.cfg.sample_rate * self.cfg.block_ms / 1000))
+        return _MicTapReader(
+            self._mic_tap_q,
+            sample_rate=self.cfg.sample_rate,
+            block=block,
+            active=lambda: self.active,
+        )
+
     def _run(self) -> None:  # noqa: C901 — capture modes are intentionally explicit
         try:
             if self.cfg.capture == "mic":
@@ -148,7 +192,7 @@ class MeetingRecorder:
             self._chunks.append(np.asarray(pcm, dtype=np.int16).reshape(-1))
 
     def _append_mic_tap(self, pcm: np.ndarray) -> None:
-        """Keep a short mic-only window for local stop-command ASR."""
+        """Keep a short mic-only window + live queue for VadSegmenter."""
         arr = np.asarray(pcm, dtype=np.int16).reshape(-1)
         with self._lock:
             self._mic_ring.append(arr)
@@ -156,6 +200,17 @@ class MeetingRecorder:
             while self._mic_samples > self._mic_ring_max and self._mic_ring:
                 dropped = self._mic_ring.popleft()
                 self._mic_samples -= int(dropped.size)
+        try:
+            self._mic_tap_q.put_nowait(arr.copy())
+        except queue.Full:
+            try:
+                self._mic_tap_q.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._mic_tap_q.put_nowait(arr.copy())
+            except queue.Full:
+                pass
 
     def recent_mic_pcm(self, seconds: float = 2.5) -> np.ndarray | None:
         """Copy the latest mic tap window (None if empty / loopback-only)."""

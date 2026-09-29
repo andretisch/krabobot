@@ -15,7 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from krabobot_voice.app import Trigger, _wait_for_wake_asr  # noqa: E402
+from krabobot_voice.dialog import Beep, Mode, Segment, VoiceSession, VoiceSessionConfig  # noqa: E402
+from krabobot_voice.segmenter import VadSegmenter  # noqa: E402
 from krabobot_voice.wake import matches_wake_phrase  # noqa: E402
 
 
@@ -64,23 +65,38 @@ def main() -> int:
 
     mic = _FakeMic()
     asr = _FakeAsr("Привет, Арнольд.")
-    trigger, detail = _wait_for_wake_asr(
-        mic,  # type: ignore[arg-type]
-        asr,
+    seg = VadSegmenter(
+        mic.read_block,
+        sample_rate=mic.sample_rate,
+        block=mic.block,
         energy_threshold=0.012,
         silence_end_s=0.4,
         max_s=4.0,
         min_speech_s=0.35,
         speech_start_s=0.15,
         preroll_s=0.2,
-        ptt=None,
-        meeting=None,
     )
-    print(f"\nFake PCM + mock ASR: trigger={trigger.value!r} detail={detail!r} asr_calls={asr.calls}")
-    if trigger is not Trigger.WAKE or asr.calls != 1:
-        print("FAIL: expected single WAKE transition")
+    session = VoiceSession(
+        VoiceSessionConfig(
+            wake_phrases=["Эй, Арнольд", "привет арнольд"],
+            wake_greetings=["эй", "привет", "hey"],
+        )
+    )
+    pcm = seg.next_segment(None)
+    assert pcm is not None
+    text = asr.transcribe_pcm16(pcm, sample_rate=mic.sample_rate)
+    effects = session.on_event(Segment(text))
+    print(
+        f"\nFake PCM + mock ASR: mode={session.mode.value!r} "
+        f"detail={text!r} asr_calls={asr.calls} effects={effects!r}"
+    )
+    if session.mode is not Mode.LISTEN or asr.calls != 1:
+        print("FAIL: expected LISTEN after single wake segment")
         return 1
-    print("OK: VAD segment -> ASR once -> wake")
+    if not any(isinstance(e, Beep) and e.count == 2 for e in effects):
+        print("FAIL: expected Beep(2)")
+        return 1
+    print("OK: VAD segment -> ASR once -> wake (2 beeps, LISTEN)")
     return 0
 
 
