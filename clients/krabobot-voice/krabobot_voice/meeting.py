@@ -1,13 +1,18 @@
-"""Meeting recording: start/stop thread, capture mic/loopback/mix, upload helper."""
+"""Meeting recording: subprocess capture, local WAV persist, mic-tap for stop ASR."""
 
 from __future__ import annotations
 
+import multiprocessing as mp
+import os
 import queue
 import threading
 import time
-from collections import deque
+import wave
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Protocol
 
 import numpy as np
 
@@ -15,9 +20,26 @@ from krabobot_voice.audio_io import (
     LoopbackStream,
     MicStream,
     mix_pcm16_average,
-    pcm16_to_wav_bytes,
     require_sounddevice,
 )
+
+
+def default_meetings_dir() -> Path:
+    """``%LOCALAPPDATA%/krabobot-voice/meetings`` (or ``~/…`` fallback)."""
+    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    return Path(base) / "krabobot-voice" / "meetings"
+
+
+def new_meeting_wav_path(save_dir: str | Path | None = None) -> Path:
+    """Return ``<save_dir>/YYYYMMDD-HHMMSS.wav`` (dir created)."""
+    root = Path(save_dir) if save_dir else default_meetings_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    path = root / f"{stamp}.wav"
+    # Avoid clobbering if started twice in the same second.
+    if path.exists():
+        path = root / f"{stamp}-{os.getpid()}.wav"
+    return path
 
 
 @dataclass
@@ -35,12 +57,17 @@ class MeetingCaptureConfig:
 
 @dataclass
 class MeetingSessionResult:
-    """Stopped meeting payload ready for upload."""
+    """Stopped meeting payload ready for upload / local archive."""
 
-    wav_bytes: bytes
+    wav_path: Path
     duration_s: float
     capture: str
     frames: int = 0
+    wav_bytes: bytes = b""  # optional in-memory copy (tests / legacy)
+
+
+class _StopFlag(Protocol):
+    def is_set(self) -> bool: ...
 
 
 class _MicTapReader:
@@ -48,7 +75,7 @@ class _MicTapReader:
 
     def __init__(
         self,
-        q: queue.Queue[np.ndarray],
+        q: Any,
         *,
         sample_rate: int,
         block: int,
@@ -69,10 +96,157 @@ class _MicTapReader:
                 return np.zeros(self.block, dtype=np.int16)
 
 
-class MeetingRecorder:
-    """Background meeting capture; toggle start/stop from the main loop."""
+def run_meeting_capture(
+    cfg: MeetingCaptureConfig,
+    wav_path: str | Path,
+    *,
+    stop: _StopFlag,
+    mic_tap_queue: Any | None = None,
+    on_progress: Callable[[int, float], None] | None = None,
+) -> dict[str, Any]:
+    """Record until ``stop.is_set()`` or ``max_s``; write mono PCM16 WAV to ``wav_path``.
 
-    def __init__(self, cfg: MeetingCaptureConfig) -> None:
+    Returns a dict with frames / duration_s / capture / error (empty if ok).
+    Mic tap blocks (for parent stop-phrase ASR) are pushed to ``mic_tap_queue`` when set.
+    """
+    mode = (cfg.capture or "mix").strip().lower()
+    if mode not in {"mic", "loopback", "mix"}:
+        mode = "mix"
+    sample_rate = int(cfg.sample_rate)
+    out = Path(wav_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    frames = 0
+    started = time.monotonic()
+    error = ""
+
+    def budget_ok() -> bool:
+        if cfg.max_s <= 0:
+            return True
+        return (time.monotonic() - started) < float(cfg.max_s)
+
+    def push_mic(pcm: np.ndarray) -> None:
+        if mic_tap_queue is None:
+            return
+        arr = np.asarray(pcm, dtype=np.int16).reshape(-1).copy()
+        try:
+            mic_tap_queue.put_nowait(arr)
+        except Exception:
+            try:
+                mic_tap_queue.get_nowait()
+            except Exception:
+                pass
+            try:
+                mic_tap_queue.put_nowait(arr)
+            except Exception:
+                pass
+
+    def write_pcm(wf: wave.Wave_write, pcm: np.ndarray) -> None:
+        nonlocal frames
+        arr = np.asarray(pcm, dtype=np.int16).reshape(-1)
+        if arr.size == 0:
+            return
+        wf.writeframes(arr.tobytes())
+        frames += int(arr.size)
+        if on_progress is not None and frames % (sample_rate * 5) < arr.size:
+            on_progress(frames, time.monotonic() - started)
+
+    try:
+        with wave.open(str(out), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sample_rate)
+            if mode == "mic":
+                require_sounddevice()
+                with MicStream(
+                    sample_rate=sample_rate,
+                    block_ms=cfg.block_ms,
+                    device=cfg.input_device or None,
+                ) as mic:
+                    while not stop.is_set() and budget_ok():
+                        chunk = mic.read_block()
+                        write_pcm(wf, chunk)
+                        push_mic(chunk)
+            elif mode == "loopback":
+                with LoopbackStream(
+                    sample_rate=sample_rate,
+                    block_ms=cfg.block_ms,
+                    device=cfg.loopback_device or None,
+                    output_device=cfg.output_device or None,
+                ) as lb:
+                    while not stop.is_set() and budget_ok():
+                        write_pcm(wf, lb.read_block())
+            else:
+                require_sounddevice()
+                with (
+                    MicStream(
+                        sample_rate=sample_rate,
+                        block_ms=cfg.block_ms,
+                        device=cfg.input_device or None,
+                    ) as mic,
+                    LoopbackStream(
+                        sample_rate=sample_rate,
+                        block_ms=cfg.block_ms,
+                        device=cfg.loopback_device or None,
+                        output_device=cfg.output_device or None,
+                    ) as lb,
+                ):
+                    while not stop.is_set() and budget_ok():
+                        a = mic.read_block()
+                        b = lb.read_block()
+                        write_pcm(wf, mix_pcm16_average(a, b))
+                        push_mic(a)
+    except Exception as e:  # pragma: no cover - device failures
+        error = str(e)
+
+    duration = max(0.0, time.monotonic() - started)
+    if not error and frames <= 0:
+        error = "Meeting recording is empty"
+    return {
+        "frames": frames,
+        "duration_s": duration,
+        "capture": mode,
+        "error": error,
+        "wav_path": str(out),
+    }
+
+
+def _process_main(
+    cfg_dict: dict[str, Any],
+    wav_path: str,
+    stop_event: Any,
+    mic_q: Any,
+    result_q: Any,
+) -> None:
+    """multiprocessing entry: must stay top-level for Windows spawn."""
+    cfg = MeetingCaptureConfig(**cfg_dict)
+    result = run_meeting_capture(
+        cfg,
+        wav_path,
+        stop=stop_event,
+        mic_tap_queue=mic_q,
+    )
+    try:
+        result_q.put(result)
+    except Exception:
+        pass
+
+
+class MeetingRecorder:
+    """Meeting capture in a child process; parent keeps mic-tap for stop ASR.
+
+    Note (Windows): the worker owns mix/mic+loopback devices. Wake on the main
+    capture stream may be unavailable while recording; stop via hotkey or the
+    mic-tap side channel from this recorder.
+    """
+
+    def __init__(
+        self,
+        cfg: MeetingCaptureConfig,
+        *,
+        save_dir: str | Path | None = None,
+        use_process: bool = True,
+    ) -> None:
         mode = (cfg.capture or "mix").strip().lower()
         if mode not in {"mic", "loopback", "mix"}:
             mode = "mix"
@@ -85,189 +259,196 @@ class MeetingRecorder:
             loopback_device=str(cfg.loopback_device or ""),
             max_s=float(cfg.max_s),
         )
+        self.save_dir = Path(save_dir) if save_dir else default_meetings_dir()
+        self.use_process = bool(use_process)
         self._lock = threading.Lock()
-        self._stop = threading.Event()
+        self._stop_event: Any | None = None
+        self._mic_q: Any | None = None
+        self._result_q: Any | None = None
+        self._proc: mp.Process | None = None
         self._thread: threading.Thread | None = None
-        self._chunks: list[np.ndarray] = []
+        self._wav_path: Path | None = None
         self._error: str = ""
         self._started_at = 0.0
         self._active = False
-        # Mic-only ring for local stop-phrase ASR while recording (mic / mix).
-        self._mic_ring: deque[np.ndarray] = deque()
-        self._mic_samples = 0
-        self._mic_ring_max = max(1, int(self.cfg.sample_rate * 3.0))
-        self._mic_tap_q: queue.Queue[np.ndarray] = queue.Queue(maxsize=200)
+        self._result: dict[str, Any] | None = None
 
     @property
     def active(self) -> bool:
         with self._lock:
+            if not self._active:
+                return False
+            if self._proc is not None:
+                return self._proc.is_alive()
+            if self._thread is not None:
+                return self._thread.is_alive()
             return self._active
 
     @property
     def capture_mode(self) -> str:
         return self.cfg.capture
 
-    def start(self) -> None:
+    @property
+    def wav_path(self) -> Path | None:
+        return self._wav_path
+
+    def start(self) -> Path:
         with self._lock:
             if self._active:
                 raise RuntimeError("Meeting already recording")
-            self._stop.clear()
-            self._chunks = []
+            wav_path = new_meeting_wav_path(self.save_dir)
+            self._wav_path = wav_path
             self._error = ""
-            self._mic_ring.clear()
-            self._mic_samples = 0
-            while True:
-                try:
-                    self._mic_tap_q.get_nowait()
-                except queue.Empty:
-                    break
+            self._result = None
             self._started_at = time.monotonic()
             self._active = True
-            self._thread = threading.Thread(
-                target=self._run,
-                name="meeting-capture",
-                daemon=True,
-            )
-            self._thread.start()
+
+            if self.use_process:
+                ctx = mp.get_context("spawn")
+                self._stop_event = ctx.Event()
+                self._mic_q = ctx.Queue(maxsize=200)
+                self._result_q = ctx.Queue(maxsize=1)
+                self._proc = ctx.Process(
+                    target=_process_main,
+                    args=(
+                        asdict(self.cfg),
+                        str(wav_path),
+                        self._stop_event,
+                        self._mic_q,
+                        self._result_q,
+                    ),
+                    name="meeting-capture",
+                    daemon=True,
+                )
+                self._proc.start()
+            else:
+                self._stop_event = threading.Event()
+                self._mic_q = queue.Queue(maxsize=200)
+                self._thread = threading.Thread(
+                    target=self._run_thread,
+                    name="meeting-capture",
+                    daemon=True,
+                )
+                self._thread.start()
+            return wav_path
 
     def stop(self) -> MeetingSessionResult:
         with self._lock:
-            if not self._active and self._thread is None:
+            if not self._active and self._proc is None and self._thread is None:
                 raise RuntimeError("Meeting is not recording")
-        self._stop.set()
-        thread = self._thread
+            wav_path = self._wav_path
+            stop_event = self._stop_event
+            proc = self._proc
+            thread = self._thread
+            result_q = self._result_q
+        if stop_event is not None:
+            stop_event.set()
+        if proc is not None:
+            proc.join(timeout=30.0)
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=5.0)
         if thread is not None:
             thread.join(timeout=30.0)
+
+        result = self._result
+        if result is None and result_q is not None:
+            try:
+                result = result_q.get(timeout=2.0)
+            except Exception:
+                result = None
+        if result is None:
+            result = {}
+
         with self._lock:
-            err = self._error
-            chunks = list(self._chunks)
-            started = self._started_at
-            capture = self.cfg.capture
+            err = str(result.get("error") or self._error or "")
+            capture = str(result.get("capture") or self.cfg.capture)
+            frames = int(result.get("frames") or 0)
+            duration = float(result.get("duration_s") or 0.0)
+            if duration <= 0 and self._started_at:
+                duration = max(0.0, time.monotonic() - self._started_at)
+            path = Path(str(result.get("wav_path") or wav_path or ""))
+            self._proc = None
             self._thread = None
             self._active = False
-            self._chunks = []
+            self._stop_event = None
+            self._mic_q = None
+            self._result_q = None
+            self._result = None
+
         if err:
             raise RuntimeError(err)
-        if not chunks:
+        if wav_path is None or not path.is_file():
             raise RuntimeError("Meeting recording is empty")
-        pcm = np.concatenate(chunks)
-        duration = max(0.0, time.monotonic() - started) if started else (
-            pcm.size / float(self.cfg.sample_rate)
-        )
-        wav = pcm16_to_wav_bytes(pcm, sample_rate=self.cfg.sample_rate)
+        if frames <= 0:
+            # File exists but no frames reported — still allow if non-trivial size.
+            try:
+                if path.stat().st_size < 64:
+                    raise RuntimeError("Meeting recording is empty")
+            except OSError as e:
+                raise RuntimeError("Meeting recording is empty") from e
+
+        wav_bytes = b""
+        try:
+            # Small recordings only; long meetings stay on disk.
+            if path.stat().st_size <= 2_000_000:
+                wav_bytes = path.read_bytes()
+        except OSError:
+            wav_bytes = b""
+
         return MeetingSessionResult(
-            wav_bytes=wav,
+            wav_path=path,
+            wav_bytes=wav_bytes,
             duration_s=duration,
             capture=capture,
-            frames=int(pcm.size),
+            frames=frames,
         )
 
     def mic_tap_reader(self) -> _MicTapReader:
         """Adapter: blocking int16 mono blocks from the mic tap (for VadSegmenter)."""
         block = max(1, int(self.cfg.sample_rate * self.cfg.block_ms / 1000))
+        q = self._mic_q
+        if q is None:
+            q = queue.Queue()
         return _MicTapReader(
-            self._mic_tap_q,
+            q,
             sample_rate=self.cfg.sample_rate,
             block=block,
             active=lambda: self.active,
         )
 
-    def _run(self) -> None:  # noqa: C901 — capture modes are intentionally explicit
-        try:
-            if self.cfg.capture == "mic":
-                self._run_mic_only()
-            elif self.cfg.capture == "loopback":
-                self._run_loopback_only()
-            else:
-                self._run_mix()
-        except Exception as e:  # pragma: no cover - device failures
-            with self._lock:
-                self._error = str(e)
-        finally:
-            with self._lock:
-                self._active = False
-
-    def _append(self, pcm: np.ndarray) -> None:
-        with self._lock:
-            self._chunks.append(np.asarray(pcm, dtype=np.int16).reshape(-1))
-
-    def _append_mic_tap(self, pcm: np.ndarray) -> None:
-        """Keep a short mic-only window + live queue for VadSegmenter."""
-        arr = np.asarray(pcm, dtype=np.int16).reshape(-1)
-        with self._lock:
-            self._mic_ring.append(arr)
-            self._mic_samples += int(arr.size)
-            while self._mic_samples > self._mic_ring_max and self._mic_ring:
-                dropped = self._mic_ring.popleft()
-                self._mic_samples -= int(dropped.size)
-        try:
-            self._mic_tap_q.put_nowait(arr.copy())
-        except queue.Full:
-            try:
-                self._mic_tap_q.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                self._mic_tap_q.put_nowait(arr.copy())
-            except queue.Full:
-                pass
-
     def recent_mic_pcm(self, seconds: float = 2.5) -> np.ndarray | None:
-        """Copy the latest mic tap window (None if empty / loopback-only)."""
+        """Best-effort: drain a short window from the tap queue (may be sparse)."""
+        q = self._mic_q
+        if q is None:
+            return None
+        chunks: list[np.ndarray] = []
         need = max(1, int(float(seconds) * self.cfg.sample_rate))
-        with self._lock:
-            if not self._mic_ring:
-                return None
-            pcm = np.concatenate(list(self._mic_ring))
+        got = 0
+        while got < need:
+            try:
+                arr = q.get_nowait()
+            except Exception:
+                break
+            chunks.append(np.asarray(arr, dtype=np.int16).reshape(-1))
+            got += int(chunks[-1].size)
+        if not chunks:
+            return None
+        pcm = np.concatenate(chunks)
         if pcm.size < self.cfg.sample_rate // 4:
             return None
         return pcm[-need:]
 
-    def _budget_ok(self) -> bool:
-        if self.cfg.max_s <= 0:
-            return True
-        return (time.monotonic() - self._started_at) < self.cfg.max_s
-
-    def _run_mic_only(self) -> None:
-        require_sounddevice()
-        with MicStream(
-            sample_rate=self.cfg.sample_rate,
-            block_ms=self.cfg.block_ms,
-            device=self.cfg.input_device or None,
-        ) as mic:
-            while not self._stop.is_set() and self._budget_ok():
-                chunk = mic.read_block()
-                self._append(chunk)
-                self._append_mic_tap(chunk)
-
-    def _run_loopback_only(self) -> None:
-        with LoopbackStream(
-            sample_rate=self.cfg.sample_rate,
-            block_ms=self.cfg.block_ms,
-            device=self.cfg.loopback_device or None,
-            output_device=self.cfg.output_device or None,
-        ) as lb:
-            while not self._stop.is_set() and self._budget_ok():
-                self._append(lb.read_block())
-
-    def _run_mix(self) -> None:
-        """Best-effort sync: read both streams each iteration, average, clip-protect."""
-        require_sounddevice()
-        with (
-            MicStream(
-                sample_rate=self.cfg.sample_rate,
-                block_ms=self.cfg.block_ms,
-                device=self.cfg.input_device or None,
-            ) as mic,
-            LoopbackStream(
-                sample_rate=self.cfg.sample_rate,
-                block_ms=self.cfg.block_ms,
-                device=self.cfg.loopback_device or None,
-                output_device=self.cfg.output_device or None,
-            ) as lb,
-        ):
-            while not self._stop.is_set() and self._budget_ok():
-                a = mic.read_block()
-                b = lb.read_block()
-                self._append(mix_pcm16_average(a, b))
-                self._append_mic_tap(a)
+    def _run_thread(self) -> None:
+        assert self._stop_event is not None and self._wav_path is not None
+        result = run_meeting_capture(
+            self.cfg,
+            self._wav_path,
+            stop=self._stop_event,
+            mic_tap_queue=self._mic_q,
+        )
+        with self._lock:
+            self._result = result
+            if result.get("error"):
+                self._error = str(result["error"])
+            self._active = False

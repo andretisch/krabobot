@@ -49,8 +49,10 @@ def _pick(base: Path, patterns: list[str], label: str) -> Path:
 class LocalWakeAsr:
     """Reusable OfflineRecognizer for short wake windows."""
 
-    def __init__(self, model_dir: str | Path, *, num_threads: int = 2, provider: str = "cpu") -> None:
+    def __init__(self, model_dir: str | Path, *, num_threads: int = 0, provider: str = "cpu") -> None:
         import sherpa_onnx  # type: ignore[import-not-found]
+
+        from krabobot_voice.config import resolve_stt_num_threads
 
         base = Path(model_dir).expanduser().resolve()
         tokens = base / "tokens.txt"
@@ -59,12 +61,13 @@ class LocalWakeAsr:
         encoder = _pick(base, ["*encoder*.onnx", "encoder*.onnx"], "encoder")
         decoder = _pick(base, ["*decoder*.onnx", "decoder*.onnx"], "decoder")
         joiner = _pick(base, ["*joiner*.onnx", "joiner*.onnx"], "joiner")
+        threads = resolve_stt_num_threads(num_threads)
         self._recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
             encoder=str(encoder),
             decoder=str(decoder),
             joiner=str(joiner),
             tokens=str(tokens),
-            num_threads=int(max(1, num_threads)),
+            num_threads=threads,
             sample_rate=16000,
             feature_dim=80,
             provider=provider,
@@ -72,6 +75,7 @@ class LocalWakeAsr:
             model_type="nemo_transducer",
         )
         self.model_dir = base
+        self.num_threads = threads
 
     def transcribe_pcm16(
         self,

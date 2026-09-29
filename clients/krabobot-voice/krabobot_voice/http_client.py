@@ -67,7 +67,15 @@ class VoiceHttpClient:
 
         for f in files or []:
             fp = Path(f)
-            multipart.append(("files", (fp.name, fp.read_bytes(), "application/octet-stream")))
+            mime = "application/octet-stream"
+            suffix = fp.suffix.lower()
+            if suffix in {".wav"}:
+                mime = "audio/wav"
+            elif suffix in {".mp3", ".ogg", ".m4a", ".flac", ".opus"}:
+                mime = f"audio/{suffix.lstrip('.')}"
+            elif suffix in {".mp4", ".webm", ".mov", ".mkv"}:
+                mime = "video/mp4" if suffix == ".mp4" else f"video/{suffix.lstrip('.')}"
+            multipart.append(("files", (fp.name, fp.read_bytes(), mime)))
 
         headers = {}
         if self.config.token:

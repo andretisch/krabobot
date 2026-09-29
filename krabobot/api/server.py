@@ -132,6 +132,27 @@ _VOICE_REPLY_HINT = (
     "Отвечай для голосового интерфейса: без Markdown, без эмодзи, обычный текст."
 )
 
+_VOICE_VIDEO_EXTS = {".mp4", ".webm", ".mov", ".mkv", ".avi"}
+_VOICE_AUDIO_EXTS = {".wav", ".mp3", ".ogg", ".m4a", ".flac", ".opus", ".aac"}
+
+
+def _voice_media_content_notes(paths: list[str]) -> list[str]:
+    """Annotate attached files in content (same pattern as Telegram/web video/docs).
+
+    Long meeting WAVs must appear as path notes — not as the ``audio`` STT field.
+    """
+    notes: list[str] = []
+    for raw in paths:
+        p = Path(raw)
+        ext = p.suffix.lower()
+        if ext in _VOICE_VIDEO_EXTS:
+            notes.append(f"[video: {p}]")
+        elif ext in _VOICE_AUDIO_EXTS:
+            notes.append(f"[audio: {p}]")
+        else:
+            notes.append(f"[Файл сохранён в workspace: {p}]")
+    return notes
+
 
 def _format_voice_client_state_line(raw: str) -> str | None:
     """Build a short context line from client_state JSON, or None if unusable."""
@@ -1246,6 +1267,9 @@ async def handle_voice_turn(request: web.Request) -> web.Response:
                 )
 
         content_parts = [p for p in (transcript, instruct) if p]
+        # Meeting / chat-style attachments: path in content (like video), not STT.
+        if final_media:
+            content_parts.extend(_voice_media_content_notes(final_media))
         state_line = _format_voice_client_state_line(client_state_raw)
         if state_line:
             content_parts.append(state_line)

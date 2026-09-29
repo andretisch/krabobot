@@ -269,7 +269,9 @@ def test_resolve_loopback_prefers_default_wasapi_helper(monkeypatch: pytest.Monk
     assert "Loopback" in info["name"]
 
 
-def test_meeting_recorder_mic_with_mocked_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_meeting_recorder_mic_with_mocked_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     blocks = [np.full(480, i, dtype=np.int16) for i in range(5)]
 
     class FakeMic:
@@ -294,13 +296,147 @@ def test_meeting_recorder_mic_with_mocked_stream(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr("krabobot_voice.meeting.MicStream", FakeMic)
     monkeypatch.setattr("krabobot_voice.meeting.require_sounddevice", lambda: None)
 
-    rec = MeetingRecorder(MeetingCaptureConfig(capture="mic", sample_rate=16000, max_s=10))
-    rec.start()
-    # Let a few blocks land
+    rec = MeetingRecorder(
+        MeetingCaptureConfig(capture="mic", sample_rate=16000, max_s=10),
+        save_dir=tmp_path,
+        use_process=False,
+    )
+    wav_path = rec.start()
+    assert wav_path.parent == tmp_path
+    assert wav_path.suffix == ".wav"
     import time
 
     time.sleep(0.15)
     result = rec.stop()
     assert result.capture == "mic"
     assert result.frames >= 480
-    assert result.wav_bytes[:4] == b"RIFF"
+    assert result.wav_path.is_file()
+    assert result.wav_path.read_bytes()[:4] == b"RIFF"
+
+
+def test_new_meeting_wav_path_creates_dir(tmp_path: Path) -> None:
+    from krabobot_voice.meeting import new_meeting_wav_path
+
+    root = tmp_path / "meetings"
+    path = new_meeting_wav_path(root)
+    assert path.parent == root
+    assert root.is_dir()
+    assert path.name.endswith(".wav")
+
+
+def test_config_meeting_save_and_upload_as(tmp_path: Path) -> None:
+    path = tmp_path / "cfg.yaml"
+    path.write_text(
+        "\n".join(
+            [
+                "meeting:",
+                "  save_dir: D:/meetings",
+                "  upload_as: file",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cfg = VoiceClientConfig.load(path)
+    assert cfg.meeting_save_dir == "D:/meetings"
+    assert cfg.meeting_upload_as == "file"
+    assert "закончить запись совещания" in cfg.cmd_meeting_stop
+
+
+def test_meeting_upload_uses_files_not_audio(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Smoke: meeting upload posts files=, not audio=."""
+    from krabobot_voice.app import _Driver
+    from krabobot_voice.dialog import VoiceSession, VoiceSessionConfig
+    from krabobot_voice.http_client import VoiceTurnResult
+
+    wav = tmp_path / "20260101-120000.wav"
+    wav.write_bytes(pcm16_to_wav_bytes(np.zeros(1600, dtype=np.int16), sample_rate=16000))
+
+    calls: list[dict] = []
+
+    class FakeHttp:
+        def turn(self, **kwargs):
+            calls.append(kwargs)
+            return VoiceTurnResult(
+                status_code=200,
+                audio_wav=None,
+                transcript="",
+                reply="ok",
+                device_id="t",
+            )
+
+    cfg = VoiceClientConfig()
+    cfg.meeting_upload_as = "file"
+    cfg.meeting_instruct = "summarize meeting"
+    session = VoiceSession(VoiceSessionConfig())
+    driver = _Driver(
+        cfg,
+        FakeHttp(),  # type: ignore[arg-type]
+        session,
+        asr=None,
+        kws=None,
+        ptt=None,
+        meeting_hk=None,
+        wake_energy=0.01,
+    )
+    driver._handle_meeting_upload(wav, duration_s=1.0, capture="mix")
+    assert len(calls) == 1
+    assert calls[0].get("files") == [wav]
+    assert calls[0].get("audio_bytes") is None
+    assert calls[0].get("audio_path") is None
+    assert calls[0].get("instruct") == "summarize meeting"
+
+
+def test_meeting_worker_start_stop_smoke(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Worker process entry: mocked capture writes WAV then stops via flag file."""
+    from krabobot_voice import meeting_worker
+
+    out = tmp_path / "out.wav"
+    stop = tmp_path / "stop.flag"
+    status = tmp_path / "status.json"
+    blocks = [np.full(480, 100, dtype=np.int16) for _ in range(3)]
+
+    class FakeMic:
+        def __init__(self, *a, **k):
+            self._i = 0
+            self.sample_rate = 16000
+            self.block = 480
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+        def read_block(self):
+            if self._i >= len(blocks):
+                stop.write_text("1", encoding="utf-8")
+                return np.zeros(480, dtype=np.int16)
+            out_block = blocks[self._i]
+            self._i += 1
+            return out_block
+
+    monkeypatch.setattr("krabobot_voice.meeting.MicStream", FakeMic)
+    monkeypatch.setattr("krabobot_voice.meeting.require_sounddevice", lambda: None)
+
+    rc = meeting_worker.main(
+        [
+            "--out",
+            str(out),
+            "--stop-file",
+            str(stop),
+            "--status-file",
+            str(status),
+            "--capture",
+            "mic",
+            "--max-s",
+            "5",
+        ]
+    )
+    assert rc == 0
+    assert out.is_file()
+    assert out.read_bytes()[:4] == b"RIFF"
+    assert status.is_file()

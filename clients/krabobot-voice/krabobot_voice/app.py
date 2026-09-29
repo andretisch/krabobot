@@ -12,6 +12,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -23,7 +24,7 @@ from krabobot_voice.audio_io import (
     with_stream_keepalive,
 )
 from krabobot_voice.commands import match_local_command
-from krabobot_voice.config import VoiceClientConfig
+from krabobot_voice.config import VoiceClientConfig, resolve_stt_num_threads
 from krabobot_voice.dialog import (
     Beep,
     Hotkey,
@@ -74,6 +75,49 @@ def _debug_enabled() -> bool:
 def _log_debug(msg: str) -> None:
     if _debug_enabled():
         _log(f"[debug] {msg}")
+
+
+def _is_wake_or_command(
+    text: str,
+    *,
+    cfg: VoiceClientConfig,
+    for_wake: bool,
+) -> bool:
+    """True if ASR text is a wake hit and/or a local voice command."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return False
+    if for_wake and matches_wake_phrase(
+        cleaned,
+        phrases=cfg.wake_phrases or None,
+        greetings=cfg.wake_greetings or None,
+    ):
+        return True
+    if match_local_command(
+        cleaned,
+        meeting_start=cfg.cmd_meeting_start,
+        meeting_stop=cfg.cmd_meeting_stop,
+        run_test=cfg.cmd_run_test,
+        exit_dialog=cfg.cmd_exit,
+    ) is not None:
+        return True
+    # Meeting mic-tap also accepts wake (arm listen / trailing command).
+    if not for_wake and matches_wake_phrase(
+        cleaned,
+        phrases=cfg.wake_phrases or None,
+        greetings=cfg.wake_greetings or None,
+    ):
+        return True
+    return False
+
+
+def _log_asr_text(text: str, *, tag: str, matched: bool) -> None:
+    """Print wake/meeting/local ASR lines only on match (or KRABOBOT_VOICE_DEBUG)."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return
+    if matched or _debug_enabled():
+        _log(f"  [{tag}] {cleaned}")
 
 
 def effective_wake_energy(threshold: float, *, listen_source: str) -> float:
@@ -450,6 +494,7 @@ class _Driver:
     def _start_meeting(self) -> None:
         if self._recorder is not None and self._recorder.active:
             return
+        save_dir = self.cfg.meeting_save_dir.strip() or None
         recorder = MeetingRecorder(
             MeetingCaptureConfig(
                 capture=self.cfg.meeting_capture,
@@ -458,20 +503,22 @@ class _Driver:
                 output_device=self.cfg.audio_output_device,
                 loopback_device=self.cfg.meeting_loopback_device,
                 max_s=self.cfg.meeting_max_s,
-            )
+            ),
+            save_dir=save_dir,
         )
         echo_hint = ""
         if self.cfg.meeting_capture == "mix":
             echo_hint = (
-                " (mix: лучше наушники — иначе локальный голос может задвоиться с колонок)"
+                " (mix: лучше наушники — иначе локальный голос может задвоиться с колонок;"
+                " worker держит mic+loopback — wake на основном стриме на паузе)"
             )
-        _log(f"meeting START capture={self.cfg.meeting_capture}{echo_hint}")
         try:
-            recorder.start()
+            wav_path = recorder.start()
         except Exception as e:
             _log(f"ERROR: не удалось начать запись встречи: {e}")
             self.session.mode = Mode.IDLE
             return
+        _log(f"meeting START capture={self.cfg.meeting_capture} → {wav_path}{echo_hint}")
         self._recorder = recorder
 
     def _stop_meeting_and_upload(self) -> None:
@@ -484,30 +531,56 @@ class _Driver:
         except Exception as e:
             _log(f"ERROR: остановка записи встречи: {e}")
             return
-        _log(f"meeting STOP ({result.duration_s:.1f} s)")
-        self._handle_meeting_upload(result.wav_bytes, duration_s=result.duration_s, capture=result.capture)
+        _log(
+            f"meeting STOP ({result.duration_s:.1f} s) saved={result.wav_path}"
+        )
+        self._handle_meeting_upload(
+            result.wav_path,
+            duration_s=result.duration_s,
+            capture=result.capture,
+            wav_bytes=result.wav_bytes,
+        )
 
     def _handle_meeting_upload(
         self,
-        wav: bytes,
+        wav_path: Path | str,
         *,
         duration_s: float,
         capture: str,
+        wav_bytes: bytes = b"",
     ) -> None:
-        from krabobot_voice.preprocess import preprocess_wav_bytes
-
-        aligned = preprocess_wav_bytes(wav)
+        path = Path(wav_path)
+        upload_as = (self.cfg.meeting_upload_as or "file").strip().lower()
+        size = 0
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = len(wav_bytes)
         _log(
-            f"meeting upload: {len(aligned)} bytes, {duration_s:.1f} s, capture={capture}"
+            f"meeting upload as={upload_as}: {path.name} ({size} bytes, "
+            f"{duration_s:.1f} s, capture={capture})"
         )
         _log("thinking (meeting)…")
         try:
-            result = self.http.turn(
-                audio_bytes=aligned,
-                audio_filename="meeting.wav",
-                instruct=self.cfg.meeting_instruct or None,
-                client_state=ClientState(mode="idle", meeting="idle"),
-            )
+            if upload_as == "audio":
+                # Legacy short-clip path (server STT on `audio`) — not for long meetings.
+                from krabobot_voice.preprocess import preprocess_wav_bytes
+
+                raw = wav_bytes or path.read_bytes()
+                aligned = preprocess_wav_bytes(raw)
+                result = self.http.turn(
+                    audio_bytes=aligned,
+                    audio_filename=path.name or "meeting.wav",
+                    instruct=self.cfg.meeting_instruct or None,
+                    client_state=ClientState(mode="idle", meeting="idle"),
+                )
+            else:
+                # Long meetings: multipart `files` like a chat video attachment — no STT.
+                result = self.http.turn(
+                    files=[path],
+                    instruct=self.cfg.meeting_instruct or None,
+                    client_state=ClientState(mode="idle", meeting="idle"),
+                )
         except Exception as e:
             _log(f"ERROR: запрос /v1/voice/turn (meeting): {e}")
             return
@@ -580,10 +653,20 @@ class _Driver:
         segmenter.feed_backlog(sink)
         return text
 
-    def _make_early_check(self, *, for_wake: bool) -> Callable[[np.ndarray], bool] | None:
-        """Optional energy-backend helper; unused when Silero speech_gate is active."""
-        # Silero closes music segments correctly — do not thrash partial ASR.
-        if self.speech_gate is not None:
+    def _make_early_check(
+        self,
+        *,
+        for_wake: bool,
+        mic: object | None = None,
+        segmenter: VadSegmenter | None = None,
+    ) -> Callable[[np.ndarray], bool] | None:
+        """Partial-utterance probe: wake (energy/KWS) or local commands in LISTEN.
+
+        With Silero, skip early ASR on wake (music thrash). For LISTEN/DIALOG,
+        run local-command ASR so one short phrase commits without waiting for
+        the full silence_end trail.
+        """
+        if for_wake and self.speech_gate is not None:
             return None
         if for_wake and self.cfg.wake_mode == "kws" and self.kws is not None:
 
@@ -606,12 +689,20 @@ class _Driver:
         energy = min(self.wake_energy, 0.006) if for_wake else None
 
         def _asr_check(pcm: np.ndarray) -> bool:
-            text = _transcribe(
-                self.asr,
-                pcm,
-                sample_rate=self.cfg.sample_rate,
-                energy_threshold=energy,
-            )
+            def _run() -> str:
+                return _transcribe(
+                    self.asr,
+                    pcm,
+                    sample_rate=self.cfg.sample_rate,
+                    energy_threshold=energy,
+                )
+
+            if mic is not None and segmenter is not None:
+                sink: deque[np.ndarray] = deque(maxlen=_KEEPALIVE_SINK_MAX)
+                text = with_stream_keepalive(mic, _run, sink=sink)
+                segmenter.feed_backlog(sink)
+            else:
+                text = _run()
             if not text:
                 return False
             if for_wake:
@@ -641,12 +732,14 @@ class _Driver:
     def run_talk_loop(self, mic: object) -> None:
         """Drive one open capture stream until meeting starts or stream should reopen."""
         self._last_sink = None
-        wake_max = max(2.0, float(self.cfg.wake_max_s))
+        # Wake + local-command clips: hard ≤ wake_max_s (default 2 s).
+        wake_max = max(0.5, float(self.cfg.wake_max_s))
         wake_silence = max(0.25, float(self.cfg.wake_silence_end_s))
         wake_min = max(0.2, float(self.cfg.wake_min_speech_s))
         talk_min = float(self.cfg.min_speech_s)
         if self.asr is not None:
             talk_min = min(talk_min, 0.75)
+        listen_silence = max(0.35, float(self.cfg.talk_listen_silence_end_s))
         talk_energy = (
             self.wake_energy
             if self.cfg.audio_listen_source == "loopback"
@@ -654,6 +747,10 @@ class _Driver:
                 self.cfg.energy_threshold, listen_source=self.cfg.audio_listen_source
             )
         )
+        # LISTEN free-form dialog upload may use utterance_max_s; wake/meeting
+        # command clips stay on wake_max (≤2 s). Local-command early_check still
+        # commits short phrases without waiting for the longer max.
+        dialog_max = max(wake_max, float(self.cfg.utterance_max_s))
 
         # Idle uses wake VAD params; listen/dialog use talk params — switch energy
         # via segmenter.energy_threshold per mode.
@@ -670,6 +767,7 @@ class _Driver:
             speech_gate=self.speech_gate,
         )
         last_heartbeat = time.monotonic()
+        last_listen_log = 0.0
 
         while True:
             # Meeting session owns its own mic tap; leave the talk stream.
@@ -697,8 +795,13 @@ class _Driver:
                     text = self._asr_pcm(
                         pcm, mic=mic, segmenter=segmenter, for_wake=False
                     )
-                    if text:
-                        _log(f"  [local-asr] {text}")
+                    _log_asr_text(
+                        text,
+                        tag="local-asr",
+                        matched=_is_wake_or_command(
+                            text, cfg=self.cfg, for_wake=False
+                        ),
+                    )
                     self._apply(
                         self.session.on_event(
                             Segment(
@@ -726,10 +829,12 @@ class _Driver:
                 )
                 self._status("waiting for wake / PTT / meeting…")
             else:
+                # LISTEN/DIALOG: snappy silence_end; local-command early_check
+                # commits ≤2 s phrases. Segment max stays dialog-sized for uploads.
                 segmenter.configure(
                     energy_threshold=talk_energy,
-                    max_s=float(self.cfg.utterance_max_s),
-                    silence_end_s=float(self.cfg.silence_end_s),
+                    max_s=dialog_max,
+                    silence_end_s=listen_silence,
                     min_speech_s=talk_min,
                 )
                 if mode is Mode.LISTEN:
@@ -743,23 +848,32 @@ class _Driver:
                     )
 
             def _poll() -> None:
+                nonlocal last_listen_log
                 if self.meeting_hk is not None and self.meeting_hk.consume_edge_down():
                     raise _HotkeyAbortError("meeting")
                 if self.ptt is not None and self.ptt.consume_edge_down():
                     raise _HotkeyAbortError("ptt")
+                if mode in (Mode.LISTEN, Mode.DIALOG) and self._deadline is not None:
+                    now = time.monotonic()
+                    if now - last_listen_log >= 2.0:
+                        left = max(0.0, self._deadline - now)
+                        _log(f"  … listening ({left:.0f}s left)")
+                        last_listen_log = now
 
             for_wake = mode is Mode.IDLE
-            early = self._make_early_check(for_wake=for_wake)
+            early = self._make_early_check(
+                for_wake=for_wake, mic=mic, segmenter=segmenter
+            )
             self._early_asr_text = None
 
             try:
-                # With Silero, early is None — segment closes on Silero non-speech.
+                # LISTEN: early local-command ASR even with Silero; wake keeps gate-only.
                 pcm = segmenter.next_segment(
                     self._deadline,
                     poll=_poll,
                     early_check=early,
-                    early_check_interval_s=1.0,
-                    early_check_min_s=0.7,
+                    early_check_interval_s=0.8 if not for_wake else 1.0,
+                    early_check_min_s=0.5 if not for_wake else 0.7,
                 )
             except _HotkeyAbortError as abort:
                 effects = self.session.on_event(Hotkey(abort.kind))
@@ -780,8 +894,13 @@ class _Driver:
                     text = self._asr_pcm(
                         held, mic=mic, segmenter=segmenter, for_wake=False
                     )
-                    if text:
-                        _log(f"  [local-asr] {text}")
+                    _log_asr_text(
+                        text,
+                        tag="local-asr",
+                        matched=_is_wake_or_command(
+                            text, cfg=self.cfg, for_wake=False
+                        ),
+                    )
                     self._apply(
                         self.session.on_event(
                             Segment(
@@ -819,7 +938,11 @@ class _Driver:
             if text:
                 label = "wake-asr" if for_wake else "local-asr"
                 tag = "early" if early_text is not None else label
-                _log(f"  [{tag}] {text}")
+                # early_text is only set on a probe hit → always a match.
+                matched = early_text is not None or _is_wake_or_command(
+                    text, cfg=self.cfg, for_wake=for_wake
+                )
+                _log_asr_text(text, tag=tag, matched=matched)
             elif for_wake and self.cfg.wake_mode == "kws":
                 continue
 
@@ -856,6 +979,8 @@ class _Driver:
         energy = effective_wake_energy(
             self.cfg.wake_energy_threshold, listen_source="mic"
         )
+        # Same ≤2 s command window as idle wake (stop phrase / wake+command).
+        cmd_max = max(0.5, float(self.cfg.wake_max_s))
         self._reset_vad_state()
         segmenter = _make_segmenter(
             tap.read_block,
@@ -863,7 +988,7 @@ class _Driver:
             block=tap.block,
             cfg=self.cfg,
             energy_threshold=energy,
-            max_s=max(2.0, float(self.cfg.wake_max_s)),
+            max_s=cmd_max,
             silence_end_s=max(0.25, float(self.cfg.wake_silence_end_s)),
             min_speech_s=max(0.2, float(self.cfg.wake_min_speech_s)),
             speech_gate=self.speech_gate,
@@ -876,7 +1001,9 @@ class _Driver:
             now = time.monotonic()
             if now - last_print > 10.0:
                 hk = self.meeting_hk.hotkey_label if self.meeting_hk else "voice"
-                _log(f"meeting recording… (stop: {hk} / «стоп запись»)")
+                _log(
+                    f"meeting recording… (stop: {hk} / «закончить запись совещания»)"
+                )
                 last_print = now
 
             def _poll() -> None:
@@ -947,7 +1074,10 @@ class _Driver:
                         text = ""
             if text:
                 tag = "early" if early_text is not None else "meeting-asr"
-                _log(f"  [{tag}] {text}")
+                matched = early_text is not None or _is_wake_or_command(
+                    text, cfg=self.cfg, for_wake=False
+                )
+                _log_asr_text(text, tag=tag, matched=matched)
             self._pending_pcm = pcm
             self._apply(
                 self.session.on_event(
@@ -1033,6 +1163,10 @@ def run_test_loopback(config: VoiceClientConfig | None = None, *, duration_s: fl
 
 def run_loop(config: VoiceClientConfig | None = None) -> int:
     cfg = config or VoiceClientConfig.load()
+    cpu_n = max(1, int(os.cpu_count() or 1))
+    # load() already resolves; re-resolve so bare VoiceClientConfig() (0) is safe.
+    stt_threads = resolve_stt_num_threads(cfg.stt_num_threads, cpu_count=cpu_n)
+    cfg.stt_num_threads = stt_threads
     wake_energy = effective_wake_energy(
         cfg.wake_energy_threshold, listen_source=cfg.audio_listen_source
     )
@@ -1040,6 +1174,11 @@ def run_loop(config: VoiceClientConfig | None = None) -> int:
     _log(f"device_id={cfg.device_id}")
     _log(f"wake_mode={cfg.wake_mode}, ptt={'on' if cfg.ptt_enabled else 'off'}")
     _log(f"audio.listen_source={cfg.audio_listen_source}")
+    auto_threads = max(1, cpu_n // 2)
+    if stt_threads == auto_threads:
+        _log(f"ASR threads: {stt_threads} (50% of {cpu_n} CPUs)")
+    else:
+        _log(f"ASR threads: {stt_threads} (config override; {cpu_n} CPUs)")
     if cfg.audio_listen_source == "loopback":
         from krabobot_voice.audio_io import probe_capture_rms, resolve_loopback_device_info
 
@@ -1141,7 +1280,7 @@ def run_loop(config: VoiceClientConfig | None = None) -> int:
             return 3
         _log(f"wake ASR model: {model_dir.name}")
         try:
-            asr = LocalWakeAsr(model_dir, num_threads=cfg.stt_num_threads)
+            asr = LocalWakeAsr(model_dir, num_threads=stt_threads)
         except Exception as e:
             _log(f"ERROR: не удалось загрузить sherpa-onnx: {e}")
             return 3
@@ -1152,7 +1291,7 @@ def run_loop(config: VoiceClientConfig | None = None) -> int:
             from krabobot_voice.local_asr import LocalWakeAsr, resolve_stt_model_dir
 
             model_dir = resolve_stt_model_dir(cfg.stt_model_dir)
-            asr = LocalWakeAsr(model_dir, num_threads=cfg.stt_num_threads)
+            asr = LocalWakeAsr(model_dir, num_threads=stt_threads)
             _log(f"command ASR model: {model_dir.name}")
         except Exception:
             asr = None

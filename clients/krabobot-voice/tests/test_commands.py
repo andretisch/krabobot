@@ -20,6 +20,7 @@ from krabobot_voice.commands import LocalCommand, match_local_command  # noqa: E
         ("начать совещание", LocalCommand.MEETING_START),
         ("Ну давай начать запись пожалуйста", LocalCommand.MEETING_START),
         ("запиши совещание", LocalCommand.MEETING_START),
+        ("закончить запись совещания", LocalCommand.MEETING_STOP),
         ("закончить совещание", LocalCommand.MEETING_STOP),
         ("пожалуйста завершить запись", LocalCommand.MEETING_STOP),
         ("стоп запись", LocalCommand.MEETING_STOP),

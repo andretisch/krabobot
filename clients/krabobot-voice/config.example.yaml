@@ -23,10 +23,12 @@ wake:
   phrase: "Эй, Арнольд"
   # Optional aliases (merged with phrase, deduped). Leave empty to use only phrase.
   phrases: []
-  # VAD-segmented wake: speech_start → buffer until silence → one ASR/KWS per utterance
-  # Shorter silence_end than talk so wake feels snappy; max_s caps endless buffer.
+  # VAD-segmented wake/commands: speech_start → silence_end OR max_s → one ASR/KWS
+  # Commands (and wake+command in one breath) are ≤2 s by design — hard clip cap.
+  # Also used for meeting mic-tap stop/wake listening (not full meeting audio).
+  # Alias: command_max_s
   silence_end_s: 0.55
-  max_s: 9.0
+  max_s: 2.0
   min_speech_s: 0.45
   # Energy pre-gate when vad.backend=energy; with Silero this is only a
   # quiet-mic hint for ASR preprocess (speech decision uses Silero).
@@ -66,8 +68,9 @@ ptt:
 # (no POST /v1/voice/turn). Cues: 2 beeps on wake, 1 beep on return to idle.
 talk:
   # Empty listen (no speech yet): wait this long before idle. After speech starts,
-  # end-of-utterance uses top-level silence_end_s (~2s), not this timeout.
+  # LISTEN/DIALOG close on listen_silence_end_s (not top-level silence_end_s).
   listen_timeout_s: 10.0  # post-wake window (fallback: no_speech_timeout_s)
+  listen_silence_end_s: 0.7  # snappy end-of-utterance for commands after wake
   follow_up_s: 10.0       # 0 = disable; silence → 1 beep → idle
   beeps: true             # 2 beeps on wake / wake+command; 1 beep on idle return
   follow_up_beep: false   # legacy (unused when beeps handles cues)
@@ -78,6 +81,7 @@ talk:
     - начни совещание
     - начни запись
   meeting_stop:
+    - закончить запись совещания
     - закончить совещание
     - завершить запись
     - стоп запись
@@ -113,9 +117,11 @@ audio:
   # output_device: ""     # playback device whose WASAPI loopback to use
   # Alias: wake.input: mic|loopback (то же самое)
 
-# Meeting recording (toggle hotkey → background thread → upload WAV + instruct)
+# Meeting recording (toggle hotkey → subprocess capture → local WAV + file upload)
 # Also start/stop via talk.meeting_start / talk.meeting_stop voice commands.
 # Meeting can capture system audio (Teams) independently of audio.listen_source.
+# While recording, the worker owns mic+loopback (mix); main loop listens for stop
+# via mic-tap IPC / hotkey. Dedicated stop phrase: «закончить запись совещания».
 meeting:
   enabled: true
   # mic | loopback | mix — default mix = mic + WASAPI loopback (remote + local)
@@ -124,23 +130,30 @@ meeting:
   # Empty = loopback for default output (or audio.output_device)
   loopback_device: ""
   max_s: 7200
+  # Empty = %LOCALAPPDATA%\krabobot-voice\meetings\YYYYMMDD-HHMMSS.wav
+  save_dir: ""
+  # file (default) = multipart `files` like a large chat video — NO server STT on the WAV.
+  # audio = legacy short-clip path (posts as `audio` for sherpa STT) — not for long meetings.
+  upload_as: file
   instruct: >-
     Это запись встречи (Teams/звонок). Сделай краткое резюме,
-    ключевые решения и список action items.
+    ключевые решения и список action items. Файл записи приложен —
+    обработай аудиофайл по пути во вложении (как большое медиа в чате).
 
 # Local sherpa wake — model dir (empty = ~/.krabobot/models/stt/…)
 # stt_model_dir: ""
-# stt_num_threads: 2
+# stt_num_threads: 0   # 0/omit = max(1, cpu_count//2); set e.g. 4 to override
 
 # After beep: discard settle_s (flush mic buffer), then require min_speech_s
 # before VAD may end on silence — avoids posting near-empty clips to STT.
 # Client also peak/RMS-normalizes + trims before POST /v1/voice/turn.
-# silence_end_s: after speech started, finish Talk/LISTEN/DIALOG on this silence
-# (~2s). Empty windows still wait talk.listen_timeout_s / follow_up_s (~10s).
+# silence_end_s: legacy free-form trail (~2s). LISTEN/DIALOG use
+# talk.listen_silence_end_s (~0.7s) for snappy local commands.
+# Empty windows still wait talk.listen_timeout_s / follow_up_s (~10s).
 # no_speech_timeout_s is legacy fallback for talk.listen_timeout_s.
 utterance_max_s: 15.0
 settle_s: 0.35
-preroll_s: 0.4
+preroll_s: 0.8
 speech_start_s: 0.25
 min_speech_s: 1.2
 silence_end_s: 2.0

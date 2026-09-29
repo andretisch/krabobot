@@ -120,7 +120,25 @@ def test_default_talk_silence_end_and_listen_timeout() -> None:
     assert cfg.silence_end_s == 2.0
     assert cfg.talk_listen_timeout_s == 10.0
     assert cfg.talk_follow_up_s == 10.0
+    assert cfg.talk_listen_silence_end_s == 0.7
     assert cfg.wake_silence_end_s == 0.55
+    assert cfg.wake_max_s == 2.0
+    assert cfg.preroll_s == 0.8
+    assert cfg.stt_num_threads == 0  # auto until resolve_stt_num_threads / load
+
+
+def test_load_config_command_max_s_alias(tmp_path: Path) -> None:
+    """wake.command_max_s is accepted as wake.max_s alias."""
+    import yaml
+    from krabobot_voice.config import VoiceClientConfig
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        yaml.safe_dump({"wake": {"command_max_s": 2.0}}, allow_unicode=True),
+        encoding="utf-8",
+    )
+    cfg = VoiceClientConfig.load(cfg_path)
+    assert cfg.wake_max_s == 2.0
 
 
 def test_load_config_wake_vad_params(tmp_path: Path) -> None:
@@ -372,3 +390,51 @@ def test_command_after_wake_custom_phrase() -> None:
         command_after_wake("ок бот начни совещание", phrases=phrases, greetings=["ок"])
         == "начни совещание"
     )
+
+
+def test_asr_miss_stays_quiet_without_debug(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Random speech ASR text must not print [wake-asr]/[meeting-asr] unless debug."""
+    from krabobot_voice import app as voice_app
+    from krabobot_voice.config import VoiceClientConfig
+
+    lines: list[str] = []
+    monkeypatch.delenv("KRABOBOT_VOICE_DEBUG", raising=False)
+    monkeypatch.setattr(voice_app, "_log", lambda m: lines.append(m))
+
+    cfg = VoiceClientConfig()
+    miss = "шум в комнате во время совещания"
+    assert not voice_app._is_wake_or_command(miss, cfg=cfg, for_wake=True)
+    assert not voice_app._is_wake_or_command(miss, cfg=cfg, for_wake=False)
+    voice_app._log_asr_text(miss, tag="wake-asr", matched=False)
+    voice_app._log_asr_text(miss, tag="meeting-asr", matched=False)
+    voice_app._log_asr_text(miss, tag="local-asr", matched=False)
+    assert lines == []
+
+
+def test_asr_match_still_logs(monkeypatch: pytest.MonkeyPatch) -> None:
+    from krabobot_voice import app as voice_app
+    from krabobot_voice.config import VoiceClientConfig
+
+    lines: list[str] = []
+    monkeypatch.delenv("KRABOBOT_VOICE_DEBUG", raising=False)
+    monkeypatch.setattr(voice_app, "_log", lambda m: lines.append(m))
+
+    cfg = VoiceClientConfig()
+    wake = "эй арнольд"
+    stop = "закончить запись совещания"
+    assert voice_app._is_wake_or_command(wake, cfg=cfg, for_wake=True)
+    assert voice_app._is_wake_or_command(stop, cfg=cfg, for_wake=False)
+    voice_app._log_asr_text(wake, tag="wake-asr", matched=True)
+    voice_app._log_asr_text(stop, tag="meeting-asr", matched=True)
+    assert any("[wake-asr]" in x and "арнольд" in x.lower() for x in lines)
+    assert any("[meeting-asr]" in x and "закончить" in x.lower() for x in lines)
+
+
+def test_asr_miss_logs_when_debug(monkeypatch: pytest.MonkeyPatch) -> None:
+    from krabobot_voice import app as voice_app
+
+    lines: list[str] = []
+    monkeypatch.setenv("KRABOBOT_VOICE_DEBUG", "1")
+    monkeypatch.setattr(voice_app, "_log", lambda m: lines.append(m))
+    voice_app._log_asr_text("просто болтовня", tag="meeting-asr", matched=False)
+    assert lines == ["  [meeting-asr] просто болтовня"]

@@ -559,3 +559,93 @@ async def test_voice_turn_empty_stt_returns_clear_error(tmp_path: Path, monkeypa
         assert "audio_bytes" in msg or "beep" in msg
     finally:
         await client.close()
+
+
+@pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
+@pytest.mark.asyncio
+async def test_voice_turn_files_only_meeting_no_stt(tmp_path: Path, monkeypatch) -> None:
+    """Long meeting path: files + instruct, no audio → no STT, path note in content."""
+    from krabobot.api.server import _voice_media_content_notes
+
+    notes = _voice_media_content_notes([str(tmp_path / "meeting.wav")])
+    assert notes and notes[0].startswith("[audio:")
+
+    krabot = tmp_path / ".krabobot"
+    krabot.mkdir()
+    cfg = krabot / "config.json"
+    data = _minimal_config(tmp_path / "workspace")
+    data["api"]["auth"] = {"adminToken": "tok-admin"}
+    cfg.write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(
+        "krabobot.config.loader.get_config_path",
+        lambda: cfg.resolve(),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "krabobot.api.web_auth.get_config_path",
+        lambda: cfg.resolve(),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "krabobot.config.loader.load_config",
+        lambda: MagicMock(stt=MagicMock(), tts=MagicMock()),
+        raising=True,
+    )
+
+    loop = _make_loop(tmp_path / "workspace")
+    seed = InboundMessage(channel="cli", sender_id="owner", chat_id="d", content="")
+    await loop._ensure_identity(seed)
+    owner = seed.user_id
+    assert owner
+    await loop.user_resolver.link_account(owner, "voice", "pi-meet")
+
+    captured: dict = {}
+
+    async def _process(content, **kwargs):
+        captured["content"] = content
+        captured["media"] = kwargs.get("media")
+        return OutboundMessage(channel="voice", chat_id="pi-meet", content="Резюме готово")
+
+    loop.process_direct = AsyncMock(side_effect=_process)
+    stt_mock = AsyncMock(side_effect=AssertionError("STT must not run for files-only meeting"))
+
+    fake_wav = _tiny_wav_bytes()
+
+    async def _fake_tts(text, *, tts=None):
+        return fake_wav
+
+    app = create_app(loop, model_name="t", request_timeout=5)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        with (
+            patch("krabobot.api.server.transcribe_audio", side_effect=stt_mock),
+            patch("krabobot.api.server.synthesize_speech_wav", side_effect=_fake_tts),
+        ):
+            form = FormData()
+            form.add_field("device_id", "pi-meet")
+            form.add_field(
+                "instruct",
+                "Это запись встречи. Сделай краткое резюме.",
+            )
+            form.add_field(
+                "files",
+                fake_wav,
+                filename="20260101-120000.wav",
+                content_type="audio/wav",
+            )
+            r = await client.post(
+                "/v1/voice/turn",
+                data=form,
+                headers={"Authorization": "Bearer tok-admin"},
+            )
+        assert r.status == 200, await r.text()
+        stt_mock.assert_not_called()
+        content = str(captured.get("content") or "")
+        assert "запись встречи" in content.lower() or "резюме" in content.lower()
+        assert "[audio:" in content
+        assert ".wav" in content
+        media = captured.get("media") or []
+        assert media and str(media[0]).endswith(".wav")
+    finally:
+        await client.close()

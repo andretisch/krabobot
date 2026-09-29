@@ -72,6 +72,11 @@ def _as_str_list(val: Any, default: list[str]) -> list[str]:
     return list(default)
 
 
+def _normalize_meeting_upload_as(val: Any) -> str:
+    s = str(val or "file").strip().lower()
+    return s if s in {"file", "audio"} else "file"
+
+
 def _resolve_wake_phrases(
     wake: dict[str, Any],
     data: dict[str, Any],
@@ -162,6 +167,29 @@ def _resolve_listen_timeout(
     return float(default)
 
 
+def resolve_stt_num_threads(
+    configured: Any = None,
+    *,
+    cpu_count: int | None = None,
+) -> int:
+    """Sherpa ``num_threads``: positive YAML wins; else ``max(1, cpus // 2)``.
+
+    ``configured`` empty / ``0`` / unset → half of logical CPUs (at least 1).
+    """
+    cpus = int(cpu_count) if cpu_count is not None else int(os.cpu_count() or 1)
+    cpus = max(1, cpus)
+    try:
+        if configured in (None, ""):
+            n = 0
+        else:
+            n = int(configured)
+    except (TypeError, ValueError):
+        n = 0
+    if n > 0:
+        return n
+    return max(1, cpus // 2)
+
+
 @dataclass
 class VoiceClientConfig:
     """HTTP + local wake/listen / PTT settings."""
@@ -177,8 +205,8 @@ class VoiceClientConfig:
     wake_mode: str = "asr"
     # Wake VAD: shorter trailing silence than talk so wake feels snappy.
     wake_silence_end_s: float = 0.55
-    # Cap one wake utterance (filler + phrase); avoids endless buffer.
-    wake_max_s: float = 9.0
+    # Cap wake / local-command clips (wake+command in one breath ≤2 s by design).
+    wake_max_s: float = 2.0
     # Short wake phrases need a lower voiced-floor than talk commands.
     wake_min_speech_s: float = 0.45
     # Lower gate so quiet mics / loopback still reach local ASR (preprocess lifts level).
@@ -200,18 +228,20 @@ class VoiceClientConfig:
     kws_auto_enroll_tts: bool = True
     # Local sherpa wake (wake_mode=asr)
     stt_model_dir: str = ""
-    stt_num_threads: int = 2
+    # sherpa-onnx OfflineRecognizer threads. 0 / unset = max(1, cpu_count//2).
+    # Positive YAML value overrides. See resolve_stt_num_threads().
+    stt_num_threads: int = 0
     # PTT
     ptt_enabled: bool = True
     ptt_hotkey: str = "ctrl+alt+space"
     # Utterance capture (post-wake VAD)
     utterance_max_s: float = 15.0
-    # After speech started: close Talk/LISTEN/DIALOG segment on this much silence.
+    # Legacy / free-form Talk trail; LISTEN/DIALOG prefer talk_listen_silence_end_s.
     silence_end_s: float = 2.0
     speech_start_s: float = 0.25
     min_speech_s: float = 1.2
     settle_s: float = 0.35
-    preroll_s: float = 0.4
+    preroll_s: float = 0.8
     no_speech_timeout_s: float = 5.0
     energy_threshold: float = 0.008
     # VAD: silero (default, ONNX speech vs music) | energy (RMS-only, no onnxruntime)
@@ -222,6 +252,8 @@ class VoiceClientConfig:
     vad_model_path: str = ""  # empty = %LOCALAPPDATA%/krabobot-voice/models/silero_vad.onnx
     # Empty listen window (no speech yet): keep ~10s before idle / follow-up end
     talk_listen_timeout_s: float = 10.0  # post-wake window; falls back from no_speech_timeout_s
+    # After speech in LISTEN/DIALOG: close segment on this silence (snappy commands).
+    talk_listen_silence_end_s: float = 0.7
     talk_follow_up_s: float = 10.0  # 0 = disabled; typical 6–10
 
     talk_follow_up_beep: bool = False  # legacy; prefer talk.beeps
@@ -238,6 +270,7 @@ class VoiceClientConfig:
     )
     cmd_meeting_stop: list[str] = field(
         default_factory=lambda: [
+            "закончить запись совещания",
             "закончить совещание",
             "завершить запись",
             "стоп запись",
@@ -273,16 +306,22 @@ class VoiceClientConfig:
     audio_output_device: str = ""
     # Wake listen path: mic (default) | loopback (WASAPI system audio — wake testing)
     audio_listen_source: str = "mic"
-    # Meeting recording (toggle hotkey → background capture → upload+instruct)
+    # Meeting recording (toggle hotkey → subprocess capture → file upload+instruct)
     meeting_enabled: bool = True
     meeting_capture: str = "mix"  # mic | loopback | mix
     meeting_hotkey: str = "ctrl+alt+m"
     meeting_loopback_device: str = ""
     meeting_instruct: str = (
         "Это запись встречи (Teams/звонок). Сделай краткое резюме, "
-        "ключевые решения и список action items."
+        "ключевые решения и список action items. "
+        "Файл записи приложен — не жди STT транскрипта в этом сообщении; "
+        "обработай аудиофайл по пути во вложении (как большое медиа в чате)."
     )
     meeting_max_s: float = 7200.0
+    # Empty = %LOCALAPPDATA%/krabobot-voice/meetings
+    meeting_save_dir: str = ""
+    # file = multipart files (no server STT); audio = legacy short-clip STT path
+    meeting_upload_as: str = "file"
 
     @classmethod
     def from_env(cls) -> VoiceClientConfig:
@@ -459,8 +498,13 @@ class VoiceClientConfig:
                     wake,
                     "max_s",
                     "wake_max_s",
-                    # Legacy alias: old sliding-window length → max utterance.
-                    pick_nested(wake, "window_s", "wake_window_s", cfg.wake_max_s),
+                    # Aliases: command_max_s / legacy sliding-window length.
+                    pick_nested(
+                        wake,
+                        "command_max_s",
+                        "wake_command_max_s",
+                        pick_nested(wake, "window_s", "wake_window_s", cfg.wake_max_s),
+                    ),
                 )
             ),
             wake_min_speech_s=float(
@@ -505,7 +549,9 @@ class VoiceClientConfig:
                 cfg.kws_auto_enroll_tts,
             ),
             stt_model_dir=str(pick("stt_model_dir", default=cfg.stt_model_dir) or "").strip(),
-            stt_num_threads=int(pick("stt_num_threads", default=cfg.stt_num_threads) or 2),
+            stt_num_threads=resolve_stt_num_threads(
+                pick("stt_num_threads", default=cfg.stt_num_threads)
+            ),
             ptt_enabled=_as_bool(
                 pick_nested(ptt, "enabled", "ptt_enabled", cfg.ptt_enabled),
                 cfg.ptt_enabled,
@@ -540,6 +586,14 @@ class VoiceClientConfig:
             ).strip(),
             talk_listen_timeout_s=_resolve_listen_timeout(
                 talk, data, cfg.talk_listen_timeout_s
+            ),
+            talk_listen_silence_end_s=float(
+                pick_nested(
+                    talk,
+                    "listen_silence_end_s",
+                    "talk_listen_silence_end_s",
+                    cfg.talk_listen_silence_end_s,
+                )
             ),
             talk_follow_up_s=float(
                 pick_nested(talk, "follow_up_s", "talk_follow_up_s", cfg.talk_follow_up_s)
@@ -619,5 +673,14 @@ class VoiceClientConfig:
             meeting_max_s=float(
                 pick_nested(meeting, "max_s", "meeting_max_s", cfg.meeting_max_s)
                 or cfg.meeting_max_s
+            ),
+            meeting_save_dir=str(
+                pick_nested(meeting, "save_dir", "meeting_save_dir", cfg.meeting_save_dir)
+                or ""
+            ).strip(),
+            meeting_upload_as=_normalize_meeting_upload_as(
+                pick_nested(
+                    meeting, "upload_as", "meeting_upload_as", cfg.meeting_upload_as
+                )
             ),
         )

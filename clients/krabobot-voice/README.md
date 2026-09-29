@@ -10,7 +10,7 @@
    - wake only → окно `talk.listen_timeout_s` (default 10 с) до следующей реплики
    - wake + текст после фразы → команда сразу (без второго listen)
    - PTT → hold-to-talk; тот же `audio.listen_source` (`mic` \| `loopback`)
-   - Meeting → фон.поток + тот же сегментер на mic-tap; `meeting.capture`: `mic` | `loopback` | `mix`
+   - Meeting → отдельный процесс пишет WAV в `meetings/`; mic-tap для стоп-фразы; `meeting.capture`: `mic` | `loopback` | `mix`
 4. Локальный sherpa: команда (совещание / выход) → локально; иначе `POST /v1/voice/turn` (+ `client_state`)
 5. Проигрывает ответный WAV; сервер может вернуть actions (`meeting_stop` / `end_dialog` / …)
 6. **Dialog follow-up:** сегменты без wake до `talk.follow_up_s` тишины → **1 beep** → idle
@@ -40,7 +40,7 @@ wake:
   # phrases:               # опциональные алиасы
   #   - hey arnold
   silence_end_s: 0.55      # короче talk — snappy wake
-  max_s: 9.0               # cap одной фразы (filler + wake)
+  max_s: 2.0               # cap wake/команды (≤2 с by design)
   min_speech_s: 0.45
   energy_threshold: 0.006  # ниже = чувствительнее к тихому микрофону
 ```
@@ -64,7 +64,7 @@ wake:
 |------|---------|
 | Wake ASR | `local_asr.LocalWakeAsr.transcribe_pcm16` → `preprocess.preprocess_pcm16` |
 | Talk upload | `app._pcm_to_upload_wav` → `preprocess.preprocess_pcm16` |
-| Meeting upload | `app._handle_meeting_upload` → `preprocess.preprocess_wav_bytes` |
+| Meeting upload | `app._handle_meeting_upload` → multipart `files` (не `audio`) |
 
 Сервер дополнительно прогоняет тот же alignment в `voice_io` / sherpa STT — защита от «байты есть, transcription empty».
 
@@ -113,7 +113,7 @@ python -m krabobot_voice
 | Команда | Примеры фраз (настраиваются в `talk.*`) |
 |---------|----------------------------------------|
 | Старт совещания | «начать совещание», «начать запись», «запиши совещание» |
-| Стоп совещания | «закончить совещание», «завершить запись», «стоп запись» |
+| Стоп совещания | «закончить запись совещания», «закончить совещание», «стоп запись» |
 | Локальный тест | «выполни тест», «выполнить тест», «сделай тест», … |
 | Выход из диалога | «хватит», «выход», «спокойной ночи», «отмена» |
 
@@ -129,7 +129,7 @@ Hotkey **Ctrl+Alt+M** по-прежнему стартует/останавли�
 |----------|---------|--------|
 | `wake.energy_threshold` | `0.006` | Тихий mic всё ещё попадает в VAD (loopback: автониже) |
 | `wake.silence_end_s` | `0.55` | Короче talk — быстрый закрытие wake-фразы |
-| `wake.max_s` | `9.0` | Cap сегмента (filler + wake); без endless buffer |
+| `wake.max_s` | `2.0` | Cap wake/команды (и meeting mic-tap); ≤2 с by design |
 | `wake.min_speech_s` | `0.45` | Короткие «эй арнольд» не отбрасываются |
 
 ### VAD (Silero)
@@ -196,7 +196,13 @@ python -m krabobot_voice --test-loopback
 | `loopback` | Только системный звук (удалённые в Teams) |
 | `mic` | Только микрофон |
 
-По умолчанию hotkey **Ctrl+Alt+M** — старт/стоп. На стопе клиент шлёт выровненный WAV (16 kHz mono int16) + `meeting.instruct` на `/v1/voice/turn`.
+По умолчанию hotkey **Ctrl+Alt+M** — старт/стоп. Запись идёт в **отдельном процессе** и сразу пишется на диск:
+
+`%LOCALAPPDATA%\krabobot-voice\meetings\YYYYMMDD-HHMMSS.wav`
+
+(или `meeting.save_dir`). На стопе («закончить запись совещания» / hotkey) клиент шлёт WAV как multipart **`files`** (как большое видео в чате) + `meeting.instruct` — **без** поля `audio`, чтобы сервер не гонял весь клип через sherpa-STT. Сервер кладёт файл в workspace и добавляет в контент `[audio: path]` (как у видео-вложений).
+
+`meeting.upload_as: audio` — устаревший путь (короткие клипы через STT); для длинных совещаний не используйте.
 
 **Teams:**
 
@@ -237,6 +243,8 @@ Loopback идёт через **PyAudioWPatch** (ставится с клиент
 | `meeting.capture` | `mix` (default) \| `loopback` \| `mic` |
 | `meeting.hotkey` | Toggle старт/стоп (default `ctrl+alt+m`) |
 | `meeting.loopback_device` | Имя/индекс loopback; пусто → default output |
+| `meeting.save_dir` | Локальный каталог WAV; пусто → `%LOCALAPPDATA%\krabobot-voice\meetings` |
+| `meeting.upload_as` | `file` (default, multipart files) \| `audio` (legacy STT) |
 | `meeting.instruct` | Текст к upload на стопе |
 | `audio.listen_source` / `KRABOBOT_VOICE_LISTEN_SOURCE` | `mic` (default) \| `loopback` — wake + Talk/PTT; env перекрывает YAML |
 | `audio.input_device` / `audio.output_device` | Подсказка устройств (подстрока имени) |
@@ -286,7 +294,8 @@ krabobot_voice/
   preprocess.py  # 16 kHz / trim / normalize перед ASR и upload
   kws.py         # MFCC embedding KWS (optional)
   ptt.py         # hold-to-talk hotkey
-  meeting.py     # meeting start/stop thread + upload
+  meeting.py     # meeting subprocess capture + local WAV
+  meeting_worker.py  # CLI entry: python -m krabobot_voice.meeting_worker
   wake.py        # текстовый fuzzy-match по wake.phrase
   local_asr.py   # sherpa-onnx offline wake + commands
   vad.py         # energy VAD

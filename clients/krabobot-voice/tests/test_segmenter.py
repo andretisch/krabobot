@@ -105,21 +105,36 @@ def test_preroll_carries_across_calls() -> None:
 
 
 def test_speech_continues_after_deadline_once_started() -> None:
-    """Once speech started, an expired deadline must not drop the utterance."""
+    """With a far deadline, a started utterance still finishes on silence."""
     speech = [_tone() for _ in range(20)]
     trail = [_silence() for _ in range(12)]
     src = _ScriptedSource(speech + trail)
     seg = _seg(src)
-    # Flip deadline to the past after speech_start via poll.
     state = {"started_reads": 0}
 
     def poll() -> None:
         state["started_reads"] += 1
 
-    # Far deadline so we can start; segmenter finishes on silence.
     out = seg.next_segment(time.monotonic() + 5.0, poll=poll)
     assert out is not None
+    assert state["started_reads"] > 0
 
+
+def test_hard_deadline_aborts_after_speech_start() -> None:
+    """Sticky continuous speech past listen deadline → None (no max_s hang)."""
+    src = _ScriptedSource([_tone() for _ in range(800)])
+    seg = _seg(src, max_s=60.0, silence_end_s=5.0, min_speech_s=0.12)
+
+    def poll() -> None:
+        # Pace the loop so wall-clock deadline can fire mid-utterance.
+        time.sleep(0.025)
+
+    deadline = time.monotonic() + 0.12
+    t0 = time.monotonic()
+    out = seg.next_segment(deadline, poll=poll)
+    assert out is None
+    assert time.monotonic() - t0 < 1.5
+    assert not seg._started
 
 def test_configure_updates_energy() -> None:
     src = _ScriptedSource([])
@@ -194,3 +209,24 @@ def test_early_check_false_hits_max_without_silence() -> None:
     )
     assert out is not None
     assert out.size <= int(1.2 * SR)
+
+
+def test_max_s_counts_from_speech_start_not_idle_wait() -> None:
+    """Long silence before speech must not eat the wake/command max_s budget."""
+    # ~1.5 s silence, then continuous tone (no trailing silence) → close on max_s=0.6.
+    silence = [_silence() for _ in range(50)]
+    speech = [_tone() for _ in range(80)]
+    src = _ScriptedSource(silence + speech)
+    seg = _seg(src, max_s=0.6, silence_end_s=5.0, min_speech_s=0.12, preroll_s=0.1)
+    out = seg.next_segment(None)
+    assert out is not None
+    # Cap is ~0.6 s of utterance (+ preroll); must not be near-empty from early max.
+    assert out.size >= int(0.35 * SR)
+    assert out.size <= int(1.2 * SR)
+
+
+def test_wake_command_max_s_default_two_seconds() -> None:
+    """Default wake/meeting command window is 2.0 s."""
+    from krabobot_voice.config import VoiceClientConfig
+
+    assert VoiceClientConfig().wake_max_s == 2.0

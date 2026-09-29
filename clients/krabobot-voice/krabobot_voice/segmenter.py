@@ -25,9 +25,10 @@ class VadSegmenter:
     """Utterance segmenter whose preroll/state survive across phases.
 
     Lives for the lifetime of an open capture stream. ``next_segment`` returns
-    ``None`` only when **no speech has started** by ``deadline``. Once speech
-    is confirmed, the segment finishes on silence, ``max_s``, or an optional
-    ``early_check`` hit (local command / wake without waiting for silence).
+    ``None`` when the wall-clock ``deadline`` fires **before a commit** (even if
+    speech already started — safety against sticky VAD / long trails). Otherwise
+    the segment finishes on silence, ``max_s`` (counted from speech start), or an
+    optional ``early_check`` hit (local command / wake without waiting for silence).
     """
 
     read_block: Callable[[], np.ndarray]
@@ -38,7 +39,7 @@ class VadSegmenter:
     speech_start_s: float = 0.25
     min_speech_s: float = 1.2
     energy_threshold: float = 0.008
-    preroll_s: float = 0.4
+    preroll_s: float = 0.8
     # Optional classifier: pcm16 block → speaking (Silero or test mocks).
     speech_gate: Callable[[np.ndarray], bool] | None = None
     # When speech_gate is set: treat as non-speech if RMS is below this (CPU skip
@@ -184,8 +185,9 @@ class VadSegmenter:
         """Wait for the next VAD-closed utterance.
 
         ``deadline`` is an absolute ``time.monotonic()`` timestamp, or ``None``
-        for no listen timeout (idle forever). Returns ``None`` only if speech
-        never started before the deadline.
+        for no listen timeout (idle forever). When the deadline fires before a
+        commit, returns ``None`` even if speech already started (hard listen
+        wall-clock — avoids hanging until ``max_s`` on sticky VAD).
 
         When ``early_check`` is set, after ``early_check_min_s`` of voiced audio
         the callback runs about every ``early_check_interval_s`` on the growing
@@ -204,7 +206,10 @@ class VadSegmenter:
                 poll()
 
             now = time.monotonic()
-            if deadline is not None and now >= deadline and not self._started:
+            if deadline is not None and now >= deadline:
+                # Hard wall-clock: abandon uncommitted utterance (incl. sticky speech).
+                if self._started:
+                    self.reset_utterance()
                 return None
 
             chunk = self._read()
@@ -230,10 +235,12 @@ class VadSegmenter:
                         self._started = True
                         self._silence_run = 0
                         self._speech_blocks = self._speech_run
+                        # max_s caps the utterance after speech appears, not idle wait.
+                        self._elapsed = self._speech_blocks
                         blocks_since_check = 0
                 else:
                     self._speech_run = 0
-                if deadline is not None and time.monotonic() >= deadline and not self._started:
+                if deadline is not None and time.monotonic() >= deadline:
                     return None
                 continue
 
@@ -253,6 +260,9 @@ class VadSegmenter:
                         blocks_since_check = 0
                         if early_check(np.concatenate(self._buf)):
                             return self._finish_early()
+                    if deadline is not None and time.monotonic() >= deadline:
+                        self.reset_utterance()
+                        return None
                     if self._elapsed >= self._max_blocks:
                         data = self._finish_max()
                         self.reset_utterance()
@@ -285,6 +295,10 @@ class VadSegmenter:
                 blocks_since_check = 0
                 if early_check(np.concatenate(self._buf)):
                     return self._finish_early()
+
+            if deadline is not None and time.monotonic() >= deadline:
+                self.reset_utterance()
+                return None
 
             if self._elapsed >= self._max_blocks:
                 data = self._finish_max()
