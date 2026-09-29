@@ -1,4 +1,9 @@
-"""Energy-based VAD helpers for utterance capture."""
+"""Energy-based VAD helpers for utterance capture.
+
+Live wake/Talk capture prefers Silero via ``VadSegmenter.speech_gate``
+(``krabobot_voice.silero_vad``). These helpers remain the energy fallback
+and offline buffer utilities used by tests / legacy ``record_utterance``.
+"""
 
 from __future__ import annotations
 

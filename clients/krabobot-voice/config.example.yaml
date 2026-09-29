@@ -28,7 +28,8 @@ wake:
   silence_end_s: 0.55
   max_s: 9.0
   min_speech_s: 0.45
-  # Energy-gate for VAD speech_start (lower = more sensitive / quiet mics)
+  # Energy pre-gate when vad.backend=energy; with Silero this is only a
+  # quiet-mic hint for ASR preprocess (speech decision uses Silero).
   # For audio.listen_source=loopback the client auto-lowers this (~0.4×)
   energy_threshold: 0.006
   # Optional greetings used with fuzzy name match (auto-derived from phrase if omitted)
@@ -41,6 +42,18 @@ wake:
   refs_dir: ""
   # On Windows, synthesize a few SAPI reference WAVs if refs_dir is empty (KWS)
   auto_enroll_tts: true
+
+# ---------------------------------------------------------------------------
+# VAD — Silero ONNX (default) distinguishes speech from music / noise.
+# Energy backend is a fallback for tests / machines without onnxruntime.
+# Install: pip install -e ".\clients\krabobot-voice[asr]"  (pulls onnxruntime)
+# Model auto-downloads once to %LOCALAPPDATA%\krabobot-voice\models\silero_vad.onnx
+# ---------------------------------------------------------------------------
+vad:
+  backend: silero          # silero | energy
+  threshold: 0.5           # speech probability ≥ this → voiced frame
+  energy_pregate: 0.0008   # skip Silero when RMS below (pure silence only)
+  # model_path: ""         # override ONNX path (empty = default cache)
 
 # Push-to-talk (hold-to-talk): record while chord is held
 ptt:
@@ -71,6 +84,15 @@ talk:
     - закончи совещание
     - останови запись
     - стоп совещание
+  run_test:
+    - выполни тест
+    - выполнить тест
+    - сделай тест
+    - сделать тест
+    - запусти тест
+    - запустить тест
+    - проведи тест
+    - провести тест
   exit:
     - хватит
     - выход

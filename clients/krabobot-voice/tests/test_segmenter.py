@@ -128,3 +128,69 @@ def test_configure_updates_energy() -> None:
     assert seg.energy_threshold == 0.002
     assert seg.max_s == 3.0
     assert seg.min_speech_s == 0.3
+
+
+def test_early_check_closes_without_silence() -> None:
+    """Continuous energy (music-like): early_check match ends before max_s / silence."""
+    # Long continuous tone — no silence trail; max_s is far away.
+    src = _ScriptedSource([_tone() for _ in range(400)])
+    seg = _seg(src, max_s=12.0, silence_end_s=2.0, min_speech_s=0.12)
+    probes: list[int] = []
+
+    def early(pcm: np.ndarray) -> bool:
+        probes.append(int(pcm.size))
+        # Accept once we have ~0.8s of audio (enough for a short command).
+        return pcm.size >= int(0.8 * SR)
+
+    t0 = time.monotonic()
+    out = seg.next_segment(
+        time.monotonic() + 20.0,
+        early_check=early,
+        early_check_interval_s=0.15,
+        early_check_min_s=0.4,
+    )
+    elapsed = time.monotonic() - t0
+    assert out is not None
+    assert probes, "early_check should run at least once"
+    # Closed well before the 12s max (command-oriented exit).
+    assert elapsed < 3.0
+    assert out.size < int(4.0 * SR)
+
+
+def test_early_check_false_still_ends_on_silence() -> None:
+    speech = [_tone() for _ in range(20)]
+    trail = [_silence() for _ in range(12)]
+    src = _ScriptedSource(speech + trail)
+    seg = _seg(src)
+    probes = {"n": 0}
+
+    def early(_pcm: np.ndarray) -> bool:
+        probes["n"] += 1
+        return False
+
+    out = seg.next_segment(
+        time.monotonic() + 5.0,
+        early_check=early,
+        early_check_interval_s=0.1,
+        early_check_min_s=0.2,
+    )
+    assert out is not None
+    assert probes["n"] >= 1
+
+
+def test_early_check_false_hits_max_without_silence() -> None:
+    """Unmatched continuous energy still ends on max_s (music fallback)."""
+    src = _ScriptedSource([_tone() for _ in range(200)])
+    seg = _seg(src, max_s=0.6, silence_end_s=5.0, min_speech_s=0.12)
+
+    def early(_pcm: np.ndarray) -> bool:
+        return False
+
+    out = seg.next_segment(
+        time.monotonic() + 5.0,
+        early_check=early,
+        early_check_interval_s=0.2,
+        early_check_min_s=0.2,
+    )
+    assert out is not None
+    assert out.size <= int(1.2 * SR)

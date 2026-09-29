@@ -19,7 +19,9 @@
 
 По умолчанию `wake.mode: asr`:
 
-1. Energy VAD: `speech_start` → буфер до `speech_end` (+ preroll), cap `wake.max_s`
+1. Energy/Silero VAD: `speech_start` → буфер до `speech_end` (+ preroll), cap `wake.max_s`
+   - Default **`vad.backend: silero`** (ONNX, `onnxruntime`) — отличает речь от музыки
+   - Fallback **`vad.backend: energy`** — только RMS (для тестов без onnxruntime)
 2. **Preprocess** (DC → 16 kHz mono → trim silence → peak/RMS normalize) — внутри `LocalWakeAsr.transcribe_pcm16`
 3. **Один** локальный **sherpa-onnx** decode на закрытый сегмент (не sliding window)
 4. Fuzzy-match текста на вашу `wake.phrase` / `wake.phrases` (части фразы + edit-distance)
@@ -74,6 +76,7 @@ wake:
   (Параметры Windows → Конфиденциальность → Микрофон → разрешить классическим приложениям)
 - Для PTT: пакет `pynput` (ставится с клиентом)
 - Для `wake.mode: asr` (default): `sherpa-onnx` + скачанная STT-модель (`krabobot serve` один раз)
+- Для Silero VAD (default): `onnxruntime` (ставится с `[asr]` / `[vad]`); модель скачивается один раз в `%LOCALAPPDATA%\krabobot-voice\models\`
 
 ## Установка
 
@@ -111,6 +114,7 @@ python -m krabobot_voice
 |---------|----------------------------------------|
 | Старт совещания | «начать совещание», «начать запись», «запиши совещание» |
 | Стоп совещания | «закончить совещание», «завершить запись», «стоп запись» |
+| Локальный тест | «выполни тест», «выполнить тест», «сделай тест», … |
 | Выход из диалога | «хватит», «выход», «спокойной ночи», «отмена» |
 
 Hotkey **Ctrl+Alt+M** по-прежнему стартует/останавливает meeting.
@@ -127,6 +131,19 @@ Hotkey **Ctrl+Alt+M** по-прежнему стартует/останавли�
 | `wake.silence_end_s` | `0.55` | Короче talk — быстрый закрытие wake-фразы |
 | `wake.max_s` | `9.0` | Cap сегмента (filler + wake); без endless buffer |
 | `wake.min_speech_s` | `0.45` | Короткие «эй арнольд» не отбрасываются |
+
+### VAD (Silero)
+
+По умолчанию `vad.backend: silero` — ONNX-модель [snakers4/silero-vad](https://github.com/snakers4/silero-vad) через `onnxruntime` (без PyTorch). Отличает **речь** от музыки/шума, поэтому wordless music на loopback не держит сегмент 7–15 с.
+
+```yaml
+vad:
+  backend: silero       # или energy (только RMS)
+  threshold: 0.5
+  energy_pregate: 0.0008
+```
+
+Первый запуск скачивает `silero_vad.onnx` в `%LOCALAPPDATA%\krabobot-voice\models\`. Без `onnxruntime` клиент пишет WARNING и падает на `energy`.
 
 ### Wake (KWS, optional)
 
@@ -216,7 +233,7 @@ Loopback идёт через **PyAudioWPatch** (ставится с клиент
 | `ptt.hotkey` / `KRABOBOT_VOICE_PTT_HOTKEY` | Например `ctrl+alt+space` |
 | `talk.follow_up_s` | Окно диалога без wake после ответа (default `8`; `0` = off) |
 | `talk.follow_up_beep` | Beep на follow-up (default `false`) |
-| `talk.meeting_start` / `talk.meeting_stop` / `talk.exit` | Списки локальных фраз-команд |
+| `talk.meeting_start` / `talk.meeting_stop` / `talk.run_test` / `talk.exit` | Списки локальных фраз-команд |
 | `meeting.capture` | `mix` (default) \| `loopback` \| `mic` |
 | `meeting.hotkey` | Toggle старт/стоп (default `ctrl+alt+m`) |
 | `meeting.loopback_device` | Имя/индекс loopback; пусто → default output |

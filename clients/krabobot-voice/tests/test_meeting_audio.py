@@ -119,6 +119,12 @@ def test_listen_source_default_is_mic() -> None:
     assert cfg.audio_listen_source == "mic"
 
 
+def test_config_default_run_test_includes_infinitive() -> None:
+    cfg = VoiceClientConfig()
+    assert "выполнить тест" in cfg.cmd_run_test
+    assert "выполни тест" in cfg.cmd_run_test
+
+
 def test_config_loads_audio_listen_source(tmp_path: Path) -> None:
     path = tmp_path / "cfg.yaml"
     path.write_text(

@@ -15,9 +15,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Local sherpa wake (wake.mode: asr — default)
-asr = ["sherpa-onnx>=1.10"]
-wake = ["sherpa-onnx>=1.10"]
+# Local sherpa wake (wake.mode: asr — default) + Silero VAD (onnxruntime)
+asr = ["sherpa-onnx>=1.10", "onnxruntime>=1.16"]
+wake = ["sherpa-onnx>=1.10", "onnxruntime>=1.16"]
+# Speech vs non-speech VAD only (no sherpa)
+vad = ["onnxruntime>=1.16"]
 
 [project.scripts]
 krabobot-voice = "krabobot_voice.app:main"

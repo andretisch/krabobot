@@ -146,6 +146,17 @@ def _format_voice_client_state_line(raw: str) -> str | None:
         return None
     mode = str(data.get("mode") or "").strip() or "unknown"
     meeting = str(data.get("meeting") or "").strip() or "idle"
+    caps_raw = data.get("capabilities")
+    caps: list[str] = []
+    if isinstance(caps_raw, list):
+        caps = [str(c).strip() for c in caps_raw if str(c).strip()]
+    if caps:
+        return (
+            f"[voice client: mode={mode}, meeting={meeting}; "
+            f"available commands: {', '.join(caps)}. "
+            "If the user requests one of these, CALL the voice tool with that "
+            "action — do not only acknowledge in text.]"
+        )
     return f"[voice client: mode={mode}, meeting={meeting}]"
 
 

@@ -11,9 +11,10 @@ DEFAULT_CAPABILITIES: tuple[str, ...] = (
     "meeting_start",
     "meeting_stop",
     "end_dialog",
+    "run_test",
 )
 
-KNOWN_ACTIONS = frozenset({"meeting_start", "meeting_stop", "end_dialog"})
+KNOWN_ACTIONS = frozenset({"meeting_start", "meeting_stop", "end_dialog", "run_test"})
 
 
 @dataclass

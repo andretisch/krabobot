@@ -1,4 +1,4 @@
-"""Voice client action tool — server-driven commands for krabobot-voice."""
+"""Voice-client commands tool — invoke client-owned voice commands."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import Any
 
 from krabobot.agent.tools.base import Tool
 
-VOICE_CLIENT_ACTIONS = ("meeting_start", "meeting_stop", "end_dialog")
+VOICE_CLIENT_ACTIONS = ("meeting_start", "meeting_stop", "end_dialog", "run_test")
 
 _pending_lock = threading.Lock()
 # chat_id / device_id -> list of {"action": "..."}
@@ -15,7 +15,7 @@ _pending_actions: dict[str, list[dict[str, str]]] = {}
 
 
 def queue_voice_action(chat_id: str, action: str) -> None:
-    """Append a client action for the given voice chat/device."""
+    """Append a voice-client command for the given voice chat/device."""
     key = (chat_id or "").strip()
     if not key or action not in VOICE_CLIENT_ACTIONS:
         return
@@ -24,7 +24,7 @@ def queue_voice_action(chat_id: str, action: str) -> None:
 
 
 def pop_voice_actions(chat_id: str) -> list[dict[str, str]]:
-    """Remove and return all pending actions for chat_id (empty if none)."""
+    """Remove and return all pending commands for chat_id (empty if none)."""
     key = (chat_id or "").strip()
     if not key:
         return []
@@ -33,7 +33,7 @@ def pop_voice_actions(chat_id: str) -> list[dict[str, str]]:
 
 
 class VoiceClientActionTool(Tool):
-    """Queue a client-side action for the current voice turn response."""
+    """Queue a voice-client command for the current turn response."""
 
     def __init__(self) -> None:
         self._channel = ""
@@ -51,12 +51,17 @@ class VoiceClientActionTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Send a command to the voice client for this turn. "
-            "Only available on the voice channel. Actions: "
+            "REQUIRED for voice-client commands listed in client_state.capabilities. "
+            "When the user asks to run a test, start/stop a meeting, or end dialog, "
+            "you MUST call this tool with the matching action — do not only acknowledge "
+            "in text (saying 'тест запущен' without calling the tool does nothing). "
+            "Only available on the voice channel. Commands: "
             "meeting_start (begin local meeting recording), "
             "meeting_stop (stop recording), "
-            "end_dialog (exit dialog mode / return to idle). "
-            "The client applies actions after the reply audio is played."
+            "end_dialog (exit dialog mode / return to idle), "
+            "run_test (print a test confirmation on the client terminal — "
+            "use when user says выполнить/выполни/запусти тест). "
+            "The client executes the command after the reply audio is played."
         )
 
     @property
@@ -67,7 +72,7 @@ class VoiceClientActionTool(Tool):
                 "action": {
                     "type": "string",
                     "enum": list(VOICE_CLIENT_ACTIONS),
-                    "description": "Client action to perform",
+                    "description": "Voice-client command to invoke",
                 },
             },
             "required": ["action"],
@@ -79,6 +84,6 @@ class VoiceClientActionTool(Tool):
         if not self._chat_id:
             return "Error: no session context (chat_id)"
         if action not in VOICE_CLIENT_ACTIONS:
-            return f"Error: unknown action '{action}'"
+            return f"Error: unknown command '{action}'"
         queue_voice_action(self._chat_id, action)
-        return f"Queued voice client action: {action}"
+        return f"Queued voice client command: {action}"

@@ -23,6 +23,7 @@ def test_client_state_to_json() -> None:
     assert "meeting_start" in data["capabilities"]
     assert "meeting_stop" in data["capabilities"]
     assert "end_dialog" in data["capabilities"]
+    assert "run_test" in data["capabilities"]
 
 
 def test_parse_actions_from_header() -> None:
@@ -34,6 +35,11 @@ def test_parse_actions_from_header() -> None:
 def test_parse_actions_from_json_body() -> None:
     body = {"actions": [{"action": "meeting_start"}]}
     assert parse_actions({}, body) == ["meeting_start"]
+
+
+def test_parse_actions_run_test() -> None:
+    body = {"actions": [{"action": "run_test"}]}
+    assert parse_actions({}, body) == ["run_test"]
 
 
 def test_parse_actions_unknown_ignored() -> None:

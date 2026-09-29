@@ -11,6 +11,7 @@ import sys
 import time
 from collections import deque
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 
 import numpy as np
@@ -21,11 +22,13 @@ from krabobot_voice.audio_io import (
     play_wav_bytes,
     with_stream_keepalive,
 )
+from krabobot_voice.commands import match_local_command
 from krabobot_voice.config import VoiceClientConfig
 from krabobot_voice.dialog import (
     Beep,
     Hotkey,
     Mode,
+    RunTest,
     Segment,
     SendAudio,
     SendText,
@@ -45,8 +48,10 @@ from krabobot_voice.protocol import ClientState
 from krabobot_voice.ptt import PttHotkey
 from krabobot_voice.segmenter import VadSegmenter
 from krabobot_voice.vad import frame_rms, pcm_stats
+from krabobot_voice.wake import matches_wake_phrase
 
-# Loopback after downmix/resample is often quieter than a close mic.
+# Loopback after downmix/resample is often quieter than a close mic
+# (energy pre-gate / preprocess only — speech decision is Silero).
 _LOOPBACK_WAKE_ENERGY_SCALE = 0.4
 _LOOPBACK_WAKE_ENERGY_FLOOR = 0.0015
 _WAKE_DEBUG_HEARTBEAT_S = 30.0
@@ -72,7 +77,10 @@ def _log_debug(msg: str) -> None:
 
 
 def effective_wake_energy(threshold: float, *, listen_source: str) -> float:
-    """Lower energy gate for WASAPI loopback (system audio RMS is often low)."""
+    """Lower energy *pre-gate* for WASAPI loopback (system audio RMS is often low).
+
+    Not used for speech start/end when Silero ``speech_gate`` is active.
+    """
     thr = float(threshold)
     if (listen_source or "").strip().lower() != "loopback":
         return thr
@@ -87,6 +95,7 @@ def _session_config(cfg: VoiceClientConfig) -> VoiceSessionConfig:
         wake_greetings=list(cfg.wake_greetings),
         cmd_meeting_start=list(cfg.cmd_meeting_start),
         cmd_meeting_stop=list(cfg.cmd_meeting_stop),
+        cmd_run_test=list(cfg.cmd_run_test),
         cmd_exit=list(cfg.cmd_exit),
         meeting_enabled=bool(cfg.meeting_enabled),
     )
@@ -109,8 +118,15 @@ def _make_segmenter(
     max_s: float | None = None,
     silence_end_s: float | None = None,
     min_speech_s: float | None = None,
+    speech_gate: Callable[[np.ndarray], bool] | None = None,
+    energy_pregate: float | None = None,
 ) -> VadSegmenter:
     min_speech = float(min_speech_s if min_speech_s is not None else cfg.min_speech_s)
+    pregate = (
+        float(cfg.vad_energy_pregate)
+        if energy_pregate is None
+        else energy_pregate
+    )
     return VadSegmenter(
         read_block,
         sample_rate=sample_rate,
@@ -123,7 +139,42 @@ def _make_segmenter(
         min_speech_s=min_speech,
         energy_threshold=float(energy_threshold),
         preroll_s=cfg.preroll_s,
+        speech_gate=speech_gate,
+        energy_pregate=pregate if speech_gate is not None else None,
     )
+
+
+def _load_speech_gate(
+    cfg: VoiceClientConfig,
+) -> tuple[Callable[[np.ndarray], bool] | None, object | None, str]:
+    """Return (gate_fn, silero_instance_or_None, backend_label)."""
+    backend = (cfg.vad_backend or "silero").strip().lower()
+    if backend == "energy":
+        return None, None, "energy"
+    if backend != "silero":
+        _log(f"WARNING: unknown vad.backend={backend!r}; using energy")
+        return None, None, "energy"
+    try:
+        from krabobot_voice.silero_vad import load_silero_vad, silero_available
+    except Exception as e:
+        _log(f"WARNING: Silero VAD import failed ({e}); falling back to energy")
+        return None, None, "energy"
+    if not silero_available():
+        _log(
+            "WARNING: onnxruntime not installed — VAD falls back to energy. "
+            'Install: pip install -e ".\\clients\\krabobot-voice[asr]"'
+        )
+        return None, None, "energy"
+    try:
+        silero = load_silero_vad(
+            model_path=cfg.vad_model_path or None,
+            threshold=float(cfg.vad_threshold),
+            sample_rate=int(cfg.sample_rate),
+        )
+    except Exception as e:
+        _log(f"WARNING: Silero VAD load failed ({e}); falling back to energy")
+        return None, None, "energy"
+    return silero.is_speech, silero, "silero"
 
 
 def _record_while_held(
@@ -239,6 +290,8 @@ class _Driver:
         ptt: PttHotkey | None,
         meeting_hk: PttHotkey | None,
         wake_energy: float,
+        speech_gate: Callable[[np.ndarray], bool] | None = None,
+        silero: object | None = None,
     ) -> None:
         self.cfg = cfg
         self.http = http
@@ -248,10 +301,18 @@ class _Driver:
         self.ptt = ptt
         self.meeting_hk = meeting_hk
         self.wake_energy = wake_energy
+        self.speech_gate = speech_gate
+        self._silero = silero
         self._deadline: float | None = None
         self._pending_pcm: np.ndarray | None = None
         self._recorder: MeetingRecorder | None = None
         self._last_status = ""
+        self._early_asr_text: str | None = None
+
+    def _reset_vad_state(self) -> None:
+        reset = getattr(self._silero, "reset", None)
+        if callable(reset):
+            reset()
 
     def _status(self, msg: str) -> None:
         if msg != self._last_status:
@@ -278,6 +339,9 @@ class _Driver:
                 self._start_meeting()
             elif isinstance(eff, StopMeeting):
                 self._stop_meeting_and_upload()
+            elif isinstance(eff, RunTest):
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                _log(f"[test] {now} — тест выполнен")
 
     def _do_text_turn(self, text: str, *, mic: object | None) -> None:
         cleaned = (text or "").strip()
@@ -516,6 +580,64 @@ class _Driver:
         segmenter.feed_backlog(sink)
         return text
 
+    def _make_early_check(self, *, for_wake: bool) -> Callable[[np.ndarray], bool] | None:
+        """Optional energy-backend helper; unused when Silero speech_gate is active."""
+        # Silero closes music segments correctly — do not thrash partial ASR.
+        if self.speech_gate is not None:
+            return None
+        if for_wake and self.cfg.wake_mode == "kws" and self.kws is not None:
+
+            def _kws_check(pcm: np.ndarray) -> bool:
+                score = _kws_score(self.kws, pcm)  # type: ignore[arg-type]
+                if score < float(self.kws.threshold):  # type: ignore[union-attr]
+                    return False
+                phrase = (
+                    self.cfg.wake_phrases[0] if self.cfg.wake_phrases else "wake"
+                ).strip()
+                self._early_asr_text = phrase or "wake"
+                _log_debug(f"early-kws hit score={score:.3f}")
+                return True
+
+            return _kws_check
+
+        if self.asr is None:
+            return None
+
+        energy = min(self.wake_energy, 0.006) if for_wake else None
+
+        def _asr_check(pcm: np.ndarray) -> bool:
+            text = _transcribe(
+                self.asr,
+                pcm,
+                sample_rate=self.cfg.sample_rate,
+                energy_threshold=energy,
+            )
+            if not text:
+                return False
+            if for_wake:
+                hit = matches_wake_phrase(
+                    text,
+                    phrases=self.cfg.wake_phrases or None,
+                    greetings=self.cfg.wake_greetings or None,
+                )
+            else:
+                hit = (
+                    match_local_command(
+                        text,
+                        meeting_start=self.cfg.cmd_meeting_start,
+                        meeting_stop=self.cfg.cmd_meeting_stop,
+                        run_test=self.cfg.cmd_run_test,
+                        exit_dialog=self.cfg.cmd_exit,
+                    )
+                    is not None
+                )
+            if hit:
+                self._early_asr_text = text
+                _log_debug(f"early-asr hit: {text}")
+            return hit
+
+        return _asr_check
+
     def run_talk_loop(self, mic: object) -> None:
         """Drive one open capture stream until meeting starts or stream should reopen."""
         self._last_sink = None
@@ -535,6 +657,7 @@ class _Driver:
 
         # Idle uses wake VAD params; listen/dialog use talk params — switch energy
         # via segmenter.energy_threshold per mode.
+        self._reset_vad_state()
         segmenter = _make_segmenter(
             mic.read_block,
             sample_rate=int(mic.sample_rate),
@@ -544,6 +667,7 @@ class _Driver:
             max_s=wake_max,
             silence_end_s=wake_silence,
             min_speech_s=wake_min,
+            speech_gate=self.speech_gate,
         )
         last_heartbeat = time.monotonic()
 
@@ -576,7 +700,13 @@ class _Driver:
                     if text:
                         _log(f"  [local-asr] {text}")
                     self._apply(
-                        self.session.on_event(Segment(text, source="ptt")),
+                        self.session.on_event(
+                            Segment(
+                                text,
+                                source="ptt",
+                                upload_if_empty=self.asr is None,
+                            )
+                        ),
                         mic=mic,
                     )
                     self._feed_last_sink(segmenter)
@@ -618,8 +748,19 @@ class _Driver:
                 if self.ptt is not None and self.ptt.consume_edge_down():
                     raise _HotkeyAbortError("ptt")
 
+            for_wake = mode is Mode.IDLE
+            early = self._make_early_check(for_wake=for_wake)
+            self._early_asr_text = None
+
             try:
-                pcm = segmenter.next_segment(self._deadline, poll=_poll)
+                # With Silero, early is None — segment closes on Silero non-speech.
+                pcm = segmenter.next_segment(
+                    self._deadline,
+                    poll=_poll,
+                    early_check=early,
+                    early_check_interval_s=1.0,
+                    early_check_min_s=0.7,
+                )
             except _HotkeyAbortError as abort:
                 effects = self.session.on_event(Hotkey(abort.kind))
                 if (
@@ -642,7 +783,13 @@ class _Driver:
                     if text:
                         _log(f"  [local-asr] {text}")
                     self._apply(
-                        self.session.on_event(Segment(text, source="ptt")),
+                        self.session.on_event(
+                            Segment(
+                                text,
+                                source="ptt",
+                                upload_if_empty=self.asr is None,
+                            )
+                        ),
                         mic=mic,
                     )
                     self._feed_last_sink(segmenter)
@@ -661,16 +808,28 @@ class _Driver:
                 self._apply(self.session.on_event(Timeout()), mic=mic)
                 continue
 
-            for_wake = self.session.mode is Mode.IDLE
-            text = self._asr_pcm(pcm, mic=mic, segmenter=segmenter, for_wake=for_wake)
+            early_text = self._early_asr_text
+            self._early_asr_text = None
+            if early_text is not None:
+                text = early_text
+            else:
+                text = self._asr_pcm(
+                    pcm, mic=mic, segmenter=segmenter, for_wake=for_wake
+                )
             if text:
                 label = "wake-asr" if for_wake else "local-asr"
-                _log(f"  [{label}] {text}")
+                tag = "early" if early_text is not None else label
+                _log(f"  [{tag}] {text}")
             elif for_wake and self.cfg.wake_mode == "kws":
                 continue
 
             self._pending_pcm = pcm
-            self._apply(self.session.on_event(Segment(text)), mic=mic)
+            self._apply(
+                self.session.on_event(
+                    Segment(text, upload_if_empty=self.asr is None)
+                ),
+                mic=mic,
+            )
             self._feed_last_sink(segmenter)
             if self.session.mode is Mode.MEETING:
                 return
@@ -697,6 +856,7 @@ class _Driver:
         energy = effective_wake_energy(
             self.cfg.wake_energy_threshold, listen_source="mic"
         )
+        self._reset_vad_state()
         segmenter = _make_segmenter(
             tap.read_block,
             sample_rate=tap.sample_rate,
@@ -706,6 +866,7 @@ class _Driver:
             max_s=max(2.0, float(self.cfg.wake_max_s)),
             silence_end_s=max(0.25, float(self.cfg.wake_silence_end_s)),
             min_speech_s=max(0.2, float(self.cfg.wake_min_speech_s)),
+            speech_gate=self.speech_gate,
         )
         last_print = 0.0
         while self.session.mode is Mode.MEETING and recorder.active:
@@ -724,8 +885,43 @@ class _Driver:
                 if not recorder.active:
                     raise _HotkeyAbortError("meeting")
 
+            # With Silero, speech end is the gate — skip partial-ASR thrash.
+            early = None
+            if self.speech_gate is None and self.asr is not None:
+
+                def early(pcm: np.ndarray) -> bool:
+                    text = _transcribe(
+                        self.asr, pcm, sample_rate=self.cfg.sample_rate
+                    )
+                    if not text:
+                        return False
+                    if match_local_command(
+                        text,
+                        meeting_start=self.cfg.cmd_meeting_start,
+                        meeting_stop=self.cfg.cmd_meeting_stop,
+                        run_test=self.cfg.cmd_run_test,
+                        exit_dialog=self.cfg.cmd_exit,
+                    ) is not None:
+                        self._early_asr_text = text
+                        return True
+                    if matches_wake_phrase(
+                        text,
+                        phrases=self.cfg.wake_phrases or None,
+                        greetings=self.cfg.wake_greetings or None,
+                    ):
+                        self._early_asr_text = text
+                        return True
+                    return False
+
+            self._early_asr_text = None
             try:
-                pcm = segmenter.next_segment(self._deadline, poll=_poll)
+                pcm = segmenter.next_segment(
+                    self._deadline,
+                    poll=_poll,
+                    early_check=early,
+                    early_check_interval_s=1.0,
+                    early_check_min_s=0.7,
+                )
             except _HotkeyAbortError:
                 self._apply(self.session.on_event(Hotkey("meeting")))
                 break
@@ -736,16 +932,28 @@ class _Driver:
             if frame_rms(pcm) < energy * 0.5:
                 continue
 
-            text = ""
-            if self.asr is not None:
-                try:
-                    text = _transcribe(self.asr, pcm, sample_rate=self.cfg.sample_rate)
-                except Exception:
-                    text = ""
+            early_text = self._early_asr_text
+            self._early_asr_text = None
+            if early_text is not None:
+                text = early_text
+            else:
+                text = ""
+                if self.asr is not None:
+                    try:
+                        text = _transcribe(
+                            self.asr, pcm, sample_rate=self.cfg.sample_rate
+                        )
+                    except Exception:
+                        text = ""
             if text:
-                _log(f"  [meeting-asr] {text}")
+                tag = "early" if early_text is not None else "meeting-asr"
+                _log(f"  [{tag}] {text}")
             self._pending_pcm = pcm
-            self._apply(self.session.on_event(Segment(text)))
+            self._apply(
+                self.session.on_event(
+                    Segment(text, upload_if_empty=self.asr is None)
+                )
+            )
             if self.session.mode is not Mode.MEETING:
                 break
 
@@ -878,6 +1086,15 @@ def run_loop(config: VoiceClientConfig | None = None) -> int:
     if cfg.meeting_enabled:
         _log(f"meeting: capture={cfg.meeting_capture}, hotkey={cfg.meeting_hotkey}")
 
+    speech_gate, silero, vad_label = _load_speech_gate(cfg)
+    if vad_label == "silero":
+        _log(
+            f"vad: silero (thr={cfg.vad_threshold:.2f}, "
+            f"pregate_rms={cfg.vad_energy_pregate:.4f})"
+        )
+    else:
+        _log(f"vad: energy (thr≥{wake_energy:.4f})")
+
     link = ensure_device_linked(cfg)
     if not link.ok:
         _log(f"ERROR: привязка device_id не удалась: {link.message}")
@@ -970,14 +1187,14 @@ def run_loop(config: VoiceClientConfig | None = None) -> int:
         _log(
             f"wake KWS: VAD max={cfg.wake_max_s:.1f}s "
             f"silence_end={cfg.wake_silence_end_s:.2f}s "
-            f"energy≥{wake_energy:.4f}"
+            f"backend={vad_label}"
         )
     elif cfg.wake_mode == "asr":
         hints.append(f'скажите «{wake_label}» (ASR)')
         _log(
             f"wake ASR: VAD max={cfg.wake_max_s:.1f}s "
             f"silence_end={cfg.wake_silence_end_s:.2f}s "
-            f"energy≥{wake_energy:.4f} phrases={cfg.wake_phrases!r}"
+            f"backend={vad_label} phrases={cfg.wake_phrases!r}"
         )
     if ptt is not None:
         hints.append(f"или PTT {ptt.hotkey_label}")
@@ -995,6 +1212,8 @@ def run_loop(config: VoiceClientConfig | None = None) -> int:
         ptt=ptt,
         meeting_hk=meeting_hk,
         wake_energy=wake_energy,
+        speech_gate=speech_gate,
+        silero=silero,
     )
     talk_enabled = cfg.wake_mode != "off" or ptt is not None
 

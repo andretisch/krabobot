@@ -398,7 +398,12 @@ async def test_voice_turn_client_state_and_actions_header(tmp_path: Path, monkey
                     {
                         "mode": "dialog",
                         "meeting": "recording",
-                        "capabilities": ["meeting_start", "meeting_stop", "end_dialog"],
+                        "capabilities": [
+                            "meeting_start",
+                            "meeting_stop",
+                            "end_dialog",
+                            "run_test",
+                        ],
                     }
                 ),
             )
@@ -416,7 +421,10 @@ async def test_voice_turn_client_state_and_actions_header(tmp_path: Path, monkey
 
         content = loop.process_direct.await_args.args[0]
         assert "останови запись" in content
-        assert "[voice client: mode=dialog, meeting=recording]" in content
+        assert "[voice client: mode=dialog, meeting=recording;" in content
+        assert "available commands:" in content
+        assert "run_test" in content
+        assert "CALL the voice tool" in content
     finally:
         await client.close()
 

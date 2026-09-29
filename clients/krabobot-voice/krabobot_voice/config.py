@@ -214,6 +214,12 @@ class VoiceClientConfig:
     preroll_s: float = 0.4
     no_speech_timeout_s: float = 5.0
     energy_threshold: float = 0.008
+    # VAD: silero (default, ONNX speech vs music) | energy (RMS-only, no onnxruntime)
+    vad_backend: str = "silero"
+    vad_threshold: float = 0.5  # Silero speech probability threshold
+    # Skip Silero when frame RMS is below this (pure silence CPU save). Music is louder.
+    vad_energy_pregate: float = 0.0008
+    vad_model_path: str = ""  # empty = %LOCALAPPDATA%/krabobot-voice/models/silero_vad.onnx
     # Empty listen window (no speech yet): keep ~10s before idle / follow-up end
     talk_listen_timeout_s: float = 10.0  # post-wake window; falls back from no_speech_timeout_s
     talk_follow_up_s: float = 10.0  # 0 = disabled; typical 6–10
@@ -238,6 +244,18 @@ class VoiceClientConfig:
             "закончи совещание",
             "останови запись",
             "стоп совещание",
+        ]
+    )
+    cmd_run_test: list[str] = field(
+        default_factory=lambda: [
+            "выполни тест",
+            "выполнить тест",
+            "сделай тест",
+            "сделать тест",
+            "запусти тест",
+            "запустить тест",
+            "проведи тест",
+            "провести тест",
         ]
     )
     cmd_exit: list[str] = field(
@@ -344,6 +362,7 @@ class VoiceClientConfig:
         talk = data.get("talk") if isinstance(data.get("talk"), dict) else {}
         meeting = data.get("meeting") if isinstance(data.get("meeting"), dict) else {}
         audio = data.get("audio") if isinstance(data.get("audio"), dict) else {}
+        vad = data.get("vad") if isinstance(data.get("vad"), dict) else {}
 
         def pick(key: str, *alts: str, default: Any = None) -> Any:
             for k in (key, *alts):
@@ -372,6 +391,12 @@ class VoiceClientConfig:
         ).strip().lower()
         if meeting_capture not in {"mic", "loopback", "mix"}:
             meeting_capture = "mix"
+
+        vad_backend = str(
+            pick_nested(vad, "backend", "vad_backend", cfg.vad_backend) or cfg.vad_backend
+        ).strip().lower()
+        if vad_backend not in {"silero", "energy"}:
+            vad_backend = "silero"
 
         # Prefer audio.listen_source; also accept wake.input / wake.listen_source.
         listen_raw = pick_nested(
@@ -498,6 +523,21 @@ class VoiceClientConfig:
                 pick("no_speech_timeout_s", default=cfg.no_speech_timeout_s)
             ),
             energy_threshold=float(pick("energy_threshold", default=cfg.energy_threshold)),
+            vad_backend=vad_backend,
+            vad_threshold=float(
+                pick_nested(vad, "threshold", "vad_threshold", cfg.vad_threshold)
+            ),
+            vad_energy_pregate=float(
+                pick_nested(
+                    vad,
+                    "energy_pregate",
+                    "vad_energy_pregate",
+                    cfg.vad_energy_pregate,
+                )
+            ),
+            vad_model_path=str(
+                pick_nested(vad, "model_path", "vad_model_path", cfg.vad_model_path) or ""
+            ).strip(),
             talk_listen_timeout_s=_resolve_listen_timeout(
                 talk, data, cfg.talk_listen_timeout_s
             ),
@@ -534,6 +574,10 @@ class VoiceClientConfig:
                     meeting.get("stop_phrases", cfg.cmd_meeting_stop),
                 ),
                 cfg.cmd_meeting_stop,
+            ),
+            cmd_run_test=_as_str_list(
+                pick_nested(talk, "run_test", "cmd_run_test", cfg.cmd_run_test),
+                cfg.cmd_run_test,
             ),
             cmd_exit=_as_str_list(
                 pick_nested(talk, "exit", "cmd_exit", cfg.cmd_exit),

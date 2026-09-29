@@ -13,6 +13,7 @@ from krabobot_voice.dialog import (  # noqa: E402
     Beep,
     Hotkey,
     Mode,
+    RunTest,
     Segment,
     SendAudio,
     SendText,
@@ -34,6 +35,12 @@ def _cfg(**kwargs: object) -> VoiceSessionConfig:
         wake_greetings=["эй", "hey"],
         cmd_meeting_start=["начать запись", "начни запись"],
         cmd_meeting_stop=["стоп запись", "завершить запись"],
+        cmd_run_test=[
+            "выполни тест",
+            "выполнить тест",
+            "сделай тест",
+            "запусти тест",
+        ],
         cmd_exit=["хватит", "выход"],
         meeting_enabled=True,
     )
@@ -103,6 +110,43 @@ def test_listen_local_exit() -> None:
     assert s.mode is Mode.IDLE
 
 
+def test_listen_local_run_test() -> None:
+    s = VoiceSession(_cfg())
+    _effects(s, Segment("эй арнольд"))
+    effects = _effects(s, Segment("выполни тест"))
+    assert any(isinstance(e, RunTest) for e in effects)
+    assert not any(isinstance(e, SendAudio) for e in effects)
+    assert s.mode is Mode.DIALOG
+    assert any(isinstance(e, SetDeadline) and e.seconds == 10.0 for e in effects)
+
+
+def test_listen_local_run_test_infinitive() -> None:
+    """ASR often returns infinitive «выполнить» instead of imperative «выполни»."""
+    s = VoiceSession(_cfg())
+    _effects(s, Segment("эй арнольд"))
+    effects = _effects(s, Segment("Выполнить тест."))
+    assert any(isinstance(e, RunTest) for e in effects)
+    assert not any(isinstance(e, SendAudio) for e in effects)
+    assert s.mode is Mode.DIALOG
+
+
+def test_dialog_local_run_test_no_upload() -> None:
+    s = VoiceSession(_cfg())
+    s.mode = Mode.DIALOG
+    effects = _effects(s, Segment("выполнить тест"))
+    assert any(isinstance(e, RunTest) for e in effects)
+    assert not any(isinstance(e, SendAudio) for e in effects)
+
+
+def test_run_test_action() -> None:
+    s = VoiceSession(_cfg())
+    s.mode = Mode.DIALOG
+    effects = _effects(s, TurnDone(ok=True, actions=("run_test",)))
+    assert any(isinstance(e, RunTest) for e in effects)
+    assert s.mode is Mode.DIALOG
+    assert any(isinstance(e, SetDeadline) and e.seconds == 10.0 for e in effects)
+
+
 def test_turn_ok_enters_dialog() -> None:
     s = VoiceSession(_cfg())
     _effects(s, Segment("эй арнольд"))
@@ -124,6 +168,24 @@ def test_dialog_segment_send_audio() -> None:
     s = VoiceSession(_cfg())
     s.mode = Mode.DIALOG
     effects = _effects(s, Segment("ещё вопрос"))
+    assert any(isinstance(e, SendAudio) for e in effects)
+
+
+def test_empty_asr_discards_without_upload() -> None:
+    """Music/noise with empty local ASR must not force a server turn."""
+    s = VoiceSession(_cfg())
+    _effects(s, Segment("эй арнольд"))
+    assert s.mode is Mode.LISTEN
+    effects = _effects(s, Segment(""))
+    assert not any(isinstance(e, SendAudio) for e in effects)
+    assert s.mode is Mode.LISTEN
+
+
+def test_empty_asr_upload_if_empty_fallback() -> None:
+    """When local ASR engine is absent, empty text still uploads PCM."""
+    s = VoiceSession(_cfg())
+    s.mode = Mode.DIALOG
+    effects = _effects(s, Segment("", upload_if_empty=True))
     assert any(isinstance(e, SendAudio) for e in effects)
 
 
