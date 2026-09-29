@@ -327,6 +327,8 @@ async def test_voice_turn_with_mocks(tmp_path: Path, monkeypatch) -> None:
         content = loop.process_direct.await_args.args[0]
         assert "привет мир" in content
         assert "учти файл" in content
+        assert "без Markdown" in content
+        assert "без эмодзи" in content
         media = call_kw.get("media") or []
         assert media and any("notes.txt" in p for p in media)
     finally:

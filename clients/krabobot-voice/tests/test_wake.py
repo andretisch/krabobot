@@ -113,6 +113,16 @@ def test_wake_phrase_merges_aliases() -> None:
     assert "hey bot" in out
 
 
+def test_default_talk_silence_end_and_listen_timeout() -> None:
+    from krabobot_voice.config import VoiceClientConfig
+
+    cfg = VoiceClientConfig()
+    assert cfg.silence_end_s == 2.0
+    assert cfg.talk_listen_timeout_s == 10.0
+    assert cfg.talk_follow_up_s == 10.0
+    assert cfg.wake_silence_end_s == 0.55
+
+
 def test_load_config_wake_vad_params(tmp_path: Path) -> None:
     import yaml
     from krabobot_voice.config import VoiceClientConfig
@@ -141,6 +151,7 @@ def test_load_config_wake_vad_params(tmp_path: Path) -> None:
     assert cfg.wake_silence_end_s == 0.5
     assert cfg.wake_min_speech_s == 0.4
     assert cfg.wake_energy_threshold == 0.006
+    assert cfg.silence_end_s == 2.0  # Talk default when YAML omits it
     assert matches_wake_phrase(
         "привет краб",
         phrases=cfg.wake_phrases,

@@ -52,6 +52,8 @@ ptt:
 # Each utterance is first decoded by local sherpa; matched commands stay local
 # (no POST /v1/voice/turn). Cues: 2 beeps on wake, 1 beep on return to idle.
 talk:
+  # Empty listen (no speech yet): wait this long before idle. After speech starts,
+  # end-of-utterance uses top-level silence_end_s (~2s), not this timeout.
   listen_timeout_s: 10.0  # post-wake window (fallback: no_speech_timeout_s)
   follow_up_s: 10.0       # 0 = disable; silence → 1 beep → idle
   beeps: true             # 2 beeps on wake / wake+command; 1 beep on idle return
@@ -111,12 +113,15 @@ meeting:
 # After beep: discard settle_s (flush mic buffer), then require min_speech_s
 # before VAD may end on silence — avoids posting near-empty clips to STT.
 # Client also peak/RMS-normalizes + trims before POST /v1/voice/turn.
+# silence_end_s: after speech started, finish Talk/LISTEN/DIALOG on this silence
+# (~2s). Empty windows still wait talk.listen_timeout_s / follow_up_s (~10s).
 # no_speech_timeout_s is legacy fallback for talk.listen_timeout_s.
 utterance_max_s: 15.0
 settle_s: 0.35
 preroll_s: 0.4
 speech_start_s: 0.25
 min_speech_s: 1.2
-silence_end_s: 1.2
+silence_end_s: 2.0
 no_speech_timeout_s: 5.0
 energy_threshold: 0.008
+

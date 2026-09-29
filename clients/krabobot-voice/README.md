@@ -209,6 +209,8 @@ Loopback идёт через **PyAudioWPatch** (ставится с клиент
 | `wake.greetings` | Приветствия для fuzzy name; иначе из `phrase` |
 | `wake.energy_threshold` | Energy-gate для VAD speech_start (loopback: автониже) |
 | `wake.silence_end_s` / `wake.max_s` / `wake.min_speech_s` | VAD wake: тишина / cap / min voiced |
+| `silence_end_s` | После речи в Talk/LISTEN: закрыть сегмент (~`2.0` с тишины) |
+| `talk.listen_timeout_s` / `talk.follow_up_s` | Пустое окно без речи (~`10` с) → idle |
 | `wake.threshold` | Cosine threshold для KWS |
 | `wake.refs_dir` | Папка reference WAV (KWS) |
 | `ptt.hotkey` / `KRABOBOT_VOICE_PTT_HOTKEY` | Например `ctrl+alt+space` |

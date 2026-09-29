@@ -127,6 +127,12 @@ def _chat_completion_response(content: str, model: str) -> dict[str, Any]:
     }
 
 
+# Injected into every voice turn so TTS gets speech-friendly plain text.
+_VOICE_REPLY_HINT = (
+    "Отвечай для голосового интерфейса: без Markdown, без эмодзи, обычный текст."
+)
+
+
 def _format_voice_client_state_line(raw: str) -> str | None:
     """Build a short context line from client_state JSON, or None if unusable."""
     text = (raw or "").strip()
@@ -1234,7 +1240,8 @@ async def handle_voice_turn(request: web.Request) -> web.Response:
             content_parts.append(state_line)
         if not content_parts and not final_media:
             return _error_json(400, "Нужен audio, instruct или файл")
-        content = "\n\n".join(content_parts) if content_parts else "Обработай приложенные файлы."
+        body = "\n\n".join(content_parts) if content_parts else "Обработай приложенные файлы."
+        content = f"{_VOICE_REPLY_HINT}\n\n{body}"
 
         # Drop any stale actions from a previous failed turn for this device.
         pop_voice_actions(device_id)

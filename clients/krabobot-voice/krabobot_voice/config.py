@@ -206,16 +206,18 @@ class VoiceClientConfig:
     ptt_hotkey: str = "ctrl+alt+space"
     # Utterance capture (post-wake VAD)
     utterance_max_s: float = 15.0
-    silence_end_s: float = 1.2
+    # After speech started: close Talk/LISTEN/DIALOG segment on this much silence.
+    silence_end_s: float = 2.0
     speech_start_s: float = 0.25
     min_speech_s: float = 1.2
     settle_s: float = 0.35
     preroll_s: float = 0.4
     no_speech_timeout_s: float = 5.0
     energy_threshold: float = 0.008
-    # Dialog mode: after successful Talk turn, listen again without wake
+    # Empty listen window (no speech yet): keep ~10s before idle / follow-up end
     talk_listen_timeout_s: float = 10.0  # post-wake window; falls back from no_speech_timeout_s
     talk_follow_up_s: float = 10.0  # 0 = disabled; typical 6–10
+
     talk_follow_up_beep: bool = False  # legacy; prefer talk.beeps
     talk_beeps: bool = True  # 2 beeps on wake, 1 beep on return to idle
     # Local voice commands (sherpa ASR on utterance before server upload)

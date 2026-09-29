@@ -25,7 +25,7 @@ class VadSegmenter:
     sample_rate: int
     block: int
     max_s: float = 15.0
-    silence_end_s: float = 1.2
+    silence_end_s: float = 2.0
     speech_start_s: float = 0.25
     min_speech_s: float = 1.2
     energy_threshold: float = 0.008
