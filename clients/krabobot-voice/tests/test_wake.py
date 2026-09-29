@@ -123,7 +123,8 @@ def test_default_talk_silence_end_and_listen_timeout() -> None:
     assert cfg.talk_listen_silence_end_s == 0.7
     assert cfg.wake_silence_end_s == 0.55
     assert cfg.wake_max_s == 2.0
-    assert cfg.preroll_s == 0.8
+    assert cfg.preroll_s == 1.2
+    assert cfg.speech_start_s == 0.10
     assert cfg.stt_num_threads == 0  # auto until resolve_stt_num_threads / load
 
 
@@ -438,3 +439,141 @@ def test_asr_miss_logs_when_debug(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(voice_app, "_log", lambda m: lines.append(m))
     voice_app._log_asr_text("просто болтовня", tag="meeting-asr", matched=False)
     assert lines == ["  [meeting-asr] просто болтовня"]
+
+
+def test_default_early_asr_s() -> None:
+    from krabobot_voice.config import VoiceClientConfig
+
+    assert VoiceClientConfig().wake_early_asr_s == 0.8
+
+
+def test_load_config_early_asr_s(tmp_path: Path) -> None:
+    import yaml
+    from krabobot_voice.config import VoiceClientConfig
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        yaml.safe_dump({"wake": {"early_asr_s": 0.7}}, allow_unicode=True),
+        encoding="utf-8",
+    )
+    cfg = VoiceClientConfig.load(cfg_path)
+    assert cfg.wake_early_asr_s == 0.7
+
+
+def test_early_check_enabled_with_silero_for_wake_and_meeting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Idle wake + meeting stop paths must run early ASR even with Silero gate."""
+    from unittest.mock import MagicMock
+
+    from krabobot_voice.app import _EARLY_ASR_INTERVAL_S, _Driver
+    from krabobot_voice.config import VoiceClientConfig
+    from krabobot_voice.dialog import VoiceSession, VoiceSessionConfig
+
+    cfg = VoiceClientConfig()
+    assert cfg.wake_early_asr_s == 0.8
+    assert _EARLY_ASR_INTERVAL_S == 0.6
+
+    class FakeAsr:
+        def __init__(self) -> None:
+            self.calls: list[int] = []
+            self.text = "эй арнольд"
+
+        def transcribe_pcm16(self, pcm, sample_rate=16000, **_kw):  # noqa: ANN001
+            self.calls.append(int(np.asarray(pcm).size))
+            return self.text
+
+    asr = FakeAsr()
+    driver = _Driver(
+        cfg,
+        MagicMock(),
+        VoiceSession(VoiceSessionConfig()),
+        asr=asr,
+        kws=None,
+        ptt=None,
+        meeting_hk=None,
+        wake_energy=0.01,
+        speech_gate=lambda _pcm: True,  # Silero present — must NOT disable early
+    )
+
+    min_s, interval_s = driver._early_asr_cadence()
+    assert min_s == 0.8
+    assert interval_s == 0.6
+
+    wake_early = driver._make_early_check(for_wake=True)
+    assert wake_early is not None
+    pcm = (np.sin(np.linspace(0, 40, 16000)).astype(np.float32) * 8000).astype(np.int16)
+    assert wake_early(pcm) is True
+    assert driver._early_asr_text == "эй арнольд"
+
+    driver._early_asr_text = None
+    asr.text = "закончить запись совещания"
+    meeting_early = driver._make_early_check(
+        for_wake=False, match_wake=False, match_commands=True
+    )
+    assert meeting_early is not None
+    assert meeting_early(pcm) is True
+    assert driver._early_asr_text == "закончить запись совещания"
+
+    # Wake+stop (custom wake) must early-hit as command during meeting.
+    driver._early_asr_text = None
+    driver.cfg.wake_phrases = ["ок бот"]
+    driver.cfg.wake_greetings = ["ок"]
+    asr.text = "ок бот закончить запись"
+    assert meeting_early(pcm) is True
+    assert driver._early_asr_text == "ок бот закончить запись"
+
+    # Wake-only must NOT early-commit during meeting (avoid cutting wake+cmd).
+    driver._early_asr_text = None
+    asr.text = "ок бот"
+    assert meeting_early(pcm) is False
+    assert driver._early_asr_text is None
+
+
+def test_early_wake_match_closes_segment_before_silence() -> None:
+    """Wake early_check path: match within 0.8s buffer, no silence wait."""
+    from krabobot_voice.segmenter import VadSegmenter
+
+    sr, block = 16000, 480
+    tone = (np.sin(2 * np.pi * 440 * np.arange(block) / sr) * 8000).astype(np.int16)
+    silence = np.zeros(block, dtype=np.int16)
+    blocks = [tone for _ in range(200)]  # continuous; silence never arrives
+    i = {"n": 0}
+
+    def read_block() -> np.ndarray:
+        if i["n"] >= len(blocks):
+            return silence
+        b = blocks[i["n"]]
+        i["n"] += 1
+        return b
+
+    seg = VadSegmenter(
+        read_block,
+        sample_rate=sr,
+        block=block,
+        max_s=2.0,
+        silence_end_s=5.0,
+        speech_start_s=0.06,
+        min_speech_s=0.12,
+        energy_threshold=0.01,
+        preroll_s=0.1,
+        speech_gate=lambda _p: True,
+        energy_pregate=0.0,
+    )
+    probes: list[float] = []
+
+    def early(pcm: np.ndarray) -> bool:
+        probes.append(pcm.size / sr)
+        return pcm.size >= int(0.8 * sr)
+
+    out = seg.next_segment(
+        None,
+        early_check=early,
+        early_check_interval_s=0.6,
+        early_check_min_s=0.8,
+    )
+    assert out is not None
+    assert probes and probes[0] <= 1.05
+    assert out.size <= int(1.5 * sr)
+    # Did not wait for trailing silence (would need silence_end_s=5s).
+    assert i["n"] < 80

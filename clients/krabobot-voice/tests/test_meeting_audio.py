@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sys
+import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -381,11 +383,16 @@ def test_meeting_upload_uses_files_not_audio(
         wake_energy=0.01,
     )
     driver._handle_meeting_upload(wav, duration_s=1.0, capture="mix")
+    t = driver._meeting_upload_thread
+    assert t is not None
+    t.join(timeout=2.0)
+    assert not t.is_alive()
     assert len(calls) == 1
     assert calls[0].get("files") == [wav]
     assert calls[0].get("audio_bytes") is None
     assert calls[0].get("audio_path") is None
     assert calls[0].get("instruct") == "summarize meeting"
+    assert calls[0].get("async_meeting") is True
 
 
 def test_meeting_worker_start_stop_smoke(
@@ -440,3 +447,41 @@ def test_meeting_worker_start_stop_smoke(
     assert out.is_file()
     assert out.read_bytes()[:4] == b"RIFF"
     assert status.is_file()
+
+
+def test_meeting_recorder_stop_survives_keyboard_interrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ctrl+C during stop() must not hang; returns best-effort result."""
+    wav = tmp_path / "m.wav"
+    # Non-trivial WAV so empty-frames fallback accepts the file.
+    wav.write_bytes(pcm16_to_wav_bytes(np.zeros(1600, dtype=np.int16), sample_rate=16000))
+
+    rec = MeetingRecorder(
+        MeetingCaptureConfig(capture="mic", sample_rate=16000, max_s=10),
+        save_dir=tmp_path,
+        use_process=False,
+    )
+    rec._active = True
+    rec._wav_path = wav
+    rec._started_at = time.monotonic()
+    rec._stop_event = threading.Event()
+    rec._result = {
+        "frames": 1600,
+        "duration_s": 0.1,
+        "capture": "mic",
+        "error": "",
+        "wav_path": str(wav),
+    }
+    thread = threading.Thread(target=lambda: None, daemon=True)
+    thread.start()
+    thread.join(timeout=1.0)
+    rec._thread = thread
+
+    def flaky_join(self, timeout=None):  # noqa: ANN001
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(threading.Thread, "join", flaky_join)
+    result = rec.stop()
+    assert result.wav_path == wav
+    assert result.frames == 1600

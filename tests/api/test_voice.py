@@ -413,7 +413,10 @@ async def test_voice_turn_client_state_and_actions_header(tmp_path: Path, monkey
                 headers={"Authorization": "Bearer tok-admin"},
             )
         assert r.status == 200, await r.text()
-        assert r.headers.get("Content-Type", "").startswith("audio/wav")
+        assert "json" in r.headers.get("Content-Type", "").lower()
+        payload = await r.json()
+        assert payload.get("actions") == [{"action": "meeting_stop"}]
+        assert payload.get("audio") is None
         raw_actions = r.headers.get("X-Krabobot-Voice-Actions")
         assert raw_actions is not None
         actions = json.loads(unquote(raw_actions))

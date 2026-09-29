@@ -1136,6 +1136,7 @@ async def handle_voice_turn(request: web.Request) -> web.Response:
     device_id = ""
     instruct = ""
     client_state_raw = ""
+    async_meeting = False
     audio_path: Path | None = None
     media_paths: list[str] = []
     tmp_dir = Path(tempfile.mkdtemp(prefix="voice_turn_"))
@@ -1158,6 +1159,10 @@ async def handle_voice_turn(request: web.Request) -> web.Response:
                     continue
                 if name == "client_state":
                     client_state_raw = (await part.text()).strip()
+                    continue
+                if name == "async":
+                    val = (await part.text()).strip().lower()
+                    async_meeting = val in ("1", "true", "yes", "on")
                     continue
                 if name == "audio":
                     filename = Path(part.filename or "audio.wav").name
@@ -1197,6 +1202,12 @@ async def handle_voice_turn(request: web.Request) -> web.Response:
             device_id = str(post.get("device_id") or "").strip()
             instruct = str(post.get("instruct") or "").strip()
             client_state_raw = str(post.get("client_state") or "").strip()
+            async_meeting = str(post.get("async") or "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
         else:
             return _error_json(400, "Ожидается multipart/form-data")
 
@@ -1239,6 +1250,40 @@ async def handle_voice_turn(request: web.Request) -> web.Response:
                 except OSError as e:
                     logger.warning("Failed to place voice upload {}: {}", src_p, e)
                     final_media.append(str(src_p.resolve()))
+
+        if request.path.rstrip("/").endswith("/v1/voice/meeting"):
+            async_meeting = True
+            if not final_media or audio_path is not None:
+                return _error_json(
+                    400,
+                    "POST /v1/voice/meeting expects multipart files= without audio",
+                )
+
+        if async_meeting and final_media and audio_path is None:
+            from krabobot.api.voice_meeting import run_voice_meeting_job
+
+            session_key = f"voice:{device_id}"
+            pop_voice_actions(device_id)
+            asyncio.create_task(
+                run_voice_meeting_job(
+                    agent_loop,
+                    device_id=device_id,
+                    instruct=instruct,
+                    media_paths=list(final_media),
+                    session_key=session_key,
+                    timeout_s=timeout_s,
+                )
+            )
+            return web.json_response(
+                {
+                    "object": "voice.meeting",
+                    "status": "queued",
+                    "device_id": device_id,
+                    "message": "Совещание в очереди на обработку; результат придёт на почту администратора.",
+                },
+                status=202,
+                headers={"X-Krabobot-Device-Id": device_id},
+            )
 
         transcript = ""
         if audio_path is not None:
@@ -1307,13 +1352,13 @@ async def handle_voice_turn(request: web.Request) -> web.Response:
         if not reply:
             reply = "[empty message]"
 
-        from krabobot.config.loader import load_config
+        action_names = {
+            str(a.get("action") or "").strip()
+            for a in actions
+            if isinstance(a, dict)
+        }
+        skip_tts = "meeting_stop" in action_names
 
-        try:
-            tts_cfg = load_config().tts
-        except Exception:
-            tts_cfg = None
-        wav = await synthesize_speech_wav(reply, tts=tts_cfg)
         # Header values must be latin-1-safe for aiohttp; percent-encode UTF-8.
         headers = {
             "X-Krabobot-Device-Id": device_id,
@@ -1321,6 +1366,26 @@ async def handle_voice_turn(request: web.Request) -> web.Response:
             "X-Krabobot-Reply": quote(reply[:2000], safe=""),
             "X-Krabobot-Voice-Actions": _encode_voice_actions_header(actions),
         }
+        if skip_tts:
+            return web.json_response(
+                {
+                    "object": "voice.turn",
+                    "device_id": device_id,
+                    "transcript": transcript,
+                    "reply": reply,
+                    "audio": None,
+                    "actions": actions,
+                },
+                headers=headers,
+            )
+
+        from krabobot.config.loader import load_config
+
+        try:
+            tts_cfg = load_config().tts
+        except Exception:
+            tts_cfg = None
+        wav = await synthesize_speech_wav(reply, tts=tts_cfg)
         if wav is None:
             return web.json_response(
                 {
@@ -1383,6 +1448,7 @@ def create_app(
     app.router.add_get("/v1/models", handle_models)
     app.router.add_get("/health", handle_health)
     app.router.add_post("/v1/voice/turn", handle_voice_turn)
+    app.router.add_post("/v1/voice/meeting", handle_voice_turn)
     app.router.add_get("/v1/web/auth/status", handle_auth_status)
     app.router.add_post("/v1/web/auth/setup", handle_auth_setup)
     app.router.add_post("/v1/web/auth/login", handle_auth_login)

@@ -25,6 +25,7 @@ class VoiceTurnResult:
     json_body: dict[str, Any] | None = None
     error_message: str = ""
     actions: list[str] = field(default_factory=list)
+    queued: bool = False
 
 
 class VoiceHttpClient:
@@ -43,6 +44,8 @@ class VoiceHttpClient:
         files: list[str | Path] | None = None,
         device_id: str | None = None,
         client_state: ClientState | str | dict[str, Any] | None = None,
+        async_meeting: bool = False,
+        timeout_s: float | None = None,
     ) -> VoiceTurnResult:
         """Send one turn. Provide audio and/or instruct (and optional files)."""
         did = (device_id or self.config.device_id).strip()
@@ -56,6 +59,8 @@ class VoiceHttpClient:
         state_json = _client_state_json(client_state)
         if state_json:
             multipart.append(("client_state", (None, state_json)))
+        if async_meeting:
+            multipart.append(("async", (None, "1")))
 
         if audio_bytes is not None:
             multipart.append(("audio", (audio_filename, audio_bytes, "audio/wav")))
@@ -82,7 +87,8 @@ class VoiceHttpClient:
             headers["Authorization"] = f"Bearer {self.config.token}"
 
         url = f"{self.config.base_url}/v1/voice/turn"
-        with httpx.Client(timeout=self.config.timeout_s) as client:
+        req_timeout = self.config.timeout_s if timeout_s is None else float(timeout_s)
+        with httpx.Client(timeout=req_timeout) as client:
             resp = client.post(url, files=multipart, headers=headers)
 
         transcript = unquote(resp.headers.get("X-Krabobot-Transcript") or "")
@@ -110,6 +116,9 @@ class VoiceHttpClient:
                 err = resp.text[:300]
 
         actions = parse_actions(resp.headers, json_body if isinstance(json_body, dict) else None)
+        queued = resp.status_code == 202
+        if isinstance(json_body, dict) and json_body.get("status") == "queued":
+            queued = True
 
         return VoiceTurnResult(
             status_code=resp.status_code,
@@ -120,6 +129,7 @@ class VoiceHttpClient:
             json_body=json_body,
             error_message=err,
             actions=actions,
+            queued=queued,
         )
 
 

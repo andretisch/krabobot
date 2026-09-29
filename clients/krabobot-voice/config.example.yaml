@@ -1,4 +1,8 @@
-# Copy to %LOCALAPPDATA%\krabobot-voice\config.yaml
+# Keep/edit as config.yaml next to the app (same folder for both modes):
+#   - Frozen: beside krabobot-voice.exe
+#   - python -m / editable: clients/krabobot-voice/ (package root)
+# First run copies this example → config.yaml in that folder if missing.
+# Overrides: argv path, KRABOBOT_VOICE_CONFIG (file), KRABOBOT_VOICE_CONFIG_DIR.
 # Token: leave empty to use api.auth.adminToken from ~/.krabobot/config.json
 
 base_url: http://127.0.0.1:8900
@@ -24,11 +28,15 @@ wake:
   # Optional aliases (merged with phrase, deduped). Leave empty to use only phrase.
   phrases: []
   # VAD-segmented wake/commands: speech_start → silence_end OR max_s → one ASR/KWS
+  # After speech_start, early ASR/KWS on the growing buffer (idle wake + meeting
+  # mic-tap): first probe at early_asr_s, then ~every 0.6 s until silence/max_s.
+  # Match → immediate effect (no wait for silence_end). Cap still max_s.
   # Commands (and wake+command in one breath) are ≤2 s by design — hard clip cap.
   # Also used for meeting mic-tap stop/wake listening (not full meeting audio).
   # Alias: command_max_s
   silence_end_s: 0.55
   max_s: 2.0
+  early_asr_s: 0.8
   min_speech_s: 0.45
   # Energy pre-gate when vad.backend=energy; with Silero this is only a
   # quiet-mic hint for ASR preprocess (speech decision uses Silero).
@@ -82,12 +90,17 @@ talk:
     - начни запись
   meeting_stop:
     - закончить запись совещания
+    - закончить запись
     - закончить совещание
     - завершить запись
     - стоп запись
+    - стоп запись совещания
     - закончи совещание
     - останови запись
     - стоп совещание
+    # ASR often drops leading «За» → «кончить запись…»
+    - кончить запись совещания
+    - кончить запись
   run_test:
     - выполни тест
     - выполнить тест
@@ -153,8 +166,10 @@ meeting:
 # no_speech_timeout_s is legacy fallback for talk.listen_timeout_s.
 utterance_max_s: 15.0
 settle_s: 0.35
-preroll_s: 0.8
-speech_start_s: 0.25
+# Longer lookbehind so wake head («Эй», «За») is in the ASR buffer.
+preroll_s: 1.2
+# Open segment earlier (Silero gate still filters music/noise).
+speech_start_s: 0.10
 min_speech_s: 1.2
 silence_end_s: 2.0
 no_speech_timeout_s: 5.0

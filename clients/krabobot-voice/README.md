@@ -22,16 +22,18 @@
 1. Energy/Silero VAD: `speech_start` → буфер до `speech_end` (+ preroll), cap `wake.max_s`
    - Default **`vad.backend: silero`** (ONNX, `onnxruntime`) — отличает речь от музыки
    - Fallback **`vad.backend: energy`** — только RMS (для тестов без onnxruntime)
+   - Early ASR/KWS после `speech_start`: первый probe ≤ `wake.early_asr_s` (0.8 с),
+     далее ~каждые 0.6 с до silence/`max_s`; match → сразу (idle wake + meeting mic-tap)
 2. **Preprocess** (DC → 16 kHz mono → trim silence → peak/RMS normalize) — внутри `LocalWakeAsr.transcribe_pcm16`
-3. **Один** локальный **sherpa-onnx** decode на закрытый сегмент (не sliding window)
+3. Локальный **sherpa-onnx** decode на закрытый сегмент **или** early-match (не sliding window)
 4. Fuzzy-match текста на вашу `wake.phrase` / `wake.phrases` (части фразы + edit-distance)
-5. Miss → discard; сразу готов к следующему VAD-сегменту (PTT / meeting hotkey опрашиваются параллельно)
+5. Miss → discard (тихо, кроме `KRABOBOT_VOICE_DEBUG`); сразу готов к следующему VAD-сегменту
 
 Опционально лёгкий **KWS** (`wake.mode: kws`) — тот же VAD, затем один MFCC cosine score к reference WAV (без spam по hop).
 
 ### Своя wake-фраза
 
-Конфиг: `%LOCALAPPDATA%\krabobot-voice\config.yaml` (см. [`config.example.yaml`](config.example.yaml)).
+Конфиг: `config.yaml` рядом с приложением (см. [`config.example.yaml`](config.example.yaml)).
 
 ```yaml
 wake:
@@ -130,6 +132,7 @@ Hotkey **Ctrl+Alt+M** по-прежнему стартует/останавли�
 | `wake.energy_threshold` | `0.006` | Тихий mic всё ещё попадает в VAD (loopback: автониже) |
 | `wake.silence_end_s` | `0.55` | Короче talk — быстрый закрытие wake-фразы |
 | `wake.max_s` | `2.0` | Cap wake/команды (и meeting mic-tap); ≤2 с by design |
+| `wake.early_asr_s` | `0.8` | Первый early ASR/KWS после speech_start (далее ~0.6 с) |
 | `wake.min_speech_s` | `0.45` | Короткие «эй арнольд» не отбрасываются |
 
 ### VAD (Silero)
@@ -154,7 +157,7 @@ vad:
 
 Чтобы не говорить wake каждый раз при отладке ASR:
 
-1. В `%LOCALAPPDATA%\krabobot-voice\config.yaml`:
+1. В `config.yaml` рядом с приложением:
 
 ```yaml
 audio:
@@ -200,7 +203,7 @@ python -m krabobot_voice --test-loopback
 
 `%LOCALAPPDATA%\krabobot-voice\meetings\YYYYMMDD-HHMMSS.wav`
 
-(или `meeting.save_dir`). На стопе («закончить запись совещания» / hotkey) клиент шлёт WAV как multipart **`files`** (как большое видео в чате) + `meeting.instruct` — **без** поля `audio`, чтобы сервер не гонял весь клип через sherpa-STT. Сервер кладёт файл в workspace и добавляет в контент `[audio: path]` (как у видео-вложений).
+(или `meeting.save_dir`). На стопе («закончить запись совещания» / hotkey) клиент шлёт WAV как multipart **`files`** + `async=1` — **не ждёт** ответ бота/TTS; в логе: `meeting queued — результат придёт на почту`. Сервер обрабатывает запись в фоне и шлёт письмо **owner** на первый привязанный аккаунт `email:…` (веб-UI → Users → owner → Links). Нужны `channels.email` (SMTP) и `consentGranted: true`; должен работать **gateway** (или spool outbound при `krabobot serve`). Вложение — Markdown с протоколом; тело письма — краткое резюме.
 
 `meeting.upload_as: audio` — устаревший путь (короткие клипы через STT); для длинных совещаний не используйте.
 
@@ -215,12 +218,17 @@ Loopback идёт через **PyAudioWPatch** (ставится с клиент
 
 ## Конфиг
 
-Приоритет:
+Конфиг всегда рядом с приложением (не `%LOCALAPPDATA%`). Приоритет:
 
-1. Путь аргументом: `python -m krabobot_voice C:\path\config.yaml`
-2. `%LOCALAPPDATA%\krabobot-voice\config.yaml`
-3. Env (часть переменных **перекрывает** YAML, если заданы — см. таблицу)
-4. Пустой `token` → `~/.krabobot/config.json` → `api.auth.adminToken`
+1. Путь аргументом: `python -m krabobot_voice C:\path\config.yaml` / `krabobot-voice.exe C:\path\config.yaml`
+2. `KRABOBOT_VOICE_CONFIG` — явный путь к файлу (env)
+3. `config.yaml`, затем `config.yml` в каталоге приложения:
+   - frozen: родитель `krabobot-voice.exe`
+   - `python -m` / editable: корень пакета (`clients/krabobot-voice/`)
+   - override каталога: `KRABOBOT_VOICE_CONFIG_DIR`
+   - если файла нет — копия `config.example.yaml` → `config.yaml` в том же каталоге
+4. Env (часть переменных **перекрывает** YAML, если заданы — см. таблицу)
+5. Пустой `token` → `~/.krabobot/config.json` → `api.auth.adminToken`
 
 Пример: [`config.example.yaml`](config.example.yaml).
 
@@ -284,6 +292,27 @@ Python не доставляет `KeyboardInterrupt`, пока PortAudio не в
 2. Task Manager → завершить `python.exe` с `krabobot_voice`.
 3. Обновите клиент на эту ветку: чтение loopback/mic теперь с таймаутом + drain во время ASR, Ctrl+C снова работает.
 
+## Portable build (Windows / PyInstaller)
+
+Onedir-сборка без установленного Python на целевой машине:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+pip install -e ".\clients\krabobot-voice[asr,packaging]"
+.\clients\krabobot-voice\scripts\build_portable.ps1
+```
+
+Результат: `clients/krabobot-voice/build/krabobot-voice/krabobot-voice.exe`
+(+ `_internal/`, `config.example.yaml`, `README.md`).
+
+Инструкция для пользователя сборки: [`packaging/README.md`](packaging/README.md)
+(копируется рядом с exe). Конфиг всегда `config.yaml` рядом с приложением
+(exe или корень пакета; не LocalAppData). Модели STT/VAD не бандлятся —
+runtime-пути как у обычного клиента
+(`~/.krabobot/models/stt/…`, `%LOCALAPPDATA%\krabobot-voice\models\`).
+
+Каталоги `build/` и `dist/` в `.gitignore`. Spec: `packaging/krabobot-voice.spec`.
+
 ## Layout
 
 ```
@@ -303,4 +332,9 @@ krabobot_voice/
   link.py        # auto-link device → owner
   http_client.py # POST /v1/voice/turn
   config.py
+packaging/
+  krabobot-voice.spec   # PyInstaller onedir
+  README.md             # инструкция рядом с portable-сборкой
+scripts/
+  build_portable.ps1    # сборка → build/krabobot-voice/
 ```

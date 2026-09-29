@@ -1,7 +1,7 @@
 """Local wake-phrase matching from user-configured phrase(s).
 
 Defaults remain «Эй/Привет Арнольд» / hey arnold, but the primary source is
-``wake.phrase`` / ``wake.phrases`` in ``%LOCALAPPDATA%\\krabobot-voice\\config.yaml``.
+``wake.phrase`` / ``wake.phrases`` in ``config.yaml`` next to the app.
 """
 
 from __future__ import annotations

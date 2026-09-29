@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -17,8 +19,99 @@ def _default_device_id() -> str:
 
 
 def local_appdata_config_path() -> Path:
+    """Legacy path; not used in the default config search order."""
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
     return Path(base) / "krabobot-voice" / "config.yaml"
+
+
+def is_frozen() -> bool:
+    """True when running under PyInstaller (or similar ``sys.frozen``)."""
+    return bool(getattr(sys, "frozen", False))
+
+
+def package_root_dir() -> Path:
+    """Installed/editable package root (parent of the ``krabobot_voice`` package).
+
+    For an editable checkout this is ``clients/krabobot-voice/``.
+    """
+    import krabobot_voice
+
+    return Path(krabobot_voice.__file__).resolve().parent.parent
+
+
+def app_base_dir() -> Path:
+    """Directory that holds ``config.yaml`` (always beside the app).
+
+    Priority:
+    1. ``KRABOBOT_VOICE_CONFIG_DIR`` (explicit directory override)
+    2. parent of ``sys.executable`` when frozen
+    3. package root when running ``python -m krabobot_voice`` / entry point
+    """
+    override = (os.environ.get("KRABOBOT_VOICE_CONFIG_DIR") or "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    if is_frozen():
+        return Path(sys.executable).resolve().parent
+    return package_root_dir()
+
+
+# Back-compat aliases (config always lives next to the app now).
+portable_base_dir = app_base_dir
+
+
+def app_config_candidates(base: Path | None = None) -> list[Path]:
+    """``config.yaml`` then ``config.yml`` under the app base dir."""
+    root = base if base is not None else app_base_dir()
+    return [root / "config.yaml", root / "config.yml"]
+
+
+portable_config_candidates = app_config_candidates
+
+
+def ensure_app_config(base: Path | None = None) -> Path | None:
+    """If no config beside the app, copy ``config.example.yaml`` → ``config.yaml``.
+
+    Returns the path that should be used (existing or newly copied), or None.
+    """
+    root = base if base is not None else app_base_dir()
+    for candidate in app_config_candidates(root):
+        if candidate.is_file():
+            return candidate
+    example = root / "config.example.yaml"
+    target = root / "config.yaml"
+    if not example.is_file():
+        return None
+    try:
+        shutil.copy2(example, target)
+    except OSError:
+        return None
+    return target if target.is_file() else None
+
+
+ensure_portable_config = ensure_app_config
+
+
+def env_config_path() -> Path | None:
+    """Optional explicit file from ``KRABOBOT_VOICE_CONFIG``."""
+    raw = (os.environ.get("KRABOBOT_VOICE_CONFIG") or "").strip()
+    if not raw:
+        return None
+    return Path(raw).expanduser().resolve()
+
+
+def default_config_candidates() -> list[Path]:
+    """Search order when no explicit argv config path is passed to ``load()``.
+
+    1. ``KRABOBOT_VOICE_CONFIG`` (file) if set
+    2. ``config.yaml`` / ``config.yml`` in the app directory
+       (``KRABOBOT_VOICE_CONFIG_DIR`` or exe/package root; auto-copy from example)
+    """
+    env_file = env_config_path()
+    if env_file is not None:
+        return [env_file]
+
+    ensure_app_config()
+    return list(app_config_candidates())
 
 
 def read_admin_token_from_krabobot() -> str:
@@ -207,6 +300,9 @@ class VoiceClientConfig:
     wake_silence_end_s: float = 0.55
     # Cap wake / local-command clips (wake+command in one breath ≤2 s by design).
     wake_max_s: float = 2.0
+    # After Silero/energy speech_start: first partial ASR/KWS within this many
+    # seconds of voiced audio (idle wake + meeting mic-tap); then ~0.5–0.8 s cadence.
+    wake_early_asr_s: float = 0.8
     # Short wake phrases need a lower voiced-floor than talk commands.
     wake_min_speech_s: float = 0.45
     # Lower gate so quiet mics / loopback still reach local ASR (preprocess lifts level).
@@ -238,10 +334,10 @@ class VoiceClientConfig:
     utterance_max_s: float = 15.0
     # Legacy / free-form Talk trail; LISTEN/DIALOG prefer talk_listen_silence_end_s.
     silence_end_s: float = 2.0
-    speech_start_s: float = 0.25
+    speech_start_s: float = 0.10
     min_speech_s: float = 1.2
     settle_s: float = 0.35
-    preroll_s: float = 0.8
+    preroll_s: float = 1.2
     no_speech_timeout_s: float = 5.0
     energy_threshold: float = 0.008
     # VAD: silero (default, ONNX speech vs music) | energy (RMS-only, no onnxruntime)
@@ -271,12 +367,17 @@ class VoiceClientConfig:
     cmd_meeting_stop: list[str] = field(
         default_factory=lambda: [
             "закончить запись совещания",
+            "закончить запись",
             "закончить совещание",
             "завершить запись",
             "стоп запись",
+            "стоп запись совещания",
             "закончи совещание",
             "останови запись",
             "стоп совещание",
+            # ASR truncations of «закончить…» (leading «За» dropped)
+            "кончить запись совещания",
+            "кончить запись",
         ]
     )
     cmd_run_test: list[str] = field(
@@ -369,15 +470,22 @@ class VoiceClientConfig:
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> VoiceClientConfig:
-        """Load YAML/JSON config, then fill gaps from env and ~/.krabobot."""
+        """Load YAML/JSON config, then fill gaps from env and ~/.krabobot.
+
+        Default search (no ``path``):
+        1. Explicit ``path`` / argv (caller)
+        2. ``KRABOBOT_VOICE_CONFIG`` (file) if set
+        3. ``config.yaml`` then ``config.yml`` in the app directory
+           (frozen: parent of exe; else package root; override:
+           ``KRABOBOT_VOICE_CONFIG_DIR``). Missing → copy
+           ``config.example.yaml`` → ``config.yaml`` in that dir.
+        """
         cfg = cls.from_env()
         candidates: list[Path] = []
         if path is not None:
             candidates.append(Path(path).expanduser())
         else:
-            candidates.append(local_appdata_config_path())
-            candidates.append(Path.home() / ".krabobot" / "voice-client.json")
-            candidates.append(Path.home() / ".krabobot" / "voice-client.yaml")
+            candidates.extend(default_config_candidates())
 
         data: dict[str, Any] = {}
         for p in candidates:
@@ -513,6 +621,14 @@ class VoiceClientConfig:
                     "min_speech_s",
                     "wake_min_speech_s",
                     cfg.wake_min_speech_s,
+                )
+            ),
+            wake_early_asr_s=float(
+                pick_nested(
+                    wake,
+                    "early_asr_s",
+                    "wake_early_asr_s",
+                    cfg.wake_early_asr_s,
                 )
             ),
             wake_energy_threshold=float(

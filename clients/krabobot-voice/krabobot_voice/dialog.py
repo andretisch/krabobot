@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Union
 
-from krabobot_voice.commands import LocalCommand, match_local_command
+from krabobot_voice.commands import LocalCommand, match_utterance_command
 from krabobot_voice.wake import command_after_wake, matches_wake_phrase
 
 
@@ -399,8 +399,10 @@ class VoiceSession:
         )
 
     def _match_cmd(self, text: str) -> LocalCommand | None:
-        return match_local_command(
+        return match_utterance_command(
             text,
+            wake_phrases=self.cfg.wake_phrases or None,
+            wake_greetings=self.cfg.wake_greetings or None,
             meeting_start=self.cfg.cmd_meeting_start,
             meeting_stop=self.cfg.cmd_meeting_stop,
             run_test=self.cfg.cmd_run_test,

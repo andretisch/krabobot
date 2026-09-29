@@ -58,12 +58,13 @@ def record_utterance(
     block: int,
     max_s: float = 15.0,
     silence_end_s: float = 1.2,
-    speech_start_s: float = 0.25,
+    speech_start_s: float = 0.10,
     min_speech_s: float = 1.2,
     energy_threshold: float = 0.008,
     settle_s: float = 0.35,
-    preroll_s: float = 0.4,
+    preroll_s: float = 1.2,
     no_speech_timeout_s: float = 5.0,
+    commit_silence_pad_s: float = 0.18,
 ) -> np.ndarray | None:
     """Capture one utterance from a blocking ``read_block`` source.
 
@@ -136,8 +137,11 @@ def record_utterance(
             if silence_run < end_need:
                 continue
             # Trailing silence — only commit if we actually heard enough speech.
+            # Soft trim: leave ~commit_silence_pad_s of silence; keep preroll.
             if speech_blocks >= min_speech_blocks:
-                keep = max(0, len(buf) - end_need)
+                pad_blocks = max(1, int(float(commit_silence_pad_s) * sr / block))
+                strip = max(0, end_need - pad_blocks)
+                keep = max(0, len(buf) - strip)
                 data = np.concatenate(buf[:keep]) if keep else np.concatenate(buf)
                 min_samples = int(min_speech_s * 0.6 * sr)
                 if data.size < max(sr // 4, min_samples):
@@ -177,7 +181,7 @@ def detect_speech_segment(
     sample_rate: int = 16000,
     frame_ms: int = 30,
     energy_threshold: float = 0.008,
-    speech_start_s: float = 0.25,
+    speech_start_s: float = 0.10,
     silence_end_s: float = 1.2,
     min_speech_s: float = 1.2,
 ) -> bytes | None:

@@ -232,11 +232,69 @@ def test_meeting_local_stop_without_wake() -> None:
     assert s.mode is Mode.IDLE
 
 
+def test_meeting_stop_asr_truncation_without_wake() -> None:
+    s = VoiceSession(_cfg())
+    s.mode = Mode.MEETING
+    effects = _effects(s, Segment("Кончить запись совещания."))
+    assert any(isinstance(e, StopMeeting) for e in effects)
+    assert s.mode is Mode.IDLE
+
+
+def test_meeting_wake_plus_stop_one_utterance_custom_wake() -> None:
+    """Configurable wake + stop in one ASR line must StopMeeting (no Arnold)."""
+    s = VoiceSession(
+        _cfg(
+            wake_phrases=["ок бот"],
+            wake_greetings=["ок"],
+        )
+    )
+    s.mode = Mode.MEETING
+    effects = _effects(s, Segment("Ок Бот закончить запись"))
+    assert any(isinstance(e, StopMeeting) for e in effects)
+    assert not any(isinstance(e, (SendAudio, SendText)) for e in effects)
+    assert s.mode is Mode.IDLE
+
+
+def test_meeting_wake_plus_stop_full_phrase() -> None:
+    s = VoiceSession(_cfg())
+    s.mode = Mode.MEETING
+    effects = _effects(s, Segment("Эй, Арнольд, закончить запись совещания"))
+    assert any(isinstance(e, StopMeeting) for e in effects)
+    assert s.mode is Mode.IDLE
+
+
+def test_meeting_stop_wins_over_armed_listen_no_send_audio() -> None:
+    """After wake arms meeting-listen, stop phrase must StopMeeting — never SendAudio."""
+    # Stale cfg without the advertised primary phrase (mirrors real user YAML).
+    s = VoiceSession(
+        _cfg(
+            cmd_meeting_stop=[
+                "закончить совещание",
+                "завершить запись",
+                "стоп запись",
+            ]
+        )
+    )
+    s.mode = Mode.MEETING
+    # Wake-only arms listen for the next segment.
+    wake_effects = _effects(s, Segment("эй арнольд"))
+    assert s._meeting_listen is True
+    assert any(isinstance(e, Beep) for e in wake_effects)
+    assert not any(isinstance(e, SendAudio) for e in wake_effects)
+
+    effects = _effects(s, Segment("Закончить запись совещания."))
+    assert any(isinstance(e, StopMeeting) for e in effects)
+    assert not any(isinstance(e, (SendAudio, SendText)) for e in effects)
+    assert s.mode is Mode.IDLE
+    assert s._meeting_listen is False
+
+
 def test_meeting_server_stop_action() -> None:
     s = VoiceSession(_cfg())
     s.mode = Mode.MEETING
     effects = _effects(s, TurnDone(ok=True, actions=("meeting_stop",)))
     assert any(isinstance(e, StopMeeting) for e in effects)
+    assert any(isinstance(e, Beep) and e.count == 1 for e in effects)
     assert s.mode is Mode.IDLE
 
 

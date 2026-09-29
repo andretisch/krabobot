@@ -2,7 +2,9 @@
 
 Speech start/end: ``speech_gate`` (Silero) when set; else energy-RMS fallback.
 ``energy_pregate`` only skips Silero on near-silence. Optional ``early_check``
-is an energy-backend helper (unused when Silero is active in the app).
+runs after speech_start on the growing buffer (wake/command ASR) for both
+Silero and energy backends — first probe at ``early_check_min_s``, then about
+every ``early_check_interval_s`` until silence_end / max_s.
 """
 
 from __future__ import annotations
@@ -36,10 +38,12 @@ class VadSegmenter:
     block: int
     max_s: float = 15.0
     silence_end_s: float = 2.0
-    speech_start_s: float = 0.25
+    speech_start_s: float = 0.10
     min_speech_s: float = 1.2
     energy_threshold: float = 0.008
-    preroll_s: float = 0.8
+    preroll_s: float = 1.2
+    # Keep this much trailing silence on commit (do not strip the full silence_end).
+    commit_silence_pad_s: float = 0.18
     # Optional classifier: pcm16 block → speaking (Silero or test mocks).
     speech_gate: Callable[[np.ndarray], bool] | None = None
     # When speech_gate is set: treat as non-speech if RMS is below this (CPU skip
@@ -140,7 +144,11 @@ class VadSegmenter:
         return np.asarray(self.read_block(), dtype=np.int16).reshape(-1)
 
     def _commit(self) -> np.ndarray | None:
-        keep = max(0, len(self._buf) - self._end_need)
+        # Soft trim: leave ~150–200 ms of trailing silence instead of stripping
+        # the full silence_end run. Never trim the front (preroll stays intact).
+        pad_blocks = max(1, int(float(self.commit_silence_pad_s) * self.sample_rate / self.block))
+        strip = max(0, self._end_need - pad_blocks)
+        keep = max(0, len(self._buf) - strip)
         data = np.concatenate(self._buf[:keep]) if keep else np.concatenate(self._buf)
         min_samples = int(float(self.min_speech_s) * 0.6 * self.sample_rate)
         if data.size < max(self.sample_rate // 4, min_samples):
@@ -190,17 +198,34 @@ class VadSegmenter:
         wall-clock — avoids hanging until ``max_s`` on sticky VAD).
 
         When ``early_check`` is set, after ``early_check_min_s`` of voiced audio
-        the callback runs about every ``early_check_interval_s`` on the growing
-        buffer. Returning True closes immediately (local command / wake match)
-        without waiting for silence. Silence_end and max_s remain fallbacks.
+        (from speech_start) the callback runs once, then about every
+        ``early_check_interval_s`` on the growing buffer. Returning True closes
+        immediately (local command / wake match) without waiting for silence.
+        Silence_end and max_s remain fallbacks. Works with Silero ``speech_gate``.
         """
         sr = self.sample_rate
         block = self.block
         interval_blocks = max(1, int(float(early_check_interval_s) * sr / block))
         min_early_blocks = max(1, int(float(early_check_min_s) * sr / block))
         blocks_since_check = 0
+        early_probed = False
         # max_s is per attempt; preroll/started state may carry across calls.
         self._elapsed = 0
+
+        def _try_early() -> np.ndarray | None:
+            nonlocal blocks_since_check, early_probed
+            if early_check is None or self._speech_blocks < min_early_blocks:
+                return None
+            # First probe as soon as min voiced audio is buffered; later probes
+            # respect the cadence interval (no sliding-window spam).
+            if early_probed and blocks_since_check < interval_blocks:
+                return None
+            blocks_since_check = 0
+            early_probed = True
+            if early_check(np.concatenate(self._buf)):
+                return self._finish_early()
+            return None
+
         while True:
             if poll is not None:
                 poll()
@@ -238,6 +263,7 @@ class VadSegmenter:
                         # max_s caps the utterance after speech appears, not idle wait.
                         self._elapsed = self._speech_blocks
                         blocks_since_check = 0
+                        early_probed = False
                 else:
                     self._speech_run = 0
                 if deadline is not None and time.monotonic() >= deadline:
@@ -252,14 +278,9 @@ class VadSegmenter:
             else:
                 self._silence_run += 1
                 if self._silence_run < self._end_need:
-                    if (
-                        early_check is not None
-                        and self._speech_blocks >= min_early_blocks
-                        and blocks_since_check >= interval_blocks
-                    ):
-                        blocks_since_check = 0
-                        if early_check(np.concatenate(self._buf)):
-                            return self._finish_early()
+                    hit = _try_early()
+                    if hit is not None:
+                        return hit
                     if deadline is not None and time.monotonic() >= deadline:
                         self.reset_utterance()
                         return None
@@ -280,6 +301,7 @@ class VadSegmenter:
                 self._silence_run = 0
                 self._speech_blocks = 0
                 blocks_since_check = 0
+                early_probed = False
                 if len(self._buf) > self._preroll_blocks:
                     self._buf = self._buf[-self._preroll_blocks :]
                 if deadline is not None and time.monotonic() >= deadline:
@@ -287,14 +309,9 @@ class VadSegmenter:
                 continue
 
             # Continuous speech (or gate false-positives): probe command/wake.
-            if (
-                early_check is not None
-                and self._speech_blocks >= min_early_blocks
-                and blocks_since_check >= interval_blocks
-            ):
-                blocks_since_check = 0
-                if early_check(np.concatenate(self._buf)):
-                    return self._finish_early()
+            hit = _try_early()
+            if hit is not None:
+                return hit
 
             if deadline is not None and time.monotonic() >= deadline:
                 self.reset_utterance()

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 from collections import deque
 from collections.abc import Callable
@@ -23,7 +24,7 @@ from krabobot_voice.audio_io import (
     play_wav_bytes,
     with_stream_keepalive,
 )
-from krabobot_voice.commands import match_local_command
+from krabobot_voice.commands import match_utterance_command
 from krabobot_voice.config import VoiceClientConfig, resolve_stt_num_threads
 from krabobot_voice.dialog import (
     Beep,
@@ -49,7 +50,7 @@ from krabobot_voice.protocol import ClientState
 from krabobot_voice.ptt import PttHotkey
 from krabobot_voice.segmenter import VadSegmenter
 from krabobot_voice.vad import frame_rms, pcm_stats
-from krabobot_voice.wake import matches_wake_phrase
+from krabobot_voice.wake import command_after_wake, matches_wake_phrase
 
 # Loopback after downmix/resample is often quieter than a close mic
 # (energy pre-gate / preprocess only — speech decision is Silero).
@@ -57,6 +58,8 @@ _LOOPBACK_WAKE_ENERGY_SCALE = 0.4
 _LOOPBACK_WAKE_ENERGY_FLOOR = 0.0015
 _WAKE_DEBUG_HEARTBEAT_S = 30.0
 _KEEPALIVE_SINK_MAX = 200
+# Cadence between early ASR probes after the first (wake.early_asr_s) hit window.
+_EARLY_ASR_INTERVAL_S = 0.6
 
 
 def _log(msg: str) -> None:
@@ -93,8 +96,10 @@ def _is_wake_or_command(
         greetings=cfg.wake_greetings or None,
     ):
         return True
-    if match_local_command(
+    if match_utterance_command(
         cleaned,
+        wake_phrases=cfg.wake_phrases or None,
+        wake_greetings=cfg.wake_greetings or None,
         meeting_start=cfg.cmd_meeting_start,
         meeting_stop=cfg.cmd_meeting_stop,
         run_test=cfg.cmd_run_test,
@@ -109,6 +114,19 @@ def _is_wake_or_command(
     ):
         return True
     return False
+
+
+def _match_cfg_command(text: str, *, cfg: VoiceClientConfig) -> object | None:
+    """Local command in utterance (full text or after configured wake strip)."""
+    return match_utterance_command(
+        text,
+        wake_phrases=cfg.wake_phrases or None,
+        wake_greetings=cfg.wake_greetings or None,
+        meeting_start=cfg.cmd_meeting_start,
+        meeting_stop=cfg.cmd_meeting_stop,
+        run_test=cfg.cmd_run_test,
+        exit_dialog=cfg.cmd_exit,
+    )
 
 
 def _log_asr_text(text: str, *, tag: str, matched: bool) -> None:
@@ -352,6 +370,9 @@ class _Driver:
         self._recorder: MeetingRecorder | None = None
         self._last_status = ""
         self._early_asr_text: str | None = None
+        self._meeting_upload_lock = threading.Lock()
+        self._meeting_upload_thread: threading.Thread | None = None
+        self._meeting_upload_path: Path | None = None
 
     def _reset_vad_state(self) -> None:
         reset = getattr(self._silero, "reset", None)
@@ -382,6 +403,8 @@ class _Driver:
             elif isinstance(eff, StartMeeting):
                 self._start_meeting()
             elif isinstance(eff, StopMeeting):
+                # Drop any mic-tap clip so a later SendAudio cannot upload the stop phrase.
+                self._pending_pcm = None
                 self._stop_meeting_and_upload()
             elif isinstance(eff, RunTest):
                 now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -486,6 +509,11 @@ class _Driver:
                 f"{getattr(result, 'error_message', None) or getattr(result, 'reply', None) or 'unknown'}"
             )
             return False
+        actions = tuple(getattr(result, "actions", None) or ())
+        if "meeting_stop" in actions:
+            if mic is not None:
+                _drain_mic(mic, blocks=12)
+            return True
         ok = _play_turn_result(result)
         if mic is not None:
             _drain_mic(mic, blocks=12)
@@ -549,6 +577,7 @@ class _Driver:
         capture: str,
         wav_bytes: bytes = b"",
     ) -> None:
+        """Log path and schedule HTTP upload off the voice loop thread."""
         path = Path(wav_path)
         upload_as = (self.cfg.meeting_upload_as or "file").strip().lower()
         size = 0
@@ -560,7 +589,34 @@ class _Driver:
             f"meeting upload as={upload_as}: {path.name} ({size} bytes, "
             f"{duration_s:.1f} s, capture={capture})"
         )
-        _log("thinking (meeting)…")
+        with self._meeting_upload_lock:
+            prev = self._meeting_upload_thread
+            if (
+                prev is not None
+                and prev.is_alive()
+                and self._meeting_upload_path == path
+            ):
+                _log("meeting upload already in progress — skip duplicate")
+                return
+            _log("upload meeting (async)…")
+            thread = threading.Thread(
+                target=self._meeting_upload_worker,
+                args=(path, upload_as, wav_bytes),
+                name="meeting-upload",
+                daemon=True,
+            )
+            self._meeting_upload_thread = thread
+            self._meeting_upload_path = path
+            thread.start()
+
+    def _meeting_upload_worker(
+        self,
+        path: Path,
+        upload_as: str,
+        wav_bytes: bytes,
+    ) -> None:
+        """Background HTTP POST; must not raise into the main process."""
+        meeting_timeout = min(float(self.cfg.timeout_s), 60.0)
         try:
             if upload_as == "audio":
                 # Legacy short-clip path (server STT on `audio`) — not for long meetings.
@@ -573,13 +629,16 @@ class _Driver:
                     audio_filename=path.name or "meeting.wav",
                     instruct=self.cfg.meeting_instruct or None,
                     client_state=ClientState(mode="idle", meeting="idle"),
+                    timeout_s=meeting_timeout,
                 )
             else:
-                # Long meetings: multipart `files` like a chat video attachment — no STT.
+                # Long meetings: multipart `files` — async queue on server (no TTS wait).
                 result = self.http.turn(
                     files=[path],
                     instruct=self.cfg.meeting_instruct or None,
                     client_state=ClientState(mode="idle", meeting="idle"),
+                    async_meeting=True,
+                    timeout_s=meeting_timeout,
                 )
         except Exception as e:
             _log(f"ERROR: запрос /v1/voice/turn (meeting): {e}")
@@ -590,19 +649,10 @@ class _Driver:
                 f"{result.error_message or result.reply or 'unknown'}"
             )
             return
-        if result.transcript:
-            _log(
-                f"  stt: {result.transcript[:200]}"
-                f"{'…' if len(result.transcript) > 200 else ''}"
-            )
-        if result.reply:
-            _log(f"  bot: {result.reply}")
-        if result.audio_wav:
-            _log("playing…")
-            try:
-                play_wav_bytes(result.audio_wav)
-            except Exception as e:
-                _log(f"ERROR: воспроизведение: {e}")
+        if result.queued or result.status_code == 202:
+            _log("meeting queued — результат придёт на почту")
+            return
+        _log("WARNING: сервер принял встречу без async=queued; проверьте версию krabobot serve")
 
     def _poll_hotkeys(self) -> list[object] | None:
         """Return effects if a hotkey was consumed; else None."""
@@ -653,22 +703,39 @@ class _Driver:
         segmenter.feed_backlog(sink)
         return text
 
+    def _early_asr_cadence(self) -> tuple[float, float]:
+        """Return (min_s, interval_s) for wake/meeting early ASR probes.
+
+        First probe once buffered voiced audio reaches ``wake.early_asr_s``
+        (default 0.8 s, capped by ``wake.max_s``); then every ~0.6 s until
+        silence_end or max_s.
+        """
+        max_s = max(0.5, float(self.cfg.wake_max_s))
+        min_s = float(self.cfg.wake_early_asr_s)
+        min_s = max(0.3, min(min_s, max_s))
+        return min_s, _EARLY_ASR_INTERVAL_S
+
     def _make_early_check(
         self,
         *,
         for_wake: bool,
         mic: object | None = None,
         segmenter: VadSegmenter | None = None,
+        match_wake: bool | None = None,
+        match_commands: bool | None = None,
     ) -> Callable[[np.ndarray], bool] | None:
-        """Partial-utterance probe: wake (energy/KWS) or local commands in LISTEN.
+        """Partial-utterance probe after speech_start (Silero or energy).
 
-        With Silero, skip early ASR on wake (music thrash). For LISTEN/DIALOG,
-        run local-command ASR so one short phrase commits without waiting for
-        the full silence_end trail.
+        Idle wake: wake phrase / KWS. LISTEN/DIALOG: local commands. Meeting
+        mic-tap: commands only (``match_commands``; wake+stop via configured
+        wake strip in ``match_utterance_command``). Wake-only during meeting
+        waits for silence so continuous wake+command is not cut mid-phrase.
+        Match → immediate commit; misses stay quiet unless KRABOBOT_VOICE_DEBUG.
         """
-        if for_wake and self.speech_gate is not None:
-            return None
-        if for_wake and self.cfg.wake_mode == "kws" and self.kws is not None:
+        want_wake = for_wake if match_wake is None else bool(match_wake)
+        want_cmd = (not for_wake) if match_commands is None else bool(match_commands)
+
+        if want_wake and self.cfg.wake_mode == "kws" and self.kws is not None:
 
             def _kws_check(pcm: np.ndarray) -> bool:
                 score = _kws_score(self.kws, pcm)  # type: ignore[arg-type]
@@ -686,7 +753,7 @@ class _Driver:
         if self.asr is None:
             return None
 
-        energy = min(self.wake_energy, 0.006) if for_wake else None
+        energy = min(self.wake_energy, 0.006) if want_wake and not want_cmd else None
 
         def _asr_check(pcm: np.ndarray) -> bool:
             def _run() -> str:
@@ -705,23 +772,27 @@ class _Driver:
                 text = _run()
             if not text:
                 return False
-            if for_wake:
-                hit = matches_wake_phrase(
-                    text,
-                    phrases=self.cfg.wake_phrases or None,
-                    greetings=self.cfg.wake_greetings or None,
-                )
-            else:
-                hit = (
-                    match_local_command(
+            hit = False
+            if want_cmd and _match_cfg_command(text, cfg=self.cfg) is not None:
+                hit = True
+            if want_wake and matches_wake_phrase(
+                text,
+                phrases=self.cfg.wake_phrases or None,
+                greetings=self.cfg.wake_greetings or None,
+            ):
+                # Idle wake early-hit. If this check also looks for commands
+                # (unusual), only commit when trailing is empty so continuous
+                # wake+command is not truncated.
+                if want_cmd:
+                    trailing = command_after_wake(
                         text,
-                        meeting_start=self.cfg.cmd_meeting_start,
-                        meeting_stop=self.cfg.cmd_meeting_stop,
-                        run_test=self.cfg.cmd_run_test,
-                        exit_dialog=self.cfg.cmd_exit,
+                        phrases=self.cfg.wake_phrases or None,
+                        greetings=self.cfg.wake_greetings or None,
                     )
-                    is not None
-                )
+                    if not trailing.strip():
+                        hit = True
+                else:
+                    hit = True
             if hit:
                 self._early_asr_text = text
                 _log_debug(f"early-asr hit: {text}")
@@ -864,16 +935,18 @@ class _Driver:
             early = self._make_early_check(
                 for_wake=for_wake, mic=mic, segmenter=segmenter
             )
+            early_min_s, early_interval_s = self._early_asr_cadence()
             self._early_asr_text = None
 
             try:
-                # LISTEN: early local-command ASR even with Silero; wake keeps gate-only.
+                # Idle wake + LISTEN local-commands: cadence ASR after speech_start
+                # (Silero remains the speech gate; no sliding-window spam).
                 pcm = segmenter.next_segment(
                     self._deadline,
                     poll=_poll,
                     early_check=early,
-                    early_check_interval_s=0.8 if not for_wake else 1.0,
-                    early_check_min_s=0.5 if not for_wake else 0.7,
+                    early_check_interval_s=early_interval_s,
+                    early_check_min_s=early_min_s,
                 )
             except _HotkeyAbortError as abort:
                 effects = self.session.on_event(Hotkey(abort.kind))
@@ -1012,33 +1085,15 @@ class _Driver:
                 if not recorder.active:
                     raise _HotkeyAbortError("meeting")
 
-            # With Silero, speech end is the gate — skip partial-ASR thrash.
-            early = None
-            if self.speech_gate is None and self.asr is not None:
-
-                def early(pcm: np.ndarray) -> bool:
-                    text = _transcribe(
-                        self.asr, pcm, sample_rate=self.cfg.sample_rate
-                    )
-                    if not text:
-                        return False
-                    if match_local_command(
-                        text,
-                        meeting_start=self.cfg.cmd_meeting_start,
-                        meeting_stop=self.cfg.cmd_meeting_stop,
-                        run_test=self.cfg.cmd_run_test,
-                        exit_dialog=self.cfg.cmd_exit,
-                    ) is not None:
-                        self._early_asr_text = text
-                        return True
-                    if matches_wake_phrase(
-                        text,
-                        phrases=self.cfg.wake_phrases or None,
-                        greetings=self.cfg.wake_greetings or None,
-                    ):
-                        self._early_asr_text = text
-                        return True
-                    return False
+            # Early ASR: local commands only (stop alone, or wake+stop after
+            # configured wake strip). Wake-only waits for silence so continuous
+            # «wake + stop» is not cut off mid-phrase.
+            early = self._make_early_check(
+                for_wake=False,
+                match_wake=False,
+                match_commands=True,
+            )
+            early_min_s, early_interval_s = self._early_asr_cadence()
 
             self._early_asr_text = None
             try:
@@ -1046,21 +1101,27 @@ class _Driver:
                     self._deadline,
                     poll=_poll,
                     early_check=early,
-                    early_check_interval_s=1.0,
-                    early_check_min_s=0.7,
+                    early_check_interval_s=early_interval_s,
+                    early_check_min_s=early_min_s,
                 )
             except _HotkeyAbortError:
                 self._apply(self.session.on_event(Hotkey("meeting")))
                 break
 
+            # Capture early hit *before* any discard — next iteration clears
+            # ``_early_asr_text`` at the top of the loop.
+            early_text = self._early_asr_text
+            self._early_asr_text = None
+
             if pcm is None:
                 self._apply(self.session.on_event(Timeout()))
                 continue
-            if frame_rms(pcm) < energy * 0.5:
+            # Quiet clips are noise — but an early ASR/KWS hit already matched
+            # a stop/wake command; never drop that (RMS gate was discarding
+            # «закончить запись» and leaving the meeting recording).
+            if early_text is None and frame_rms(pcm) < energy * 0.5:
                 continue
 
-            early_text = self._early_asr_text
-            self._early_asr_text = None
             if early_text is not None:
                 text = early_text
             else:
@@ -1325,6 +1386,7 @@ def run_loop(config: VoiceClientConfig | None = None) -> int:
         hints.append(f'скажите «{wake_label}»')
         _log(
             f"wake KWS: VAD max={cfg.wake_max_s:.1f}s "
+            f"early={cfg.wake_early_asr_s:.1f}s "
             f"silence_end={cfg.wake_silence_end_s:.2f}s "
             f"backend={vad_label}"
         )
@@ -1332,6 +1394,7 @@ def run_loop(config: VoiceClientConfig | None = None) -> int:
         hints.append(f'скажите «{wake_label}» (ASR)')
         _log(
             f"wake ASR: VAD max={cfg.wake_max_s:.1f}s "
+            f"early={cfg.wake_early_asr_s:.1f}s "
             f"silence_end={cfg.wake_silence_end_s:.2f}s "
             f"backend={vad_label} phrases={cfg.wake_phrases!r}"
         )
@@ -1398,7 +1461,20 @@ def run_loop(config: VoiceClientConfig | None = None) -> int:
             meeting_hk.stop()
 
 
+def _configure_stdio_utf8() -> None:
+    """Avoid UnicodeEncodeError on Windows consoles (cp1251) / frozen exe."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _configure_stdio_utf8()
     args = list(sys.argv[1:] if argv is None else argv)
     if "--test-loopback" in args:
         args = [a for a in args if a != "--test-loopback"]

@@ -220,12 +220,26 @@ def _process_main(
 ) -> None:
     """multiprocessing entry: must stay top-level for Windows spawn."""
     cfg = MeetingCaptureConfig(**cfg_dict)
-    result = run_meeting_capture(
-        cfg,
-        wav_path,
-        stop=stop_event,
-        mic_tap_queue=mic_q,
-    )
+    try:
+        result = run_meeting_capture(
+            cfg,
+            wav_path,
+            stop=stop_event,
+            mic_tap_queue=mic_q,
+        )
+    except KeyboardInterrupt:
+        # Parent may Ctrl+C while we still hold PortAudio; treat as stop.
+        try:
+            stop_event.set()
+        except Exception:
+            pass
+        result = {
+            "frames": 0,
+            "duration_s": 0.0,
+            "capture": cfg.capture,
+            "error": "",
+            "wav_path": str(wav_path),
+        }
     try:
         result_q.put(result)
     except Exception:
@@ -343,19 +357,31 @@ class MeetingRecorder:
             result_q = self._result_q
         if stop_event is not None:
             stop_event.set()
-        if proc is not None:
-            proc.join(timeout=30.0)
-            if proc.is_alive():
-                proc.terminate()
-                proc.join(timeout=5.0)
-        if thread is not None:
-            thread.join(timeout=30.0)
+
+        # Ctrl+C during join/get must not hang the parent on a dead worker.
+        interrupted = False
+        try:
+            if proc is not None:
+                proc.join(timeout=30.0)
+                if proc.is_alive():
+                    proc.terminate()
+                    proc.join(timeout=5.0)
+            if thread is not None:
+                thread.join(timeout=30.0)
+        except KeyboardInterrupt:
+            interrupted = True
+            if proc is not None and proc.is_alive():
+                try:
+                    proc.terminate()
+                    proc.join(timeout=2.0)
+                except Exception:
+                    pass
 
         result = self._result
         if result is None and result_q is not None:
             try:
-                result = result_q.get(timeout=2.0)
-            except Exception:
+                result = result_q.get(timeout=0.5 if interrupted else 2.0)
+            except (Exception, KeyboardInterrupt):
                 result = None
         if result is None:
             result = {}

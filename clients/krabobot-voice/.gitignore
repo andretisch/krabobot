@@ -1,0 +1,8 @@
+# PyInstaller / local packaging artifacts (not committed)
+build/
+dist/
+# Specs generated accidentally in the client root (canonical: packaging/*.spec)
+/*.spec
+# Working config lives next to the app (copied from config.example.yaml)
+/config.yaml
+/config.yml
