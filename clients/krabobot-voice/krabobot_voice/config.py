@@ -60,6 +60,18 @@ def _as_bool(val: Any, default: bool = False) -> bool:
     return default
 
 
+def _as_str_list(val: Any, default: list[str]) -> list[str]:
+    if val is None:
+        return list(default)
+    if isinstance(val, str):
+        parts = [p.strip() for p in val.split(",")]
+        return [p for p in parts if p] or list(default)
+    if isinstance(val, (list, tuple)):
+        out = [str(x).strip() for x in val if str(x).strip()]
+        return out or list(default)
+    return list(default)
+
+
 @dataclass
 class VoiceClientConfig:
     """HTTP + local wake/listen / PTT settings."""
@@ -69,15 +81,27 @@ class VoiceClientConfig:
     token: str = ""
     timeout_s: float = 120.0
     sample_rate: int = 16000
-    # Wake: kws (default) | asr (legacy sherpa) | off (PTT only)
-    wake_mode: str = "kws"
-    wake_window_s: float = 1.6
-    wake_hop_s: float = 0.3
-    kws_threshold: float = 0.82
-    kws_energy_threshold: float = 0.012
+    # Wake: asr (default, sherpa) | kws (optional MFCC) | off (PTT only)
+    wake_mode: str = "asr"
+    wake_window_s: float = 2.0
+    wake_hop_s: float = 0.5
+    wake_energy_threshold: float = 0.012
+    wake_phrases: list[str] = field(
+        default_factory=lambda: [
+            "эй арнольд",
+            "ей арнольд",
+            "привет арнольд",
+            "hey arnold",
+        ]
+    )
+    wake_greetings: list[str] = field(
+        default_factory=lambda: ["эй", "ей", "привет", "hey"]
+    )
+    kws_threshold: float = 0.90
+    kws_energy_threshold: float = 0.018
     kws_refs_dir: str = ""
     kws_auto_enroll_tts: bool = True
-    # Legacy sherpa wake (only if wake_mode=asr)
+    # Local sherpa wake (wake_mode=asr)
     stt_model_dir: str = ""
     stt_num_threads: int = 2
     # PTT
@@ -92,6 +116,52 @@ class VoiceClientConfig:
     preroll_s: float = 0.4
     no_speech_timeout_s: float = 5.0
     energy_threshold: float = 0.008
+    # Dialog mode: after successful Talk turn, listen again without wake
+    talk_follow_up_s: float = 8.0  # 0 = disabled; typical 6–10
+    talk_follow_up_beep: bool = False  # prefer silent follow-up
+    # Local voice commands (sherpa ASR on utterance before server upload)
+    cmd_meeting_start: list[str] = field(
+        default_factory=lambda: [
+            "начать совещание",
+            "начать запись",
+            "запиши совещание",
+            "начни совещание",
+            "начни запись",
+        ]
+    )
+    cmd_meeting_stop: list[str] = field(
+        default_factory=lambda: [
+            "закончить совещание",
+            "завершить запись",
+            "стоп запись",
+            "закончи совещание",
+            "останови запись",
+            "стоп совещание",
+        ]
+    )
+    cmd_exit: list[str] = field(
+        default_factory=lambda: [
+            "хватит",
+            "выход",
+            "спокойной ночи",
+            "отмена",
+            "закончили",
+            "пока",
+        ]
+    )
+    # Optional device hints (name substring or PortAudio index as string)
+    audio_input_device: str = ""
+    audio_output_device: str = ""
+    # Meeting recording (toggle hotkey → background capture → upload+instruct)
+    meeting_enabled: bool = True
+    meeting_capture: str = "mix"  # mic | loopback | mix
+    meeting_hotkey: str = "ctrl+alt+m"
+    meeting_loopback_device: str = ""
+    meeting_instruct: str = (
+        "Это запись встречи (Teams/звонок). Сделай краткое резюме, "
+        "ключевые решения и список action items."
+    )
+    meeting_max_s: float = 7200.0
 
     @classmethod
     def from_env(cls) -> VoiceClientConfig:
@@ -109,7 +179,7 @@ class VoiceClientConfig:
                 "KRABOBOT_ADMIN_TOKEN",
             ),
             timeout_s=float(_env_first("KRABOBOT_VOICE_TIMEOUT", default="120") or 120),
-            wake_mode=_env_first("KRABOBOT_VOICE_WAKE_MODE", default="kws") or "kws",
+            wake_mode=_env_first("KRABOBOT_VOICE_WAKE_MODE", default="asr") or "asr",
             ptt_hotkey=_env_first(
                 "KRABOBOT_VOICE_PTT_HOTKEY",
                 default="ctrl+alt+space",
@@ -148,6 +218,9 @@ class VoiceClientConfig:
 
         wake = data.get("wake") if isinstance(data.get("wake"), dict) else {}
         ptt = data.get("ptt") if isinstance(data.get("ptt"), dict) else {}
+        talk = data.get("talk") if isinstance(data.get("talk"), dict) else {}
+        meeting = data.get("meeting") if isinstance(data.get("meeting"), dict) else {}
+        audio = data.get("audio") if isinstance(data.get("audio"), dict) else {}
 
         def pick(key: str, *alts: str, default: Any = None) -> Any:
             for k in (key, *alts):
@@ -168,7 +241,14 @@ class VoiceClientConfig:
             pick_nested(wake, "mode", "wake_mode", cfg.wake_mode) or cfg.wake_mode
         ).strip().lower()
         if wake_mode not in {"kws", "asr", "off"}:
-            wake_mode = "kws"
+            wake_mode = "asr"
+
+        meeting_capture = str(
+            pick_nested(meeting, "capture", "meeting_capture", cfg.meeting_capture)
+            or cfg.meeting_capture
+        ).strip().lower()
+        if meeting_capture not in {"mic", "loopback", "mix"}:
+            meeting_capture = "mix"
 
         return cls(
             base_url=str(pick("base_url", "url", default=cfg.base_url) or cfg.base_url).rstrip(
@@ -183,14 +263,30 @@ class VoiceClientConfig:
                 pick_nested(wake, "window_s", "wake_window_s", cfg.wake_window_s)
             ),
             wake_hop_s=float(pick_nested(wake, "hop_s", "wake_hop_s", cfg.wake_hop_s)),
+            wake_energy_threshold=float(
+                pick_nested(
+                    wake,
+                    "energy_threshold",
+                    "wake_energy_threshold",
+                    cfg.wake_energy_threshold,
+                )
+            ),
+            wake_phrases=_as_str_list(
+                pick_nested(wake, "phrases", "wake_phrases", cfg.wake_phrases),
+                cfg.wake_phrases,
+            ),
+            wake_greetings=_as_str_list(
+                pick_nested(wake, "greetings", "wake_greetings", cfg.wake_greetings),
+                cfg.wake_greetings,
+            ),
             kws_threshold=float(
                 pick_nested(wake, "threshold", "kws_threshold", cfg.kws_threshold)
             ),
             kws_energy_threshold=float(
                 pick_nested(
                     wake,
-                    "energy_threshold",
                     "kws_energy_threshold",
+                    "energy_threshold",
                     cfg.kws_energy_threshold,
                 )
             ),
@@ -225,4 +321,74 @@ class VoiceClientConfig:
                 pick("no_speech_timeout_s", default=cfg.no_speech_timeout_s)
             ),
             energy_threshold=float(pick("energy_threshold", default=cfg.energy_threshold)),
+            talk_follow_up_s=float(
+                pick_nested(talk, "follow_up_s", "talk_follow_up_s", cfg.talk_follow_up_s)
+            ),
+            talk_follow_up_beep=_as_bool(
+                pick_nested(
+                    talk,
+                    "follow_up_beep",
+                    "talk_follow_up_beep",
+                    cfg.talk_follow_up_beep,
+                ),
+                cfg.talk_follow_up_beep,
+            ),
+            cmd_meeting_start=_as_str_list(
+                pick_nested(
+                    talk,
+                    "meeting_start",
+                    "cmd_meeting_start",
+                    meeting.get("start_phrases", cfg.cmd_meeting_start),
+                ),
+                cfg.cmd_meeting_start,
+            ),
+            cmd_meeting_stop=_as_str_list(
+                pick_nested(
+                    talk,
+                    "meeting_stop",
+                    "cmd_meeting_stop",
+                    meeting.get("stop_phrases", cfg.cmd_meeting_stop),
+                ),
+                cfg.cmd_meeting_stop,
+            ),
+            cmd_exit=_as_str_list(
+                pick_nested(talk, "exit", "cmd_exit", cfg.cmd_exit),
+                cfg.cmd_exit,
+            ),
+            audio_input_device=str(
+                pick_nested(audio, "input_device", "audio_input_device", cfg.audio_input_device)
+                or ""
+            ).strip(),
+            audio_output_device=str(
+                pick_nested(
+                    audio, "output_device", "audio_output_device", cfg.audio_output_device
+                )
+                or ""
+            ).strip(),
+            meeting_enabled=_as_bool(
+                pick_nested(meeting, "enabled", "meeting_enabled", cfg.meeting_enabled),
+                cfg.meeting_enabled,
+            ),
+            meeting_capture=meeting_capture,
+            meeting_hotkey=str(
+                pick_nested(meeting, "hotkey", "meeting_hotkey", cfg.meeting_hotkey)
+                or cfg.meeting_hotkey
+            ).strip(),
+            meeting_loopback_device=str(
+                pick_nested(
+                    meeting,
+                    "loopback_device",
+                    "meeting_loopback_device",
+                    cfg.meeting_loopback_device,
+                )
+                or ""
+            ).strip(),
+            meeting_instruct=str(
+                pick_nested(meeting, "instruct", "meeting_instruct", cfg.meeting_instruct)
+                or cfg.meeting_instruct
+            ),
+            meeting_max_s=float(
+                pick_nested(meeting, "max_s", "meeting_max_s", cfg.meeting_max_s)
+                or cfg.meeting_max_s
+            ),
         )

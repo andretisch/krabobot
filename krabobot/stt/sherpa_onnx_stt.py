@@ -39,6 +39,12 @@ class SherpaOnnxTranscriber:
             model_type="nemo_transducer",
         )
         waveform = cls._load_audio_16k_mono(file_path)
+        from krabobot.stt.audio_preprocess import align_waveform_float
+
+        # Defensive: quiet mics / DC / long silence pads often yield empty STT.
+        waveform = align_waveform_float(waveform, sample_rate=16000)
+        if waveform.size < 1600:  # <100 ms
+            return ""
         stream = recognizer.create_stream()
         stream.accept_waveform(16000, waveform.tolist())
         recognizer.decode_stream(stream)

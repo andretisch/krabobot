@@ -5,6 +5,61 @@ from typing import Any, Awaitable, Callable
 from krabobot.agent.tools.base import Tool
 from krabobot.bus.events import OutboundMessage
 from krabobot.users.resolver import UserResolver
+from krabobot.utils.helpers import looks_like_email
+
+
+def linked_email_addresses(accounts: list[str]) -> list[str]:
+    """Extract email addresses from ``email:<addr>`` linked-account keys."""
+    emails: list[str] = []
+    seen: set[str] = set()
+    for key in accounts:
+        raw = (key or "").strip()
+        if ":" not in raw:
+            continue
+        channel, _, rest = raw.partition(":")
+        if channel.strip().lower() != "email":
+            continue
+        addr = rest.strip()
+        if not looks_like_email(addr):
+            continue
+        lower = addr.lower()
+        if lower in seen:
+            continue
+        seen.add(lower)
+        emails.append(addr)
+    return emails
+
+
+async def resolve_email_chat_id(
+    chat_id: str,
+    *,
+    user_id: str | None,
+    user_resolver: UserResolver | None,
+) -> str | None:
+    """Resolve a usable SMTP recipient for channel=email.
+
+    Accepts a real email as-is. If the agent passes a user_id / session UUID /
+    non-email token, look up linked ``email:`` accounts for *user_id*.
+    Returns None when no valid recipient can be determined.
+    """
+    candidate = (chat_id or "").strip()
+    if looks_like_email(candidate):
+        return candidate
+
+    if not user_resolver or not user_id:
+        return None
+
+    try:
+        accounts = await user_resolver.accounts_for_user(user_id)
+    except Exception:
+        return None
+
+    emails = linked_email_addresses(accounts)
+    if not emails:
+        return None
+
+    # Non-email chat_id (user_id, api session id, etc.) → primary linked mailbox.
+    return emails[0]
 
 
 class MessageTool(Tool):
@@ -77,7 +132,11 @@ class MessageTool(Tool):
                 },
                 "chat_id": {
                     "type": "string",
-                    "description": "Optional: target chat/user ID"
+                    "description": (
+                        "Optional: target chat/user ID. "
+                        "For channel=email this must be a real email address "
+                        "(not user_id / session UUID)."
+                    )
                 },
                 "media": {
                     "type": "array",
@@ -109,6 +168,22 @@ class MessageTool(Tool):
 
         if not self._send_callback:
             return "Error: Message sending not configured"
+
+        if channel.strip().lower() == "email":
+            resolved = await resolve_email_chat_id(
+                chat_id,
+                user_id=self._context_user_id,
+                user_resolver=self._user_resolver,
+            )
+            if resolved is None:
+                return (
+                    "Error: channel=email requires a valid recipient email address "
+                    "(must contain @ and a domain). "
+                    "Do not use user_id or session UUID as chat_id. "
+                    "Pass the linked email address, or ensure the current user has a "
+                    "linked email: account."
+                )
+            chat_id = resolved
 
         metadata: dict[str, Any] = {}
         if message_id:

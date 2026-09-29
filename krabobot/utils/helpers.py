@@ -18,6 +18,16 @@ def strip_think(text: str) -> str:
     return text.strip()
 
 
+_EMAIL_ADDR_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def looks_like_email(value: str | None) -> bool:
+    """True when *value* looks like an email address (local@domain.tld)."""
+    if not value:
+        return False
+    return bool(_EMAIL_ADDR_RE.match(value.strip()))
+
+
 def detect_image_mime(data: bytes) -> str | None:
     """Detect image MIME type from magic bytes, ignoring file extension."""
     if data[:8] == b"\x89PNG\r\n\x1a\n":

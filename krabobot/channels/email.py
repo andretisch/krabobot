@@ -24,7 +24,7 @@ from krabobot.bus.queue import MessageBus
 from krabobot.channels.base import BaseChannel
 from krabobot.config.paths import get_media_dir
 from krabobot.config.schema import Base
-from krabobot.utils.helpers import ensure_dir
+from krabobot.utils.helpers import ensure_dir, looks_like_email
 
 
 class EmailConfig(Base):
@@ -181,6 +181,14 @@ class EmailChannel(BaseChannel):
         to_addr = msg.chat_id.strip()
         if not to_addr:
             logger.warning("Email channel missing recipient address")
+            return
+
+        if not looks_like_email(to_addr):
+            logger.error(
+                "Skip email send: recipient {!r} is not a valid email address "
+                "(likely a user_id/session id passed as chat_id)",
+                to_addr,
+            )
             return
 
         # Determine if this is a reply (recipient has sent us an email before)

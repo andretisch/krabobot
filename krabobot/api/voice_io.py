@@ -61,7 +61,26 @@ async def transcribe_audio(
         size = 0
     logger.info("voice STT: path={} bytes={}", path.name, size)
     try:
+        from krabobot.stt.audio_preprocess import align_waveform_float, rewrite_wav_16k_mono
         from krabobot.stt.sherpa_onnx_stt import SherpaOnnxTranscriber
+
+        # Rewrite upload as aligned 16 kHz mono before decode (header/level/trim).
+        try:
+            raw_wave = await asyncio.to_thread(SherpaOnnxTranscriber._load_audio_16k_mono, path)
+            aligned = align_waveform_float(raw_wave, sample_rate=16000)
+            await asyncio.to_thread(rewrite_wav_16k_mono, path, aligned)
+            try:
+                size = path.stat().st_size if path.is_file() else size
+            except OSError:
+                pass
+            logger.info(
+                "voice STT aligned: path={} bytes={} samples={}",
+                path.name,
+                size,
+                int(aligned.size),
+            )
+        except Exception as e:
+            logger.warning("voice STT preprocess skipped: {}", e)
 
         model_dir = resolve_sherpa_stt_model_dir(stt)
         num_threads = int(max(1, stt.sherpa_num_threads)) if stt else 2

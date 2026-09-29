@@ -74,21 +74,30 @@ class LocalWakeAsr:
         self.model_dir = base
 
     def transcribe_pcm16(self, pcm16: np.ndarray | bytes, *, sample_rate: int = 16000) -> str:
+        from krabobot_voice.preprocess import TARGET_SR, preprocess_pcm16
+
         if isinstance(pcm16, (bytes, bytearray)):
             arr = np.frombuffer(pcm16, dtype=np.int16)
         else:
             arr = np.asarray(pcm16, dtype=np.int16).reshape(-1)
-        if arr.size < sample_rate // 10:
+        if arr.size < max(1, int(sample_rate) // 10):
             return ""
-        waveform = (arr.astype(np.float32) / 32768.0).tolist()
+        aligned, sr = preprocess_pcm16(arr, sample_rate=int(sample_rate))
+        if aligned.size < TARGET_SR // 10:
+            return ""
+        waveform = (aligned.astype(np.float32) / 32768.0).tolist()
         stream = self._recognizer.create_stream()
-        stream.accept_waveform(sample_rate, waveform)
+        stream.accept_waveform(sr, waveform)
         self._recognizer.decode_stream(stream)
         result = stream.result
         return str(getattr(result, "text", "") or "").strip()
 
     def transcribe_wav_bytes(self, wav_bytes: bytes) -> str:
-        with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+        from krabobot_voice.preprocess import preprocess_wav_bytes
+
+        # Align header/rate/level first, then decode.
+        aligned = preprocess_wav_bytes(wav_bytes)
+        with wave.open(io.BytesIO(aligned), "rb") as wf:
             rate = wf.getframerate()
             frames = wf.readframes(wf.getnframes())
             pcm = np.frombuffer(frames, dtype=np.int16)

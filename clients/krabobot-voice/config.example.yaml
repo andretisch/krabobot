@@ -8,16 +8,30 @@ timeout_s: 120
 sample_rate: 16000
 
 # Wake phrase «Эй, Арнольд»
-# mode: kws (default, lightweight MFCC embedding matcher) | asr (legacy sherpa) | off
+# mode: asr (default, local sherpa-onnx) | kws (optional MFCC embedding) | off
 wake:
-  mode: kws
-  threshold: 0.82
-  window_s: 1.6
-  hop_s: 0.3
+  mode: asr
+  # Sliding window for local ASR wake / KWS
+  window_s: 2.0
+  hop_s: 0.5
+  # Ignore quiet ambient before decoding a wake window
   energy_threshold: 0.012
+  # Full-phrase matches (also fuzzy «Арнольд» + greetings below)
+  phrases:
+    - эй арнольд
+    - ей арнольд
+    - привет арнольд
+    - hey arnold
+  greetings:
+    - эй
+    - ей
+    - привет
+    - hey
+  # KWS-only (wake.mode: kws)
+  threshold: 0.90
   # Empty = %LOCALAPPDATA%\krabobot-voice\wake_refs
   refs_dir: ""
-  # On Windows, synthesize a few SAPI reference WAVs if refs_dir is empty
+  # On Windows, synthesize a few SAPI reference WAVs if refs_dir is empty (KWS)
   auto_enroll_tts: true
 
 # Push-to-talk (hold-to-talk): record while chord is held
@@ -25,12 +39,61 @@ ptt:
   enabled: true
   hotkey: ctrl+alt+space
 
-# Legacy sherpa wake ASR — only used when wake.mode: asr
+# Dialog mode + local voice commands (Talk only; Meeting hotkey still works)
+# After a successful reply, listen again without wake for follow_up_s seconds.
+# Each utterance is first decoded by local sherpa; matched commands stay local
+# (no POST /v1/voice/turn).
+talk:
+  follow_up_s: 8.0       # 0 = disable; typical 6–10
+  follow_up_beep: false  # true = soft beep on follow-up (default: silent)
+  meeting_start:
+    - начать совещание
+    - начать запись
+    - запиши совещание
+    - начни совещание
+    - начни запись
+  meeting_stop:
+    - закончить совещание
+    - завершить запись
+    - стоп запись
+    - закончи совещание
+    - останови запись
+    - стоп совещание
+  exit:
+    - хватит
+    - выход
+    - спокойной ночи
+    - отмена
+    - закончили
+    - пока
+
+# Optional device hints (name substring or device index as string)
+# audio:
+#   input_device: ""      # mic for talk + meeting.capture=mic|mix
+#   output_device: ""     # playback device whose WASAPI loopback to use
+
+# Meeting recording (toggle hotkey → background thread → upload WAV + instruct)
+# Also start/stop via talk.meeting_start / talk.meeting_stop voice commands.
+# Wake/PTT remain microphone-only. Meeting can capture system audio (Teams).
+meeting:
+  enabled: true
+  # mic | loopback | mix — default mix = mic + WASAPI loopback (remote + local)
+  capture: mix
+  hotkey: ctrl+alt+m
+  # Empty = loopback for default output (or audio.output_device)
+  loopback_device: ""
+  max_s: 7200
+  instruct: >-
+    Это запись встречи (Teams/звонок). Сделай краткое резюме,
+    ключевые решения и список action items.
+
+# Local sherpa wake — model dir (empty = ~/.krabobot/models/stt/…)
 # stt_model_dir: ""
 # stt_num_threads: 2
 
 # After beep: discard settle_s (flush mic buffer), then require min_speech_s
 # before VAD may end on silence — avoids posting near-empty clips to STT.
+# Client also peak/RMS-normalizes + trims before POST /v1/voice/turn.
 utterance_max_s: 15.0
 settle_s: 0.35
 preroll_s: 0.4

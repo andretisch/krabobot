@@ -1,7 +1,7 @@
 [project]
 name = "krabobot-voice"
 version = "0.2.0"
-description = "Local KWS/PTT voice client for krabobot (server STT/TTS)"
+description = "Local wake/PTT voice client for krabobot (server STT/TTS)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -10,10 +10,12 @@ dependencies = [
     "PyYAML>=6.0",
     "pynput>=1.7",
     "sounddevice>=0.4.6",
+    # WASAPI loopback for meeting.capture=loopback|mix (Windows)
+    "PyAudioWPatch>=0.2.12.6; platform_system=='Windows'",
 ]
 
 [project.optional-dependencies]
-# Legacy continuous sherpa wake (wake.mode: asr only)
+# Local sherpa wake (wake.mode: asr — default)
 asr = ["sherpa-onnx>=1.10"]
 wake = ["sherpa-onnx>=1.10"]
 

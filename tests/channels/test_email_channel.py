@@ -469,6 +469,48 @@ async def test_send_skips_when_consent_not_granted(monkeypatch) -> None:
     assert called["smtp"] is False
 
 
+@pytest.mark.asyncio
+async def test_send_skips_invalid_recipient_uuid(monkeypatch) -> None:
+    """UUID/user_id as chat_id must not reach SMTP (false-success / spool bug)."""
+    called = {"smtp": False}
+
+    class FakeSMTP:
+        def __init__(self, _host: str, _port: int, timeout: int = 30) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def starttls(self, context=None):
+            return None
+
+        def login(self, _user: str, _pw: str):
+            return None
+
+        def send_message(self, msg: EmailMessage):
+            return None
+
+    def _smtp_factory(host: str, port: int, timeout: int = 30):
+        called["smtp"] = True
+        return FakeSMTP(host, port, timeout=timeout)
+
+    monkeypatch.setattr("krabobot.channels.email.smtplib.SMTP", _smtp_factory)
+
+    channel = EmailChannel(_make_config(), MessageBus())
+    await channel.send(
+        OutboundMessage(
+            channel="email",
+            chat_id="e4fcddf8-6c08-4b20-b760-f35c3ed3d446",
+            content="Should not send.",
+            metadata={"force_send": True},
+        )
+    )
+    assert called["smtp"] is False
+
+
 def test_fetch_messages_between_dates_uses_imap_since_before_without_mark_seen(monkeypatch) -> None:
     raw = _make_raw_email(subject="Status", body="Yesterday update")
 
