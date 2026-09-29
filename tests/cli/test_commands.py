@@ -681,6 +681,7 @@ def _patch_serve_runtime(
     class _FakePopen:
         def __init__(self, cmd, *args, **kwargs) -> None:
             seen["gateway_cmd"] = list(cmd)
+            seen["gateway_env"] = kwargs.get("env")
             self.pid = 5555
             self._polled = False
 
@@ -961,7 +962,11 @@ def test_serve_spawns_gateway_when_not_running(monkeypatch, tmp_path: Path) -> N
     assert seen["run_app"] is True
     assert seen["gateway_cmd"][0:4] == [seen["gateway_cmd"][0], "-m", "krabobot", "gateway"]
     assert "--config" in seen["gateway_cmd"]
+    env = seen.get("gateway_env")
+    assert isinstance(env, dict)
+    assert env.get("KRABOBOT_SKIP_AUTO_UPDATE") == "1"
     assert "Gateway started" in result.stdout
+    assert "Auto-update: off" in result.stdout
     assert seen.get("gateway_terminated") is True
 
 

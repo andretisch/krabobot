@@ -596,25 +596,33 @@ def _load_runtime_config(config: str | None = None, workspace: str | None = None
 
 
 def _report_auto_update(result) -> None:
-    """Print a short console line for startup git auto-update."""
+    """Print a short console line for every startup git auto-update outcome."""
     if result.status == "disabled":
+        console.print(
+            "[dim]Auto-update: off "
+            "(gateway.autoUpdate=false — enable in web UI or config.json)[/dim]"
+        )
         return
     branch = result.branch or "?"
+    root = getattr(result, "root", None)
+    root_hint = f", root={root}" if root else ""
     if result.status == "updated":
         old = (result.old_commit or "")[:7]
         new = (result.new_commit or "")[:7]
         console.print(
-            f"[green]✓[/green] Auto-update: {branch} {old} → {new} (re-executing…)"
+            f"[green]✓[/green] Auto-update: pulled {branch} {old} → {new} "
+            f"(re-executing…{root_hint})"
         )
         return
     if result.status == "up_to_date":
         console.print(
-            f"[dim]Auto-update: already up to date ({branch} @ "
-            f"{(result.old_commit or '')[:7]})[/dim]"
+            f"[dim]Auto-update: already up to date "
+            f"({branch} @ {(result.old_commit or '')[:7]}{root_hint})[/dim]"
         )
         return
     reason = result.reason or result.status
-    console.print(f"[yellow]Auto-update skipped:[/yellow] {reason}")
+    label = "failed" if result.status == "failed" else "skipped"
+    console.print(f"[yellow]Auto-update {label}:[/yellow] {reason}")
 
 
 def _print_service_result(result) -> None:
@@ -997,17 +1005,18 @@ def serve(
         write_serve_pid,
     )
 
-    if verbose:
-        logger.enable("krabobot")
-    else:
-        logger.disable("krabobot")
-
-    # Config + optional git pull before importing the heavy app stack / binding ports.
+    # Config + optional git pull BEFORE logger.disable / importing the heavy app
+    # stack / binding ports — so auto-update lines always reach the console.
     runtime_config = _load_runtime_config(config, workspace)
     update_result = try_git_auto_update(enabled=runtime_config.gateway.auto_update)
     _report_auto_update(update_result)
     if update_result.changed:
         reexec_cli()
+
+    if verbose:
+        logger.enable("krabobot")
+    else:
+        logger.disable("krabobot")
 
     from krabobot.agent.loop import AgentLoop
     from krabobot.api.server import create_app
@@ -1034,7 +1043,10 @@ def serve(
     else:
         cmd = _gateway_subprocess_cmd(config=config, workspace=workspace, verbose=verbose)
         console.print(f"[dim]Starting gateway subprocess: {' '.join(cmd)}[/dim]")
-        gateway_child = subprocess.Popen(cmd)
+        # Parent already attempted auto-update; avoid a second fetch/pull in the child.
+        child_env = os.environ.copy()
+        child_env["KRABOBOT_SKIP_AUTO_UPDATE"] = "1"
+        gateway_child = subprocess.Popen(cmd, env=child_env)
         console.print(f"[green]✓[/green] Gateway started (pid {gateway_child.pid})")
 
     bus = MessageBus()

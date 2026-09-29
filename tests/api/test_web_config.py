@@ -161,6 +161,42 @@ def test_save_web_config_writes_and_backup(monkeypatch, tmp_path: Path) -> None:
     assert reload["providers"]["openrouter"]["apiKey"] == "key1"
 
 
+def test_web_config_persists_gateway_auto_update(monkeypatch, tmp_path: Path) -> None:
+    """UI checkbox path other.gateway.autoUpdate must round-trip into config.json."""
+    from krabobot.api import web_config as wc
+    from krabobot.config.loader import load_config
+
+    krabot_dir = tmp_path / ".krabobot"
+    krabot_dir.mkdir()
+    cfg_file = krabot_dir / "config.json"
+    minimal = {
+        "agents": {
+            "defaults": {
+                "model": "m1",
+                "provider": "openrouter",
+                "workspace": "~/w",
+            }
+        },
+        "providers": {
+            "openrouter": {"apiKey": "key1", "apiBase": ""},
+        },
+        "channels": {"sendProgress": True},
+        "api": {"host": "127.0.0.1", "port": 8900},
+        "gateway": {"host": "0.0.0.0", "port": 18790, "autoUpdate": False},
+    }
+    cfg_file.write_text(json.dumps(minimal, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(wc, "get_config_path", lambda: cfg_file.resolve(), raising=True)
+
+    payload = wc.build_web_config_payload()
+    assert payload["other"]["gateway"]["autoUpdate"] is False
+    payload["other"]["gateway"]["autoUpdate"] = True
+    wc.save_web_config_sections(payload)
+
+    data = json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert data["gateway"]["autoUpdate"] is True
+    assert load_config(cfg_file).gateway.auto_update is True
+
+
 def test_restore_roundtrip(monkeypatch, tmp_path: Path) -> None:
     from krabobot.api import web_config as wc
 
