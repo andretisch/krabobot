@@ -28,6 +28,11 @@
       text: "Распознавание и озвучка через sherpa-onnx; голос в чатах — по /tts on у каждого.",
     },
     {
+      icon: "🎧",
+      title: "Голосовой клиент",
+      text: "krabobot-voice на Windows: окно и tray, wake/PTT/совещания, настройки с Apply & restart; есть portable-сборка.",
+    },
+    {
       icon: "🌐",
       title: "Веб-чат и API",
       text: "krabobot serve поднимает HTTP API и UI; настройка config.json прямо в браузере.",
@@ -64,6 +69,24 @@
       name: "Email",
       text: "IMAP/SMTP с автоответами, DKIM/SPF-проверкой и ответами только зарегистрированным пользователям.",
       tag: "IMAP · SMTP",
+    },
+    {
+      name: "Voice",
+      text: "Локальный клиент krabobot-voice: wake-фраза, PTT и запись совещаний рядом с gateway/serve.",
+      tag: "Windows · portable",
+    },
+  ];
+
+  const NEWS = [
+    {
+      date: "30 сентября 2026",
+      title: "Окно и tray у krabobot-voice",
+      text:
+        "На Windows у голосового клиента появился UI: окно и иконка в tray со статусом " +
+        "(idle, listen, meeting и др.), кнопками Meeting и PTT, логом. В настройках — wake, " +
+        "устройства и hotkeys; Apply & restart сохраняет YAML и перезапускает цикл. Можно " +
+        "стартовать свёрнутым в tray (config или CLI). Иконка краба — в окне, tray и на панели задач. " +
+        "Portable-сборка по-прежнему собирается скриптом в clients/krabobot-voice.",
     },
   ];
 
@@ -139,6 +162,20 @@ krabobot gateway`;
     });
   }
 
+  function renderNews() {
+    const root = document.getElementById("news-list");
+    if (!root) return;
+    NEWS.forEach((item) => {
+      root.appendChild(
+        el("li", { className: "news-item" }, [
+          el("time", { className: "news-item__date", textContent: item.date }),
+          el("h3", { className: "news-item__title", textContent: item.title }),
+          el("p", { className: "news-item__text", textContent: item.text }),
+        ])
+      );
+    });
+  }
+
   function initNav() {
     const toggle = document.getElementById("nav-toggle");
     const nav = document.getElementById("site-nav");
@@ -169,6 +206,7 @@ krabobot gateway`;
 
   renderFeatures();
   renderChannels();
+  renderNews();
   renderCommands();
   initNav();
   initYear();

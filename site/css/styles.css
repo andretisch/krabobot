@@ -444,6 +444,50 @@ code {
   color: var(--accent);
 }
 
+/* News */
+.news {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 1.25rem;
+  max-width: 44rem;
+  margin-inline: auto;
+}
+
+.news-item {
+  padding: 0;
+  border-top: 1px solid var(--border-soft);
+  padding-top: 1.25rem;
+}
+
+.news-item:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.news-item__date {
+  display: block;
+  margin-bottom: 0.35rem;
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--accent);
+}
+
+.news-item__title {
+  margin: 0 0 0.45rem;
+  font-size: 1.2rem;
+  font-weight: 800;
+  color: var(--navy);
+}
+
+.news-item__text {
+  margin: 0;
+  font-size: 0.98rem;
+  color: var(--muted);
+}
+
 /* Access */
 .access {
   display: grid;
