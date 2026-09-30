@@ -39,6 +39,7 @@ hiddenimports = [
     "krabobot_voice.ptt",
     "krabobot_voice.segmenter",
     "krabobot_voice.silero_vad",
+    "krabobot_voice.single_instance",
     "krabobot_voice.status_bus",
     "krabobot_voice.vad",
     "krabobot_voice.wake",

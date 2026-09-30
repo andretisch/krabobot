@@ -320,15 +320,15 @@ Python не доставляет `KeyboardInterrupt`, пока PortAudio не в
 
 Onedir без Python на целевой машине. Скрипт:
 
-1. Собирает PyInstaller в `build/krabobot-voice/` (промежуточный dist).
-2. Копирует результат в **пользовательский каталог**:
-   `clients/krabobot-voice/build/krabobot-voice-portable/`
-3. Бандлит Silero VAD + Sherpa STT в `models/` (скачиваний при первом
+1. Собирает PyInstaller onedir в
+   `clients/krabobot-voice/build/krabobot-voice/`.
+2. Бандлит Silero VAD + Sherpa STT в `models/` (скачиваний при первом
    запуске **нет**).
-4. Кладёт рядом `config.example.yaml` и `README.md`; при повторной сборке
-   сохраняет уже существующий `config.yaml` в portable-папке.
+3. Кладёт рядом `config.example.yaml` и `README.md`; при повторной сборке
+   сохраняет уже существующий `config.yaml` в этой папке (до очистки dist
+   и восстанавливает после).
 
-Раздавайте / запускайте именно **`build/krabobot-voice-portable/`**.
+Раздавайте / запускайте именно **`build/krabobot-voice/`**.
 
 ### Требования перед сборкой
 
@@ -367,7 +367,7 @@ pip install -e ".\clients\krabobot-voice[asr,ui,packaging]"
 | `-SileroSource <path>` | явный путь к `silero_vad.onnx` |
 | `-SttSource <dir>` | явный каталог STT (нужен `tokens.txt`) |
 
-### Содержимое `build/krabobot-voice-portable/`
+### Содержимое `build/krabobot-voice/`
 
 | Путь | Назначение |
 |------|------------|
@@ -420,5 +420,5 @@ packaging/
   krabobot-voice.spec   # PyInstaller onedir (console=False)
   README.md             # инструкция рядом с portable-сборкой
 scripts/
-  build_portable.ps1    # → build/krabobot-voice-portable/
+  build_portable.ps1    # → build/krabobot-voice/
 ```

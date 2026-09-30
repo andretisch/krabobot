@@ -1,7 +1,7 @@
 # Portable-сборка krabobot-voice (Windows)
 
 Этот файл лежит в репозитории (`clients/krabobot-voice/packaging/`) и **копируется**
-рядом с exe при сборке (`build/krabobot-voice-portable/README.md`).
+рядом с exe при сборке (`build/krabobot-voice/README.md`).
 
 ## Что в папке сборки
 
@@ -130,11 +130,10 @@ pip install -e ".\clients\krabobot-voice[asr,ui,packaging]"
 ```
 
 **Готовый каталог для раздачи:**  
-`clients\krabobot-voice\build\krabobot-voice-portable\`
+`clients\krabobot-voice\build\krabobot-voice\`
 
-(Промежуточный PyInstaller dist: `build\krabobot-voice\` — тот же состав;
-скрипт синхронизирует его в `-portable` и сохраняет ваш `config.yaml` при
-пересборке.)
+(Это onedir PyInstaller. При пересборке скрипт сохраняет уже существующий
+`config.yaml` рядом с exe: копирует его до очистки dist и возвращает после.)
 
 Каталоги `build/` и `dist/` в git не коммитятся. Spec: `packaging/krabobot-voice.spec`.
 

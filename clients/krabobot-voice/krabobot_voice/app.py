@@ -49,7 +49,11 @@ from krabobot_voice.link import ensure_device_linked
 from krabobot_voice.meeting import MeetingCaptureConfig, MeetingRecorder, default_meetings_dir
 from krabobot_voice.protocol import ClientState
 from krabobot_voice.ptt import PttHotkey
-from krabobot_voice.segmenter import VadSegmenter
+from krabobot_voice.segmenter import ListenCountdown, VadSegmenter, listen_countdown_status
+from krabobot_voice.single_instance import (
+    ALREADY_RUNNING_EXIT_CODE,
+    ensure_single_instance,
+)
 from krabobot_voice.status_bus import StatusBus, get_status_bus
 from krabobot_voice.vad import frame_rms, pcm_stats
 from krabobot_voice.wake import command_after_wake, matches_wake_phrase
@@ -354,6 +358,37 @@ def _kws_score(kws: EmbeddingKws, pcm: np.ndarray) -> float:
         return 0.0
 
 
+# Audible cue once meeting capture is actually open (not when the command is queued).
+_MEETING_START_BEEPS = 3
+
+
+def cue_meeting_recording_started(
+    play: Callable[[int], None] | None = None,
+    *,
+    background: bool = True,
+) -> threading.Thread | None:
+    """Play three short beeps after meeting capture is ready.
+
+    The worker already owns the mic, so this runs on a daemon thread and does
+    not block the UI or the meeting stop / mic-tap loop. Gaps come from
+    ``play_beeps`` (winsound on Windows, generated tone otherwise).
+    """
+    player = play if play is not None else play_beeps
+
+    def _run() -> None:
+        try:
+            player(_MEETING_START_BEEPS)
+        except Exception as e:
+            _log(f"WARNING: meeting start beep failed: {e}")
+
+    if not background:
+        _run()
+        return None
+    thread = threading.Thread(target=_run, name="meeting-start-beep", daemon=True)
+    thread.start()
+    return thread
+
+
 class _Driver:
     """Applies VoiceSession effects and owns the segment → ASR loop."""
 
@@ -388,6 +423,7 @@ class _Driver:
         self._command_queue = command_queue
         self._status_bus = status_bus if status_bus is not None else get_status_bus()
         self._deadline: float | None = None
+        self._countdown: ListenCountdown | None = None
         self._pending_pcm: np.ndarray | None = None
         self._recorder: MeetingRecorder | None = None
         self._last_status = ""
@@ -435,8 +471,10 @@ class _Driver:
             elif isinstance(eff, SetDeadline):
                 if eff.seconds is None:
                     self._deadline = None
+                    self._countdown = None
                 else:
-                    self._deadline = time.monotonic() + max(0.1, float(eff.seconds))
+                    self._countdown = ListenCountdown(float(eff.seconds))
+                    self._deadline = self._countdown.deadline
             elif isinstance(eff, SendText):
                 self._do_text_turn(eff.text, mic=mic)
             elif isinstance(eff, SendAudio):
@@ -626,6 +664,8 @@ class _Driver:
             f"worker={worker} → {wav_path}{echo_hint}"
         )
         self._recorder = recorder
+        # Capture is open (start() waited until ready). Cue off the voice thread.
+        cue_meeting_recording_started()
 
     def _stop_meeting_and_upload(self) -> None:
         recorder = self._recorder
@@ -972,7 +1012,6 @@ class _Driver:
             speech_gate=self.speech_gate,
         )
         last_heartbeat = time.monotonic()
-        last_listen_log = 0.0
 
         while True:
             if self._stopped():
@@ -1075,7 +1114,6 @@ class _Driver:
                     )
 
             def _poll() -> None:
-                nonlocal last_listen_log
                 if self._stopped():
                     raise _HotkeyAbortError("stop")
                 ui = self._poll_ui_command()
@@ -1091,12 +1129,12 @@ class _Driver:
                     raise _HotkeyAbortError("meeting")
                 if self.ptt is not None and self.ptt.consume_edge_down():
                     raise _HotkeyAbortError("ptt")
-                if mode in (Mode.LISTEN, Mode.DIALOG) and self._deadline is not None:
-                    now = time.monotonic()
-                    if now - last_listen_log >= 2.0:
-                        left = max(0.0, self._deadline - now)
-                        _log(f"  … listening ({left:.0f}s left)")
-                        last_listen_log = now
+                cd = self._countdown
+                if mode in (Mode.LISTEN, Mode.DIALOG) and cd is not None:
+                    # Speech hold freezes the line; silence publishes the seconds left.
+                    self._status(
+                        listen_countdown_status(cd, follow_up=mode is Mode.DIALOG)
+                    )
 
             for_wake = mode is Mode.IDLE
             early = self._make_early_check(
@@ -1108,12 +1146,17 @@ class _Driver:
             try:
                 # Idle wake + LISTEN local-commands: cadence ASR after speech_start
                 # (Silero remains the speech gate; no sliding-window spam).
+                # LISTEN/DIALOG: silence-only countdown (held while VAD speech).
+                listen_cd = (
+                    self._countdown if mode in (Mode.LISTEN, Mode.DIALOG) else None
+                )
                 pcm = segmenter.next_segment(
-                    self._deadline,
+                    None if listen_cd is not None else self._deadline,
                     poll=_poll,
                     early_check=early,
                     early_check_interval_s=early_interval_s,
                     early_check_min_s=early_min_s,
+                    countdown=listen_cd,
                 )
             except _HotkeyAbortError as abort:
                 if abort.kind == "stop":
@@ -1296,12 +1339,15 @@ class _Driver:
 
                 self._early_asr_text = None
                 try:
+                    # Same silence-only listen budget as talk mode when a
+                    # follow-up window is armed; idle meeting recording has none.
                     pcm = segmenter.next_segment(
-                        self._deadline,
+                        None if self._countdown is not None else self._deadline,
                         poll=_poll,
                         early_check=early,
                         early_check_interval_s=early_interval_s,
                         early_check_min_s=early_min_s,
+                        countdown=self._countdown,
                     )
                 except _HotkeyAbortError as abort:
                     if abort.kind == "stop":
@@ -1821,6 +1867,9 @@ def _main_inner(argv: list[str] | None = None) -> int:
         return run_test_loopback(cfg, duration_s=3.0)
 
     console_only = "--console" in args
+    # After one-shot flags (--list-devices, --test-loopback), which must not lock.
+    if not ensure_single_instance(console=console_only):
+        return ALREADY_RUNNING_EXIT_CODE
     # CLI forces this run only; persistent default is ui.start_minimized in YAML.
     cli_minimized = "--minimized" in args or "--start-minimized" in args
     args = [

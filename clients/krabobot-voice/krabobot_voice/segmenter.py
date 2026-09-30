@@ -23,6 +23,66 @@ _UNSET: Any = object()
 
 
 @dataclass
+class ListenCountdown:
+    """Listen/follow-up timer that counts silence only.
+
+    A speech frame resets the silence budget and holds expiry (``speech_active``)
+    so the countdown does not tick while VAD still hears the user. Silence,
+    including the wait before speech and the gap after it, consumes the budget.
+    Utterance close on ``silence_end`` / ``max_s`` / early-check is unchanged.
+    """
+
+    budget_s: float
+    clock: Callable[[], float] | None = None
+    deadline: float = 0.0
+    speech_active: bool = False
+
+    def __post_init__(self) -> None:
+        self.budget_s = max(0.1, float(self.budget_s))
+        if self.clock is None:
+            self.clock = time.monotonic
+        if self.deadline <= 0.0:
+            self.deadline = self.now() + self.budget_s
+
+    def now(self) -> float:
+        tick = self.clock
+        if tick is None:
+            return time.monotonic()
+        return float(tick())
+
+    def remaining(self) -> float:
+        if self.speech_active:
+            return self.budget_s
+        return max(0.0, self.deadline - self.now())
+
+    def expired(self) -> bool:
+        if self.speech_active:
+            return False
+        return self.now() >= self.deadline
+
+    def note(self, speaking: bool) -> None:
+        """Speech restarts the silence budget; silence leaves the deadline alone."""
+        if speaking:
+            self.deadline = self.now() + self.budget_s
+            self.speech_active = True
+        else:
+            self.speech_active = False
+
+    def release(self) -> None:
+        """Drop a speech hold carried over from the previous utterance."""
+        self.speech_active = False
+
+
+def listen_countdown_status(countdown: ListenCountdown, *, follow_up: bool = False) -> str:
+    """UI/log line: frozen while speech is active, seconds left only in silence."""
+    prefix = "follow-up listening" if follow_up else "listening"
+    if countdown.speech_active:
+        return f"{prefix}… (speaking)"
+    secs = max(0, int(round(countdown.remaining())))
+    return f"{prefix}… ({secs}s left)"
+
+
+@dataclass
 class VadSegmenter:
     """Utterance segmenter whose preroll/state survive across phases.
 
@@ -31,6 +91,11 @@ class VadSegmenter:
     speech already started — safety against sticky VAD / long trails). Otherwise
     the segment finishes on silence, ``max_s`` (counted from speech start), or an
     optional ``early_check`` hit (local command / wake without waiting for silence).
+
+    When ``countdown`` is set (listen / follow-up), that timer replaces
+    ``deadline``: it pauses and resets while VAD reports speech and only
+    expires during silence. ``silence_end``, ``max_s``, and ``early_check``
+    still close the utterance.
     """
 
     read_block: Callable[[], np.ndarray]
@@ -189,6 +254,7 @@ class VadSegmenter:
         early_check: Callable[[np.ndarray], bool] | None = None,
         early_check_interval_s: float = 1.0,
         early_check_min_s: float = 0.7,
+        countdown: ListenCountdown | None = None,
     ) -> np.ndarray | None:
         """Wait for the next VAD-closed utterance.
 
@@ -197,12 +263,23 @@ class VadSegmenter:
         commit, returns ``None`` even if speech already started (hard listen
         wall-clock — avoids hanging until ``max_s`` on sticky VAD).
 
+        ``countdown``, when set, replaces that hard deadline for listen/dialog:
+        speech resets and holds the timer; only silence can expire it.
+
         When ``early_check`` is set, after ``early_check_min_s`` of voiced audio
         (from speech_start) the callback runs once, then about every
         ``early_check_interval_s`` on the growing buffer. Returning True closes
         immediately (local command / wake match) without waiting for silence.
         Silence_end and max_s remain fallbacks. Works with Silero ``speech_gate``.
         """
+        if countdown is not None:
+            countdown.release()
+
+        def _expired() -> bool:
+            if countdown is not None:
+                return countdown.expired()
+            return deadline is not None and time.monotonic() >= deadline
+
         sr = self.sample_rate
         block = self.block
         interval_blocks = max(1, int(float(early_check_interval_s) * sr / block))
@@ -230,9 +307,8 @@ class VadSegmenter:
             if poll is not None:
                 poll()
 
-            now = time.monotonic()
-            if deadline is not None and now >= deadline:
-                # Hard wall-clock: abandon uncommitted utterance (incl. sticky speech).
+            if _expired():
+                # Silence budget elapsed (or hard deadline). Speech hold skips this.
                 if self._started:
                     self.reset_utterance()
                 return None
@@ -248,6 +324,8 @@ class VadSegmenter:
                     chunk = pad
 
             speaking = self._speaking(chunk)
+            if countdown is not None:
+                countdown.note(speaking)
             self._elapsed += 1
 
             if not self._started:
@@ -266,7 +344,7 @@ class VadSegmenter:
                         early_probed = False
                 else:
                     self._speech_run = 0
-                if deadline is not None and time.monotonic() >= deadline:
+                if _expired():
                     return None
                 continue
 
@@ -281,7 +359,7 @@ class VadSegmenter:
                     hit = _try_early()
                     if hit is not None:
                         return hit
-                    if deadline is not None and time.monotonic() >= deadline:
+                    if _expired():
                         self.reset_utterance()
                         return None
                     if self._elapsed >= self._max_blocks:
@@ -304,7 +382,7 @@ class VadSegmenter:
                 early_probed = False
                 if len(self._buf) > self._preroll_blocks:
                     self._buf = self._buf[-self._preroll_blocks :]
-                if deadline is not None and time.monotonic() >= deadline:
+                if _expired():
                     return None
                 continue
 
@@ -313,7 +391,7 @@ class VadSegmenter:
             if hit is not None:
                 return hit
 
-            if deadline is not None and time.monotonic() >= deadline:
+            if _expired():
                 self.reset_utterance()
                 return None
 
