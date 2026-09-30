@@ -1,13 +1,12 @@
-from email.message import EmailMessage
-from datetime import date
 import imaplib
+from datetime import date
+from email.message import EmailMessage
 
 import pytest
 
 from krabobot.bus.events import OutboundMessage
 from krabobot.bus.queue import MessageBus
-from krabobot.channels.email import EmailChannel
-from krabobot.channels.email import EmailConfig
+from krabobot.channels.email import EmailChannel, EmailConfig, idna_email_address, idna_hostname
 
 
 def _make_config(**overrides) -> EmailConfig:
@@ -683,6 +682,113 @@ def test_email_content_tagged_with_email_context(monkeypatch) -> None:
     assert items[0]["content"].startswith("[EMAIL-CONTEXT]"), (
         "Email content must be tagged with [EMAIL-CONTEXT]"
     )
+
+
+_PUNYCODE_HOST = "imap.xn--80aca7awbjv.xn--p1ai"
+
+
+def test_fetch_unicode_idn_host_is_punycoded(monkeypatch) -> None:
+    seen: dict[str, str] = {}
+
+    class FakeIMAP:
+        def login(self, user: str, _pw: str):
+            user.encode("ascii")
+            seen["user"] = user
+            return "OK", [b"logged in"]
+
+        def select(self, _mailbox: str):
+            return "OK", [b"0"]
+
+        def search(self, *_args):
+            return "OK", [b""]
+
+        def logout(self):
+            return "BYE", [b""]
+
+    def _factory(host: str, _port: int):
+        host.encode("ascii")
+        seen["host"] = host
+        return FakeIMAP()
+
+    monkeypatch.setattr("krabobot.channels.email.imaplib.IMAP4_SSL", _factory)
+
+    channel = EmailChannel(
+        _make_config(
+            imap_host="imap.крабобот.рф",
+            imap_username="bot@крабобот.рф",
+        ),
+        MessageBus(),
+    )
+    assert channel._fetch_new_messages() == []
+    assert seen["host"] == _PUNYCODE_HOST
+    assert seen["user"] == "bot@xn--80aca7awbjv.xn--p1ai"
+
+    seen.clear()
+    channel = EmailChannel(
+        _make_config(imap_host=_PUNYCODE_HOST, imap_username="bot@xn--80aca7awbjv.xn--p1ai"),
+        MessageBus(),
+    )
+    channel._fetch_new_messages()
+    assert seen["host"] == _PUNYCODE_HOST
+    assert seen["user"] == "bot@xn--80aca7awbjv.xn--p1ai"
+
+
+@pytest.mark.asyncio
+async def test_smtp_unicode_idn_host_and_addresses_are_punycoded(monkeypatch) -> None:
+    seen: dict[str, str] = {}
+
+    class FakeSMTP:
+        def __init__(self, host: str, _port: int, timeout: int = 30) -> None:
+            host.encode("ascii")
+            seen["host"] = host
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def starttls(self, context=None):
+            return None
+
+        def login(self, user: str, _pw: str):
+            user.encode("ascii")
+            seen["user"] = user
+
+        def send_message(self, msg: EmailMessage):
+            seen["from"] = msg["From"]
+            seen["to"] = msg["To"]
+            msg["From"].encode("ascii")
+            msg["To"].encode("ascii")
+
+    monkeypatch.setattr(
+        "krabobot.channels.email.smtplib.SMTP",
+        lambda host, port, timeout=30: FakeSMTP(host, port, timeout=timeout),
+    )
+
+    channel = EmailChannel(
+        _make_config(
+            smtp_host="smtp.крабобот.рф",
+            smtp_username="bot@крабобот.рф",
+            from_address="bot@крабобот.рф",
+        ),
+        MessageBus(),
+    )
+    await channel.send(
+        OutboundMessage(
+            channel="email",
+            chat_id="alice@крабобот.рф",
+            content="Привет",
+        )
+    )
+
+    assert seen["host"] == "smtp.xn--80aca7awbjv.xn--p1ai"
+    assert seen["user"] == "bot@xn--80aca7awbjv.xn--p1ai"
+    assert seen["from"] == "bot@xn--80aca7awbjv.xn--p1ai"
+    assert seen["to"] == "alice@xn--80aca7awbjv.xn--p1ai"
+    assert idna_hostname("xn--80aca7awbjv.xn--p1ai") == "xn--80aca7awbjv.xn--p1ai"
+    assert idna_email_address("bot@example.com") == "bot@example.com"
 
 
 def test_check_authentication_results_method() -> None:

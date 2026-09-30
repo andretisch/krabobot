@@ -27,6 +27,27 @@ from krabobot.config.schema import Base
 from krabobot.utils.helpers import ensure_dir, looks_like_email
 
 
+def idna_hostname(host: str) -> str:
+    """ASCII/punycode form of a mail hostname. Already-ASCII names stay unchanged."""
+    host = host.strip()
+    if not host:
+        return host
+    try:
+        host.encode("ascii")
+    except UnicodeEncodeError:
+        return host.encode("idna").decode("ascii")
+    return host
+
+
+def idna_email_address(address: str) -> str:
+    """IDNA-encode the domain of an address. The local-part is left as-is."""
+    address = address.strip()
+    local, sep, domain = address.rpartition("@")
+    if not sep or not local or not domain:
+        return address
+    return f"{local}@{idna_hostname(domain)}"
+
+
 class EmailConfig(Base):
     """Email channel configuration (IMAP inbound + SMTP outbound)."""
 
@@ -208,8 +229,11 @@ class EmailChannel(BaseChannel):
                 subject = override
 
         email_msg = EmailMessage()
-        email_msg["From"] = self.config.from_address or self.config.smtp_username or self.config.imap_username
-        email_msg["To"] = to_addr
+        from_raw = (
+            self.config.from_address or self.config.smtp_username or self.config.imap_username
+        )
+        email_msg["From"] = idna_email_address(from_raw)
+        email_msg["To"] = idna_email_address(to_addr)
         email_msg["Subject"] = subject
         email_msg.set_content(msg.content or "")
 
@@ -269,20 +293,18 @@ class EmailChannel(BaseChannel):
 
     def _smtp_send(self, msg: EmailMessage) -> None:
         timeout = 30
+        host = idna_hostname(self.config.smtp_host)
+        username = idna_email_address(self.config.smtp_username)
         if self.config.smtp_use_ssl:
-            with smtplib.SMTP_SSL(
-                self.config.smtp_host,
-                self.config.smtp_port,
-                timeout=timeout,
-            ) as smtp:
-                smtp.login(self.config.smtp_username, self.config.smtp_password)
+            with smtplib.SMTP_SSL(host, self.config.smtp_port, timeout=timeout) as smtp:
+                smtp.login(username, self.config.smtp_password)
                 smtp.send_message(msg)
             return
 
-        with smtplib.SMTP(self.config.smtp_host, self.config.smtp_port, timeout=timeout) as smtp:
+        with smtplib.SMTP(host, self.config.smtp_port, timeout=timeout) as smtp:
             if self.config.smtp_use_tls:
                 smtp.starttls(context=ssl.create_default_context())
-            smtp.login(self.config.smtp_username, self.config.smtp_password)
+            smtp.login(username, self.config.smtp_password)
             smtp.send_message(msg)
 
     def _fetch_new_messages(self) -> list[dict[str, Any]]:
@@ -359,14 +381,16 @@ class EmailChannel(BaseChannel):
     ) -> None:
         """Fetch messages by arbitrary IMAP search criteria."""
         mailbox = self.config.imap_mailbox or "INBOX"
+        host = idna_hostname(self.config.imap_host)
+        username = idna_email_address(self.config.imap_username)
 
         if self.config.imap_use_ssl:
-            client = imaplib.IMAP4_SSL(self.config.imap_host, self.config.imap_port)
+            client = imaplib.IMAP4_SSL(host, self.config.imap_port)
         else:
-            client = imaplib.IMAP4(self.config.imap_host, self.config.imap_port)
+            client = imaplib.IMAP4(host, self.config.imap_port)
 
         try:
-            client.login(self.config.imap_username, self.config.imap_password)
+            client.login(username, self.config.imap_password)
             try:
                 status, select_data = client.select(mailbox)
             except Exception as exc:
