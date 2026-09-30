@@ -176,7 +176,7 @@ class TTSConfig(Base):
     auto_download_models: bool = True
     sherpa_speed: float = Field(default=1.0, ge=0.5, le=2.0)
     sherpa_models_dir: str = "~/.krabobot/models/tts"
-    sherpa_model_id: str = "csukuangfj/vits-piper-ru_RU-irina-medium"
+    sherpa_model_id: str = "csukuangfj/vits-piper-ru_RU-ruslan-medium"
 
 
 class STTConfig(Base):

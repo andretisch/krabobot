@@ -33,7 +33,7 @@ def test_sherpa_model_dir_from_config() -> None:
     ch.set_tts_config(
         TTSConfig(
             sherpa_models_dir="~/.krabobot/models/tts",
-            sherpa_model_id="csukuangfj/vits-piper-ru_RU-irina-medium",
+            sherpa_model_id="csukuangfj/vits-piper-ru_RU-ruslan-medium",
         )
     )
-    assert "vits-piper-ru_RU-irina-medium" in ch._resolve_sherpa_tts_model_dir()
+    assert "vits-piper-ru_RU-ruslan-medium" in ch._resolve_sherpa_tts_model_dir()

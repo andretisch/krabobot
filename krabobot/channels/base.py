@@ -190,7 +190,7 @@ class BaseChannel(ABC):
             if model_name:
                 return str((base / model_name).resolve())
             return str(base.resolve())
-        default_dir = str((Path.home() / ".krabobot" / "models" / "tts" / "vits-piper-ru_RU-irina-medium").resolve())
+        default_dir = str((Path.home() / ".krabobot" / "models" / "tts" / "vits-piper-ru_RU-ruslan-medium").resolve())
         return (os.getenv("SHERPA_TTS_MODEL_DIR", default_dir) or "").strip()
 
     def _sherpa_tts_speed(self) -> float:

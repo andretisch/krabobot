@@ -458,7 +458,7 @@ rmdir ~/.krabobot/cron ~/.krabobot/sessions 2>/dev/null || true
   "autoDownloadModels": true,
   "sherpaSpeed": 1.0,
   "sherpaModelsDir": "~/.krabobot/models/tts",
-  "sherpaModelId": "csukuangfj/vits-piper-ru_RU-irina-medium"
+  "sherpaModelId": "csukuangfj/vits-piper-ru_RU-ruslan-medium"
 },
 "stt": {
   "provider": "sherpa_onnx",
