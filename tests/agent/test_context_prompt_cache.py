@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import datetime as datetime_module
 from datetime import datetime as real_datetime
 from importlib.resources import files as pkg_files
 from pathlib import Path
-import datetime as datetime_module
 
 from krabobot.agent.context import ContextBuilder
 
@@ -22,6 +22,14 @@ def _make_workspace(tmp_path: Path) -> Path:
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True)
     return workspace
+
+
+def test_system_prompt_searches_all_upload_channels(tmp_path: Path) -> None:
+    """Search scope is in the runtime identity, not only onboard templates."""
+    prompt = ContextBuilder(_make_workspace(tmp_path)).build_system_prompt()
+    assert "uploads/" in prompt
+    assert "web, voice" in prompt
+    assert "current session channel" in prompt
 
 
 def test_bootstrap_files_are_backed_by_templates() -> None:

@@ -10,7 +10,11 @@ import pytest
 
 from krabobot.agent.loop import AgentLoop
 from krabobot.api.server import create_app
-from krabobot.api.voice_meeting import parse_meeting_agent_reply, resolve_owner_admin_email
+from krabobot.api.voice_meeting import (
+    meeting_decoding_is_empty,
+    parse_meeting_agent_reply,
+    resolve_owner_admin_email,
+)
 from krabobot.bus.events import InboundMessage, OutboundMessage
 from krabobot.bus.queue import MessageBus
 from krabobot.config.schema import ToolsConfig
@@ -184,3 +188,79 @@ async def test_run_voice_meeting_job_emails_owner(tmp_path: Path) -> None:
     assert out.chat_id == "owner@corp.test"
     assert out.metadata.get("force_send") is True
     assert out.media and out.media[0].endswith("-notes.md")
+    assert "Hello" in Path(out.media[0]).read_text(encoding="utf-8")
+
+
+def test_meeting_decoding_is_empty_when_transcript_file_blank(tmp_path: Path) -> None:
+    wav = tmp_path / "meet.wav"
+    wav.write_bytes(b"wav")
+    folder = tmp_path / "meet_stt"
+    folder.mkdir()
+    (folder / "transcript.txt").write_text(" \n", encoding="utf-8")
+    reply = "SUBJECT: 2026-09-29 — sync\nEMAIL_SUMMARY: Кратко.\n\n# Notes\n\nHello"
+    assert meeting_decoding_is_empty(reply, [str(wav)]) is True
+
+
+def test_meeting_decoding_is_not_empty_when_transcript_has_text(tmp_path: Path) -> None:
+    wav = tmp_path / "meet.wav"
+    wav.write_bytes(b"wav")
+    folder = tmp_path / "meet_stt"
+    folder.mkdir()
+    (folder / "transcript.txt").write_text("Обсудили релиз.\n", encoding="utf-8")
+    assert meeting_decoding_is_empty("TRANSCRIPT_EMPTY", [str(wav)]) is False
+    assert meeting_decoding_is_empty("протокол", [str(wav)]) is False
+
+
+def test_meeting_decoding_empty_marker_without_transcript_file(tmp_path: Path) -> None:
+    wav = tmp_path / "meet.wav"
+    wav.write_bytes(b"wav")
+    assert meeting_decoding_is_empty("TRANSCRIPT_EMPTY", [str(wav)]) is True
+    assert meeting_decoding_is_empty("SUBJECT: x\nEMAIL_SUMMARY: y\n\n# Notes", [str(wav)]) is False
+
+
+@pytest.mark.asyncio
+async def test_run_voice_meeting_job_empty_transcript_has_no_attachment(tmp_path: Path) -> None:
+    from krabobot.api.voice_meeting import run_voice_meeting_job
+
+    loop = _make_loop(tmp_path)
+    seed = InboundMessage(channel="cli", sender_id="owner", chat_id="d", content="")
+    await loop._ensure_identity(seed)
+    owner = seed.user_id
+    assert owner
+    await loop.user_resolver.link_account(owner, "email", "owner@corp.test")
+    await loop.user_resolver.link_account(owner, "voice", "v1")
+
+    loop.process_direct = AsyncMock(
+        return_value=OutboundMessage(
+            channel="voice",
+            chat_id="v1",
+            content=(
+                "SUBJECT: 2026-09-29 — sync\n"
+                "EMAIL_SUMMARY: Нечего суммировать.\n\n# Notes\n\nПусто"
+            ),
+        )
+    )
+    loop.deliver_outbound = AsyncMock(return_value=True)
+
+    media = tmp_path / "meet.wav"
+    media.write_bytes(b"wav")
+    stt_dir = tmp_path / "meet_stt"
+    stt_dir.mkdir()
+    (stt_dir / "transcript.txt").write_text("", encoding="utf-8")
+
+    await run_voice_meeting_job(
+        loop,
+        device_id="v1",
+        instruct="summarize",
+        media_paths=[str(media)],
+        session_key="voice:v1",
+        timeout_s=30.0,
+    )
+
+    loop.deliver_outbound.assert_awaited_once()
+    out = loop.deliver_outbound.await_args.args[0]
+    assert out.channel == "email"
+    assert out.chat_id == "owner@corp.test"
+    assert out.content == "отчёт пустой"
+    assert out.media == []
+    assert list(tmp_path.rglob("*-notes.md")) == []

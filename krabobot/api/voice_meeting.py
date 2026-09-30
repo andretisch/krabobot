@@ -35,11 +35,16 @@ def voice_media_content_notes(paths: list[str]) -> list[str]:
 
 _MEETING_EMAIL_HINT = (
     "Результат нужен для письма администратору (не для голосового TTS).\n"
+    "Сохрани расшифровку в `<каталог записи>/<имя_без_расширения>_stt/transcript.txt`.\n"
+    "Если расшифровка пустая, ответь одной строкой TRANSCRIPT_EMPTY и не пиши протокол.\n"
     "В самом начале ответа ровно две строки:\n"
     "SUBJECT: <дата события и короткий заголовок; участники через запятую, если известны>\n"
     "EMAIL_SUMMARY: <краткий связный текст на 2–4 предложения>\n"
     "Далее — полный протокол совещания в Markdown (участники, темы, решения, action items).\n"
 )
+
+_TRANSCRIPT_EMPTY_RE = re.compile(r"(?im)^\s*TRANSCRIPT_EMPTY\s*$")
+_EMPTY_REPORT_BODY = "отчёт пустой"
 
 _SUBJECT_RE = re.compile(r"^SUBJECT:\s*(.+)$", re.MULTILINE | re.IGNORECASE)
 _SUMMARY_RE = re.compile(r"^EMAIL_SUMMARY:\s*(.+)$", re.MULTILINE | re.IGNORECASE)
@@ -90,6 +95,67 @@ async def resolve_owner_admin_email(agent_loop: AgentLoop) -> str | None:
     return emails[0] if emails else None
 
 
+def _transcript_candidates(media: Path) -> list[Path]:
+    """Paths where meeting STT is expected to leave ``transcript.txt``."""
+    parent = media.parent
+    stem = media.stem
+    names = [
+        parent / f"{stem}_stt" / "transcript.txt",
+        parent / f"{stem}-stt" / "transcript.txt",
+        parent / stem / "transcript.txt",
+    ]
+    if not parent.is_dir():
+        return names
+    prefix = stem.lower()
+    try:
+        children = list(parent.iterdir())
+    except OSError:
+        return names
+    for child in children:
+        if not child.is_dir():
+            continue
+        label = child.name.lower()
+        if label.startswith(prefix) and "stt" in label:
+            names.append(child / "transcript.txt")
+    return names
+
+
+def _existing_transcripts(media_paths: list[str]) -> list[Path]:
+    found: list[Path] = []
+    seen: set[Path] = set()
+    for raw in media_paths:
+        for path in _transcript_candidates(Path(raw)):
+            try:
+                resolved = path.resolve()
+            except OSError:
+                continue
+            if resolved in seen or not path.is_file():
+                continue
+            seen.add(resolved)
+            found.append(path)
+    return found
+
+
+def meeting_decoding_is_empty(reply: str, media_paths: list[str]) -> bool:
+    """True when this meeting's transcript file or agent marker says decoding is empty.
+
+    A missing transcript file is not enough: only an existing blank ``transcript.txt``
+    next to the recording, or an explicit ``TRANSCRIPT_EMPTY`` line, counts.
+    Non-empty transcript text wins over the marker.
+    """
+    files = _existing_transcripts(media_paths)
+    if files:
+        for path in files:
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                text = ""
+            if text.strip():
+                return False
+        return True
+    return bool(_TRANSCRIPT_EMPTY_RE.search(reply or ""))
+
+
 def _meeting_notes_path(workspace: Path, device_id: str, stem: str) -> Path:
     sub = safe_filename(device_id)[:80] or "device"
     root = ensure_dir(workspace.resolve() / "meetings" / "voice" / sub)
@@ -137,11 +203,11 @@ async def run_voice_meeting_job(
     reply = ""
     if result is not None:
         reply = str(getattr(result, "content", None) or "").strip()
-    if not reply:
+    decoding_empty = meeting_decoding_is_empty(reply, media_paths)
+    if not reply and not decoding_empty:
         logger.warning("voice meeting job empty reply device_id={}", device_id)
         return
 
-    subject, summary, md_body = parse_meeting_agent_reply(reply)
     msg = InboundMessage(
         channel="voice",
         sender_id=device_id,
@@ -150,28 +216,42 @@ async def run_voice_meeting_job(
     )
     await agent_loop._ensure_identity(msg)
     runtime = await agent_loop._runtime_for_message(msg)
-    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    notes_path = _meeting_notes_path(runtime.workspace, device_id, stamp)
-    try:
-        notes_path.write_text(md_body, encoding="utf-8")
-    except OSError as e:
-        logger.error("Failed to write meeting notes {}: {}", notes_path, e)
-        return
+
+    notes_path: Path | None = None
+    if decoding_empty:
+        subject = f"{datetime.now(UTC).strftime('%Y-%m-%d')} — отчёт пустой"
+        summary = _EMPTY_REPORT_BODY
+        logger.info("voice meeting transcript empty device_id={} — email without attachment", device_id)
+    else:
+        subject, summary, md_body = parse_meeting_agent_reply(reply)
+        stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+        notes_path = _meeting_notes_path(runtime.workspace, device_id, stamp)
+        try:
+            notes_path.write_text(md_body, encoding="utf-8")
+        except OSError as e:
+            logger.error("Failed to write meeting notes {}: {}", notes_path, e)
+            return
 
     admin_email = await resolve_owner_admin_email(agent_loop)
     if not admin_email:
-        logger.warning(
-            "Meeting notes saved to {} but owner has no linked email:… account "
-            "(link owner email in web UI: Users → Links → channel email)",
-            notes_path,
-        )
+        if notes_path is not None:
+            logger.warning(
+                "Meeting notes saved to {} but owner has no linked email:… account "
+                "(link owner email in web UI: Users → Links → channel email)",
+                notes_path,
+            )
+        else:
+            logger.warning(
+                "Meeting transcript empty and owner has no linked email:… account "
+                "(link owner email in web UI: Users → Links → channel email)"
+            )
         return
 
     outbound = OutboundMessage(
         channel="email",
         chat_id=admin_email,
         content=summary or "Итоги совещания — см. вложение.",
-        media=[str(notes_path.resolve())],
+        media=[str(notes_path.resolve())] if notes_path is not None else [],
         metadata={"subject": subject, "force_send": True},
     )
     ok = await agent_loop.deliver_outbound(outbound)
@@ -180,7 +260,7 @@ async def run_voice_meeting_job(
             "Meeting notes emailed to {} (subject={!r}, attachment={})",
             admin_email,
             subject,
-            notes_path.name,
+            notes_path.name if notes_path is not None else "-",
         )
     else:
         logger.warning("Failed to deliver meeting email to {}", admin_email)
