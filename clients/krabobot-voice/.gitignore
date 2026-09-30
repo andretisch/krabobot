@@ -3,6 +3,9 @@ build/
 dist/
 # Specs generated accidentally in the client root (canonical: packaging/*.spec)
 /*.spec
+# Local packaging spec backups / rebuild scratch copies
+packaging/*.spec.bak*
+packaging/*.bak-rebuild
 # Working config lives next to the app (copied from config.example.yaml)
 /config.yaml
 /config.yml
