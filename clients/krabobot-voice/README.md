@@ -74,11 +74,11 @@ wake:
 
 - Windows / Python 3.11+
 - Работающий **`krabobot serve`** на `http://127.0.0.1:8900`
-- Микрофон с разрешением для Python/терминала  
-  (Параметры Windows → Конфиденциальность → Микрофон → разрешить классическим приложениям)
+- Микрофон: при первом запуске разрешите доступ в системном окне Windows
+  (клиент запрашивает сам). Portable exe и `python -m` — разные записи в Privacy.
 - Для PTT: пакет `pynput` (ставится с клиентом)
-- Для `wake.mode: asr` (default): `sherpa-onnx` + скачанная STT-модель (`krabobot serve` один раз)
-- Для Silero VAD (default): `onnxruntime` (ставится с `[asr]` / `[vad]`); модель скачивается один раз в `%LOCALAPPDATA%\krabobot-voice\models\`
+- Для `wake.mode: asr` (default): `sherpa-onnx` + STT-модель в `<app>/models/stt/…` (portable бандлит; иначе `~/.krabobot/models/stt/…` или `krabobot serve` один раз)
+- Для Silero VAD (default): `onnxruntime` (ставится с `[asr]` / `[vad]`); модель — `<app>/models/silero_vad.onnx` (portable бандлит; без скачивания в portable)
 
 ## Установка
 
@@ -123,7 +123,8 @@ Hotkey **Ctrl+Alt+M** по-прежнему стартует/останавли�
 
 ### Wake (ASR)
 
-Фраза задаётся в `wake.phrase` / `wake.phrases`. Нужна модель в `~/.krabobot/models/stt/…` (как у gateway).
+Фраза задаётся в `wake.phrase` / `wake.phrases`. Модель: `<app>/models/stt/…`
+(portable бандлит; иначе `~/.krabobot/models/stt/…` как у gateway).
 
 Чувствительность (defaults):
 
@@ -146,7 +147,9 @@ vad:
   energy_pregate: 0.0008
 ```
 
-Первый запуск скачивает `silero_vad.onnx` в `%LOCALAPPDATA%\krabobot-voice\models\`. Без `onnxruntime` клиент пишет WARNING и падает на `energy`.
+Модель ищется в `<app>/models/silero_vad.onnx` (exe / корень пакета). Portable
+её бандлит и **не** скачивает. Если файла нет — явная ошибка «положите модель в
+models/…» (не silent download). Без `onnxruntime` клиент пишет WARNING и падает на `energy`.
 
 ### Wake (KWS, optional)
 
@@ -294,7 +297,45 @@ Python не доставляет `KeyboardInterrupt`, пока PortAudio не в
 
 ## Portable build (Windows / PyInstaller)
 
-Onedir-сборка без установленного Python на целевой машине:
+Подробная инструкция ниже. Краткая шпаргалка для пользователя готовой
+папки — [`packaging/README.md`](packaging/README.md) (копируется рядом с exe).
+
+### Что получится
+
+Onedir без Python на целевой машине. Скрипт:
+
+1. Собирает PyInstaller в `build/krabobot-voice/` (промежуточный dist).
+2. Копирует результат в **пользовательский каталог**:
+   `clients/krabobot-voice/build/krabobot-voice-portable/`
+3. Бандлит Silero VAD + Sherpa STT в `models/` (скачиваний при первом
+   запуске **нет**).
+4. Кладёт рядом `config.example.yaml` и `README.md`; при повторной сборке
+   сохраняет уже существующий `config.yaml` в portable-папке.
+
+Раздавайте / запускайте именно **`build/krabobot-voice-portable/`**.
+
+### Требования перед сборкой
+
+| Что | Зачем |
+|-----|--------|
+| Windows, Python 3.11+, venv репозитория | рантайм сборки |
+| `pip install -e ".\clients\krabobot-voice[asr,packaging]"` | sherpa-onnx, onnxruntime, **PyInstaller** |
+| Silero ONNX на машине сборки | копируется в `models/silero_vad.onnx` |
+| Sherpa STT dir (`tokens.txt` внутри) | копируется в `models/stt/<имя>/` |
+| Работающий `krabobot serve` на целевой машине | API для Talk/Meeting (не для VAD/ASR) |
+
+Источники моделей (первый найденный):
+
+- Silero: `clients/krabobot-voice/models/silero_vad.onnx` → иначе
+  `%LOCALAPPDATA%\krabobot-voice\models\silero_vad.onnx` → иначе `-SileroSource`
+- STT: `clients/krabobot-voice/models/stt/<preferred>/` → иначе
+  `~/.krabobot/models/stt/…` (как у gateway после `krabobot serve`) → иначе `-SttSource`
+
+Preferred STT folder name: `sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16`.
+
+### Команды сборки
+
+Из **корня репозитория**:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
@@ -302,14 +343,35 @@ pip install -e ".\clients\krabobot-voice[asr,packaging]"
 .\clients\krabobot-voice\scripts\build_portable.ps1
 ```
 
-Результат: `clients/krabobot-voice/build/krabobot-voice/krabobot-voice.exe`
-(+ `_internal/`, `config.example.yaml`, `README.md`).
+Опции скрипта:
 
-Инструкция для пользователя сборки: [`packaging/README.md`](packaging/README.md)
-(копируется рядом с exe). Конфиг всегда `config.yaml` рядом с приложением
-(exe или корень пакета; не LocalAppData). Модели STT/VAD не бандлятся —
-runtime-пути как у обычного клиента
-(`~/.krabobot/models/stt/…`, `%LOCALAPPDATA%\krabobot-voice\models\`).
+| Флаг | Смысл |
+|------|--------|
+| `-SkipInstall` | не вызывать `pip install` (deps уже стоят) |
+| `-SileroSource <path>` | явный путь к `silero_vad.onnx` |
+| `-SttSource <dir>` | явный каталог STT (нужен `tokens.txt`) |
+
+### Содержимое `build/krabobot-voice-portable/`
+
+| Путь | Назначение |
+|------|------------|
+| `krabobot-voice.exe` | запуск |
+| `_internal/` | Python + зависимости (PyInstaller onedir) |
+| `models/silero_vad.onnx` | Silero VAD (бандл) |
+| `models/stt/<folder>/` | Sherpa wake/command ASR (бандл) |
+| `config.example.yaml` | шаблон |
+| `config.yaml` | рабочий конфиг (**рядом с exe**, не LocalAppData); создаётся при первом запуске из example |
+| `README.md` | копия `packaging/README.md` |
+
+### После сборки / на целевой машине
+
+1. Убедитесь, что `krabobot serve` слушает API (обычно `http://127.0.0.1:8900`).
+2. При необходимости отредактируйте `config.yaml` рядом с exe
+   (`wake.phrase`, `base_url`, `token` / adminToken).
+3. Запустите `.\krabobot-voice.exe` — при первом старте Windows спросит доступ
+   к микрофону (WinRT); portable exe и `python -m` — разные записи в Privacy.
+4. VAD и локальный wake-STT работают **офлайн** из `models/`. Сеть нужна
+   только до API `krabobot serve`.
 
 Каталоги `build/` и `dist/` в `.gitignore`. Spec: `packaging/krabobot-voice.spec`.
 
@@ -325,9 +387,11 @@ krabobot_voice/
   ptt.py         # hold-to-talk hotkey
   meeting.py     # meeting subprocess capture + local WAV
   meeting_worker.py  # CLI entry: python -m krabobot_voice.meeting_worker
+  mic_permission.py  # WinRT mic consent (portable / Windows)
   wake.py        # текстовый fuzzy-match по wake.phrase
   local_asr.py   # sherpa-onnx offline wake + commands
   vad.py         # energy VAD
+  silero_vad.py  # Silero ONNX VAD
   audio_io.py    # mic / WASAPI loopback / mix / beep / play
   link.py        # auto-link device → owner
   http_client.py # POST /v1/voice/turn
@@ -336,5 +400,5 @@ packaging/
   krabobot-voice.spec   # PyInstaller onedir
   README.md             # инструкция рядом с portable-сборкой
 scripts/
-  build_portable.ps1    # сборка → build/krabobot-voice/
+  build_portable.ps1    # → build/krabobot-voice-portable/
 ```

@@ -5,7 +5,7 @@
 `krabobot` — локальный многоканальный AI-бот с акцентом на:
 
 - русскоязычную аудиторию;
-- работу через Telegram, VK и Email;
+- работу через Telegram, VK, Email и локальный голосовой клиент (`clients/krabobot-voice`);
 - многопользовательский режим: каждый собеседник узнаётся отдельно, свой workspace в `users/<user_id>/`;
 - единый профиль одного пользователя между каналами;
 - регистрацию с подтверждением владельца;
@@ -16,7 +16,7 @@
 ## Что умеет
 
 - Режимы запуска: `gateway`, `agent`, `serve`.
-- Каналы: `telegram`, `vk`, `email`.
+- Каналы: `telegram`, `vk`, `email`, `voice` (локальный wake/PTT/meeting-клиент — см. [`clients/krabobot-voice/README.md`](clients/krabobot-voice/README.md); portable-сборка Windows — раздел **Portable build** там же).
 - Команды: `/start`, `/help`, `/new`, `/clear_memory`, `/id`, `/link`, `/tts`, `/reg`, `/regcode`, `/status`, `/restart`.
 - Голосовые ответы в VK/Telegram включаются **только** командой **`/tts on`** у каждого пользователя (глобальных флагов в `config.json` нет).
 - Встроенная модель доступа:

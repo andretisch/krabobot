@@ -12,6 +12,11 @@ dependencies = [
     "sounddevice>=0.4.6",
     # WASAPI loopback for meeting.capture=loopback|mix (Windows)
     "PyAudioWPatch>=0.2.12.6; platform_system=='Windows'",
+    # WinRT mic consent (AppCapability / MediaCapture) for portable exe
+    "winrt-runtime>=3.0; platform_system=='Windows'",
+    "winrt-Windows.Foundation>=3.0; platform_system=='Windows'",
+    "winrt-Windows.Media.Capture>=3.0; platform_system=='Windows'",
+    "winrt-Windows.Security.Authorization.AppCapabilityAccess>=3.0; platform_system=='Windows'",
 ]
 
 [project.optional-dependencies]

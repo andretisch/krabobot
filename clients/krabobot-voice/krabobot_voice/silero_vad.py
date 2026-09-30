@@ -1,7 +1,14 @@
 """Silero VAD (ONNX) — speech vs non-speech without PyTorch.
 
 Uses the official ``silero_vad.onnx`` (snakers4/silero-vad) via onnxruntime.
-Model is cached under ``%LOCALAPPDATA%/krabobot-voice/models/`` on first use.
+
+Resolution order (empty ``model_path``):
+1. ``<app>/models/silero_vad.onnx`` (exe dir or package root)
+2. Legacy ``%LOCALAPPDATA%/krabobot-voice/models/silero_vad.onnx`` if present
+3. Prefer app path as the canonical location
+
+Portable / frozen builds never download: missing model → clear error to place
+the file under ``models/``. Non-frozen may download once into the app models dir.
 """
 
 from __future__ import annotations
@@ -18,27 +25,64 @@ _CONTEXT_16K = 64
 _STATE_SHAPE = (2, 1, 128)
 _SAMPLE_RATE = 16000
 
-# Upstream ONNX (opset 16). Downloaded once; pin via local path if offline.
+# Upstream ONNX (opset 16). Downloaded only for non-frozen runs when missing.
 _DEFAULT_MODEL_URL = (
     "https://github.com/snakers4/silero-vad/raw/master/"
     "src/silero_vad/data/silero_vad.onnx"
 )
 
+_MISSING_HINT = (
+    "Положите модель в models/silero_vad.onnx рядом с приложением "
+    "(или укажите vad.model_path)."
+)
 
-def default_silero_model_path() -> Path:
+
+def legacy_silero_model_path() -> Path:
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
     return Path(base) / "krabobot-voice" / "models" / "silero_vad.onnx"
+
+
+def default_silero_model_path() -> Path:
+    """Canonical Silero path: app ``models/``, else legacy LocalAppData if present."""
+    from krabobot_voice.config import app_silero_model_path, is_frozen
+
+    app_path = app_silero_model_path()
+    if app_path.is_file() and app_path.stat().st_size > 10_000:
+        return app_path
+    if is_frozen():
+        return app_path
+    legacy = legacy_silero_model_path()
+    if legacy.is_file() and legacy.stat().st_size > 10_000:
+        return legacy
+    return app_path
+
+
+def resolve_silero_model_path(path: str | Path | None = None) -> Path:
+    if path is not None and str(path).strip():
+        return Path(path).expanduser()
+    return default_silero_model_path()
 
 
 def ensure_silero_model(
     path: str | Path | None = None,
     *,
     url: str = _DEFAULT_MODEL_URL,
+    allow_download: bool | None = None,
 ) -> Path:
-    """Return a local ONNX path, downloading once if missing."""
-    dest = Path(path).expanduser() if path else default_silero_model_path()
+    """Return a local ONNX path.
+
+    Downloads only when ``allow_download`` is true (default: not frozen) and the
+    file is missing. Portable builds never download.
+    """
+    from krabobot_voice.config import is_frozen
+
+    dest = resolve_silero_model_path(path)
     if dest.is_file() and dest.stat().st_size > 10_000:
         return dest
+    if allow_download is None:
+        allow_download = not is_frozen()
+    if not allow_download:
+        raise FileNotFoundError(f"Silero ONNX not found: {dest}. {_MISSING_HINT}")
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(".onnx.partial")
     try:
@@ -66,7 +110,7 @@ class SileroOnnxVad:
 
         path = Path(model_path).expanduser().resolve()
         if not path.is_file():
-            raise FileNotFoundError(f"Silero ONNX not found: {path}")
+            raise FileNotFoundError(f"Silero ONNX not found: {path}. {_MISSING_HINT}")
         if int(sample_rate) != _SAMPLE_RATE:
             raise ValueError(f"Silero VAD requires {_SAMPLE_RATE} Hz (got {sample_rate})")
 
@@ -145,14 +189,18 @@ def load_silero_vad(
     model_path: str | Path | None = None,
     threshold: float = 0.5,
     sample_rate: int = _SAMPLE_RATE,
-    download: bool = True,
+    download: bool | None = None,
 ) -> SileroOnnxVad:
-    """Load Silero ONNX (download to cache if needed). Raises if onnxruntime missing."""
-    path = Path(model_path).expanduser() if model_path else default_silero_model_path()
+    """Load Silero ONNX. Portable builds never download; see ``ensure_silero_model``."""
+    from krabobot_voice.config import is_frozen
+
+    if download is None:
+        download = not is_frozen()
+    path = resolve_silero_model_path(model_path)
     if not path.is_file():
         if not download:
-            raise FileNotFoundError(f"Silero ONNX not found: {path}")
-        path = ensure_silero_model(path)
+            raise FileNotFoundError(f"Silero ONNX not found: {path}. {_MISSING_HINT}")
+        path = ensure_silero_model(path, allow_download=True)
     return SileroOnnxVad(path, sample_rate=sample_rate, threshold=threshold)
 
 
@@ -162,3 +210,19 @@ def silero_available() -> bool:
     except ImportError:
         return False
     return True
+
+
+def preload_onnxruntime() -> bool:
+    """Import ``onnxruntime`` before any WinRT (``winrt``) native modules.
+
+    On Windows, loading ``winrt`` first then ``onnxruntime`` causes a hard
+    ACCESS_VIOLATION (exit ``0xC0000005``) that Python cannot catch — the
+    portable exe exits silently after mic-permission success. Reverse order
+    is safe. Returns True if onnxruntime imported.
+    """
+    try:
+        import onnxruntime  # noqa: F401
+
+        return True
+    except ImportError:
+        return False

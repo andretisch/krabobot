@@ -485,3 +485,338 @@ def test_meeting_recorder_stop_survives_keyboard_interrupt(
     result = rec.stop()
     assert result.wav_path == wav
     assert result.frames == 1600
+
+
+def test_mix_degrades_to_mic_when_loopback_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """mix mode must keep recording on mic if WASAPI loopback open fails."""
+    blocks = [np.full(480, 42, dtype=np.int16) for _ in range(4)]
+
+    class FakeMic:
+        def __init__(self, *a, **k):
+            self._i = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+        def read_block(self):
+            if self._i >= len(blocks):
+                return np.zeros(480, dtype=np.int16)
+            out = blocks[self._i]
+            self._i += 1
+            return out
+
+    class BoomLb:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            raise RuntimeError("Не удалось открыть WASAPI loopback idx=16 [Errno -9996]")
+
+        def __exit__(self, *exc):
+            return None
+
+    monkeypatch.setattr("krabobot_voice.meeting.MicStream", FakeMic)
+    monkeypatch.setattr("krabobot_voice.meeting.LoopbackStream", BoomLb)
+    monkeypatch.setattr("krabobot_voice.meeting.require_sounddevice", lambda: None)
+
+    rec = MeetingRecorder(
+        MeetingCaptureConfig(capture="mix", sample_rate=16000, max_s=10),
+        save_dir=tmp_path,
+        use_process=False,
+    )
+    wav_path = rec.start()
+    assert rec.ready is True
+    assert "loopback open failed" in rec.warning
+    time.sleep(0.12)
+    result = rec.stop()
+    assert result.capture == "mic"
+    assert result.frames >= 480
+    assert wav_path.is_file()
+
+
+def test_meeting_start_raises_when_open_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """start() must raise before 'recording…' if capture cannot open."""
+
+    class BoomMic:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            raise RuntimeError("mic open failed")
+
+        def __exit__(self, *exc):
+            return None
+
+    monkeypatch.setattr("krabobot_voice.meeting.MicStream", BoomMic)
+    monkeypatch.setattr("krabobot_voice.meeting.require_sounddevice", lambda: None)
+
+    rec = MeetingRecorder(
+        MeetingCaptureConfig(capture="mic", sample_rate=16000, max_s=10),
+        save_dir=tmp_path,
+        use_process=False,
+    )
+    with pytest.raises(RuntimeError, match="mic open failed"):
+        rec.start()
+    assert rec.active is False
+
+
+def test_stop_tags_open_phase_in_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Open failures surface as [open] so the app can say «не удалось начать»."""
+    rec = MeetingRecorder(
+        MeetingCaptureConfig(capture="mic", sample_rate=16000, max_s=10),
+        save_dir=tmp_path,
+        use_process=False,
+    )
+    rec._active = True
+    rec._wav_path = tmp_path / "x.wav"
+    rec._started_at = time.monotonic()
+    rec._stop_event = threading.Event()
+    rec._ready = False
+    rec._result = {
+        "frames": 0,
+        "duration_s": 0.0,
+        "capture": "mic",
+        "error": "Не удалось открыть WASAPI loopback",
+        "error_phase": "open",
+        "wav_path": str(tmp_path / "x.wav"),
+    }
+    with pytest.raises(RuntimeError, match=r"^\[open\]"):
+        rec.stop()
+
+
+def test_loopback_open_tries_fallback_rates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Invalid device on default rate must retry other rates before giving up."""
+    from krabobot_voice import audio_io
+
+    class FakePa:
+        paInt16 = 8
+        paFloat32 = 1
+
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def open(self, **kwargs):
+            self.calls.append(kwargs)
+            rate = int(kwargs.get("rate") or 0)
+            if rate == 48000:
+                raise OSError(-9996, "Invalid device")
+            return object()
+
+    info = {
+        "index": 16,
+        "name": "Наушники гарнитуры (Lenovo USB Headset) [Loopback]",
+        "maxInputChannels": 2,
+        "defaultSampleRate": 48000.0,
+        "isLoopbackDevice": True,
+    }
+    monkeypatch.setattr(
+        audio_io,
+        "pyaudio",
+        type(
+            "M",
+            (),
+            {
+                "paInt16": 8,
+                "paFloat32": 1,
+            },
+        )(),
+    )
+    pa = FakePa()
+    stream, fmt, ch, rate = audio_io._try_open_pyaudio_loopback(pa, info)
+    assert stream is not None
+    assert rate == 44100
+    assert any(c.get("rate") == 48000 for c in pa.calls)
+    assert any(c.get("rate") == 44100 for c in pa.calls)
+    assert any(c.get("frames_per_buffer") == 1024 for c in pa.calls)
+    assert fmt in ("int16", "float32")
+    assert ch in (1, 2)
+
+
+def test_frozen_defaults_to_thread_meeting_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    from krabobot_voice import meeting as meeting_mod
+
+    monkeypatch.setattr(
+        "krabobot_voice.config.is_frozen", lambda: True
+    )
+    monkeypatch.delenv("KRABOBOT_VOICE_MEETING_PROCESS", raising=False)
+    assert meeting_mod.default_meeting_use_process() is False
+
+
+def test_env_forces_meeting_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    from krabobot_voice import meeting as meeting_mod
+
+    monkeypatch.setenv("KRABOBOT_VOICE_MEETING_PROCESS", "1")
+    monkeypatch.setattr("krabobot_voice.config.is_frozen", lambda: True)
+    assert meeting_mod.default_meeting_use_process() is True
+
+
+def test_mic_tap_ipc_during_mic_only_meeting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Degraded mix→mic-only must still push mic PCM to the parent tap queue."""
+
+    class FakeMic:
+        def __init__(self, *a, **k):
+            self._i = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+        def read_block(self):
+            # Pace like a real device so the tap queue is not flooded with
+            # silence that drops the early loud frames (maxsize ring).
+            time.sleep(0.01)
+            self._i += 1
+            return np.full(480, 8000, dtype=np.int16)
+
+    class BoomLb:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            raise RuntimeError("Invalid sample rate")
+
+        def __exit__(self, *exc):
+            return None
+
+    monkeypatch.setattr("krabobot_voice.meeting.MicStream", FakeMic)
+    monkeypatch.setattr("krabobot_voice.meeting.LoopbackStream", BoomLb)
+    monkeypatch.setattr("krabobot_voice.meeting.require_sounddevice", lambda: None)
+
+    rec = MeetingRecorder(
+        MeetingCaptureConfig(capture="mix", sample_rate=16000, block_ms=30, max_s=10),
+        save_dir=tmp_path,
+        use_process=False,
+    )
+    rec.start()
+    assert "loopback open failed" in rec.warning
+    tap = rec.mic_tap_reader()
+    loud = 0
+    for _ in range(15):
+        chunk = tap.read_block()
+        if float(np.max(np.abs(chunk))) > 1000:
+            loud += 1
+    assert loud >= 3, "parent must hear mic via IPC tap while meeting records"
+    assert tap.blocks_read >= 3
+    result = rec.stop()
+    assert result.capture == "mic"
+    assert result.frames >= 480
+
+
+def test_meeting_stop_via_mic_tap_segment(monkeypatch, tmp_path: Path) -> None:
+    """Voice stop during meeting: mic-tap ASR segment → StopMeeting → upload."""
+    from krabobot_voice.app import _Driver
+    from krabobot_voice.dialog import Mode, VoiceSession, VoiceSessionConfig
+    from krabobot_voice.http_client import VoiceTurnResult
+    from krabobot_voice.meeting import MeetingSessionResult
+
+    monkeypatch.setattr("krabobot_voice.app.play_beeps", lambda *_a, **_k: None)
+
+    session = VoiceSession(
+        VoiceSessionConfig(
+            wake_phrases=["эй арнольд"],
+            wake_greetings=["эй"],
+            cmd_meeting_stop=["закончить запись совещания", "закончить запись"],
+            cmd_meeting_start=["начать запись"],
+            cmd_run_test=["выполни тест"],
+            cmd_exit=["хватит"],
+        )
+    )
+    session.mode = Mode.MEETING
+
+    wav_path = tmp_path / "meeting.wav"
+    wav_path.write_bytes(pcm16_to_wav_bytes(np.zeros(1600, dtype=np.int16), sample_rate=16000))
+    uploads: list[dict] = []
+
+    class FakeHttp:
+        def turn(self, **kwargs):
+            uploads.append(kwargs)
+            return VoiceTurnResult(
+                status_code=202,
+                audio_wav=None,
+                transcript="",
+                reply="",
+                device_id="t",
+                queued=True,
+            )
+
+    cfg = VoiceClientConfig()
+    cfg.talk_beeps = False
+    cfg.meeting_upload_as = "file"
+    driver = _Driver(
+        cfg,
+        FakeHttp(),  # type: ignore[arg-type]
+        session,
+        asr=None,
+        kws=None,
+        ptt=None,
+        meeting_hk=None,
+        wake_energy=0.02,
+    )
+
+    stop_n = {"n": 0}
+
+    class FakeRecorder:
+        active = True
+        use_process = False
+
+        def mic_tap_reader(self):
+            return type(
+                "T",
+                (),
+                {
+                    "sample_rate": 16000,
+                    "block": 480,
+                    "last_rms": 0.1,
+                    "blocks_read": 10,
+                    "empty_reads": 0,
+                    "read_block": staticmethod(lambda: np.zeros(480, dtype=np.int16)),
+                },
+            )()
+
+        def stop(self):
+            stop_n["n"] += 1
+            FakeRecorder.active = False
+            return MeetingSessionResult(
+                wav_path=wav_path,
+                duration_s=2.0,
+                capture="mic",
+                frames=32000,
+                wav_bytes=wav_path.read_bytes(),
+            )
+
+    driver._recorder = FakeRecorder()  # type: ignore[assignment]
+
+    class FakeSegmenter:
+        def next_segment(self, *a, **k):
+            driver._early_asr_text = "Закончить запись совещания."
+            return np.full(16000, 1000, dtype=np.int16)
+
+        def feed_backlog(self, _sink):
+            return None
+
+    monkeypatch.setattr(
+        "krabobot_voice.app._make_segmenter",
+        lambda *a, **k: FakeSegmenter(),
+    )
+
+    driver.run_meeting_loop()
+    assert session.mode is Mode.IDLE
+    assert stop_n["n"] == 1
+    t = driver._meeting_upload_thread
+    if t is not None:
+        t.join(timeout=2.0)
+    assert len(uploads) == 1
+    assert uploads[0].get("async_meeting") is True

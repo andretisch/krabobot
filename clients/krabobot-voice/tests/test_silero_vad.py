@@ -155,10 +155,59 @@ def test_silero_push_buffers_to_512(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(runs) >= 2
 
 
+def test_preload_onnxruntime_returns_bool() -> None:
+    from krabobot_voice.silero_vad import preload_onnxruntime, silero_available
+
+    ok = preload_onnxruntime()
+    assert ok is silero_available()
+    # Second call is idempotent.
+    assert preload_onnxruntime() is ok
+
+
 def test_ensure_silero_model_uses_existing(tmp_path: Path) -> None:
     model = tmp_path / "silero_vad.onnx"
     model.write_bytes(b"x" * 20_000)
     assert ensure_silero_model(model) == model
+
+
+def test_ensure_silero_model_no_download_raises(tmp_path: Path) -> None:
+    missing = tmp_path / "models" / "silero_vad.onnx"
+    with pytest.raises(FileNotFoundError, match="Положите модель"):
+        ensure_silero_model(missing, allow_download=False)
+
+
+def test_default_silero_prefers_app_models(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from krabobot_voice import config as cfg
+    from krabobot_voice import silero_vad as sv
+
+    app = tmp_path / "app"
+    model = app / "models" / "silero_vad.onnx"
+    model.parent.mkdir(parents=True)
+    model.write_bytes(b"x" * 20_000)
+    monkeypatch.setattr(cfg, "app_base_dir", lambda: app)
+    monkeypatch.setattr(cfg, "is_frozen", lambda: False)
+    monkeypatch.setattr(sv, "legacy_silero_model_path", lambda: tmp_path / "legacy.onnx")
+    assert sv.default_silero_model_path() == model
+
+
+def test_frozen_silero_skips_legacy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from krabobot_voice import config as cfg
+    from krabobot_voice import silero_vad as sv
+
+    app = tmp_path / "app"
+    app.mkdir()
+    legacy = tmp_path / "legacy" / "silero_vad.onnx"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(b"x" * 20_000)
+    monkeypatch.setattr(cfg, "app_base_dir", lambda: app)
+    monkeypatch.setattr(cfg, "is_frozen", lambda: True)
+    monkeypatch.setattr(sv, "legacy_silero_model_path", lambda: legacy)
+    # Frozen: always app path even if legacy exists and app file missing.
+    assert sv.default_silero_model_path() == app / "models" / "silero_vad.onnx"
 
 
 def test_config_vad_section(tmp_path: Path) -> None:

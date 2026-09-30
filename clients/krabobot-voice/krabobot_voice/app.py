@@ -228,10 +228,13 @@ def _load_speech_gate(
         )
         return None, None, "energy"
     try:
+        from krabobot_voice.config import is_frozen
+
         silero = load_silero_vad(
             model_path=cfg.vad_model_path or None,
             threshold=float(cfg.vad_threshold),
             sample_rate=int(cfg.sample_rate),
+            download=not is_frozen(),
         )
     except Exception as e:
         _log(f"WARNING: Silero VAD load failed ({e}); falling back to energy")
@@ -401,7 +404,9 @@ class _Driver:
             elif isinstance(eff, SendAudio):
                 self._do_audio_turn(mic=mic)
             elif isinstance(eff, StartMeeting):
-                self._start_meeting()
+                # Defer device open: talk loop may still hold the mic exclusively.
+                # Outer run() starts MeetingRecorder after open_capture_stream closes.
+                pass
             elif isinstance(eff, StopMeeting):
                 # Drop any mic-tap clip so a later SendAudio cannot upload the stop phrase.
                 self._pending_pcm = None
@@ -544,9 +549,17 @@ class _Driver:
             wav_path = recorder.start()
         except Exception as e:
             _log(f"ERROR: не удалось начать запись встречи: {e}")
+            self._recorder = None
             self.session.mode = Mode.IDLE
             return
-        _log(f"meeting START capture={self.cfg.meeting_capture} → {wav_path}{echo_hint}")
+        warn = getattr(recorder, "warning", "") or ""
+        if warn:
+            _log(f"WARNING: {warn}")
+        worker = "process" if getattr(recorder, "use_process", False) else "thread"
+        _log(
+            f"meeting START capture={self.cfg.meeting_capture} "
+            f"worker={worker} → {wav_path}{echo_hint}"
+        )
         self._recorder = recorder
 
     def _stop_meeting_and_upload(self) -> None:
@@ -557,8 +570,23 @@ class _Driver:
         try:
             result = recorder.stop()
         except Exception as e:
-            _log(f"ERROR: остановка записи встречи: {e}")
+            msg = str(e)
+            if msg.startswith("[open]") or "Не удалось открыть" in msg:
+                _log(f"ERROR: не удалось начать запись встречи: {msg.removeprefix('[open] ').removeprefix('[record] ')}")
+            else:
+                detail = msg.removeprefix("[record] ").removeprefix("[open] ")
+                _log(f"ERROR: остановка записи встречи: {detail}")
+            self.session.mode = Mode.IDLE
             return
+        warn = getattr(recorder, "warning", "") or ""
+        if warn:
+            _log(f"WARNING: {warn}")
+        capture = result.capture
+        if (
+            self.cfg.meeting_capture == "mix"
+            and capture == "mic"
+        ):
+            _log("WARNING: meeting saved as mic-only (loopback was unavailable)")
         _log(
             f"meeting STOP ({result.duration_s:.1f} s) saved={result.wav_path}"
         )
@@ -568,6 +596,16 @@ class _Driver:
             capture=result.capture,
             wav_bytes=result.wav_bytes,
         )
+
+    def _finalize_meeting_session(self) -> None:
+        """Ensure IDLE + recorder cleaned after meeting loop exits (success or fail)."""
+        if self._recorder is not None:
+            # Worker died or loop exited without StopMeeting effect.
+            if self.session.mode is Mode.MEETING:
+                self.session.mode = Mode.IDLE
+            self._stop_meeting_and_upload()
+        elif self.session.mode is Mode.MEETING:
+            self.session.mode = Mode.IDLE
 
     def _handle_meeting_upload(
         self,
@@ -1040,117 +1078,124 @@ class _Driver:
         """While recording: same VadSegmenter on mic tap for stop / wake / dialog."""
         recorder = self._recorder
         if recorder is None or not recorder.active:
-            self.session.mode = Mode.IDLE
+            self._finalize_meeting_session()
             return
 
-        tap = recorder.mic_tap_reader()
-        # Loopback-only meetings have no mic tap — poll hotkey only.
-        if self.cfg.meeting_capture == "loopback":
-            self._meeting_hotkey_only(recorder)
-            return
+        try:
+            tap = recorder.mic_tap_reader()
+            # Loopback-only meetings have no mic tap — poll hotkey only.
+            if self.cfg.meeting_capture == "loopback":
+                self._meeting_hotkey_only(recorder)
+                return
 
-        energy = effective_wake_energy(
-            self.cfg.wake_energy_threshold, listen_source="mic"
-        )
-        # Same ≤2 s command window as idle wake (stop phrase / wake+command).
-        cmd_max = max(0.5, float(self.cfg.wake_max_s))
-        self._reset_vad_state()
-        segmenter = _make_segmenter(
-            tap.read_block,
-            sample_rate=tap.sample_rate,
-            block=tap.block,
-            cfg=self.cfg,
-            energy_threshold=energy,
-            max_s=cmd_max,
-            silence_end_s=max(0.25, float(self.cfg.wake_silence_end_s)),
-            min_speech_s=max(0.2, float(self.cfg.wake_min_speech_s)),
-            speech_gate=self.speech_gate,
-        )
-        last_print = 0.0
-        while self.session.mode is Mode.MEETING and recorder.active:
-            if self.meeting_hk is not None and self.meeting_hk.consume_edge_down():
-                self._apply(self.session.on_event(Hotkey("meeting")))
-                break
-            now = time.monotonic()
-            if now - last_print > 10.0:
-                hk = self.meeting_hk.hotkey_label if self.meeting_hk else "voice"
-                _log(
-                    f"meeting recording… (stop: {hk} / «закончить запись совещания»)"
-                )
-                last_print = now
-
-            def _poll() -> None:
+            energy = effective_wake_energy(
+                self.cfg.wake_energy_threshold, listen_source="mic"
+            )
+            # Same ≤2 s command window as idle wake (stop phrase / wake+command).
+            cmd_max = max(0.5, float(self.cfg.wake_max_s))
+            self._reset_vad_state()
+            segmenter = _make_segmenter(
+                tap.read_block,
+                sample_rate=tap.sample_rate,
+                block=tap.block,
+                cfg=self.cfg,
+                energy_threshold=energy,
+                max_s=cmd_max,
+                silence_end_s=max(0.25, float(self.cfg.wake_silence_end_s)),
+                min_speech_s=max(0.2, float(self.cfg.wake_min_speech_s)),
+                speech_gate=self.speech_gate,
+            )
+            last_print = 0.0
+            while self.session.mode is Mode.MEETING and recorder.active:
                 if self.meeting_hk is not None and self.meeting_hk.consume_edge_down():
-                    raise _HotkeyAbortError("meeting")
-                if not recorder.active:
-                    raise _HotkeyAbortError("meeting")
+                    self._apply(self.session.on_event(Hotkey("meeting")))
+                    break
+                now = time.monotonic()
+                if now - last_print > 10.0:
+                    hk = self.meeting_hk.hotkey_label if self.meeting_hk else "voice"
+                    peak = float(getattr(tap, "last_rms", 0.0) or 0.0)
+                    got = int(getattr(tap, "blocks_read", 0) or 0)
+                    empty = int(getattr(tap, "empty_reads", 0) or 0)
+                    tap_note = f", tap_peak={peak:.4f} blocks={got}"
+                    if got == 0 or (empty > got and peak < 1e-4):
+                        tap_note += " (тихо/нет IPC — стоп-фраза может не слышаться)"
+                    _log(
+                        f"meeting recording… (stop: {hk} / «закончить запись совещания»"
+                        f"{tap_note})"
+                    )
+                    last_print = now
 
-            # Early ASR: local commands only (stop alone, or wake+stop after
-            # configured wake strip). Wake-only waits for silence so continuous
-            # «wake + stop» is not cut off mid-phrase.
-            early = self._make_early_check(
-                for_wake=False,
-                match_wake=False,
-                match_commands=True,
-            )
-            early_min_s, early_interval_s = self._early_asr_cadence()
+                def _poll() -> None:
+                    if self.meeting_hk is not None and self.meeting_hk.consume_edge_down():
+                        raise _HotkeyAbortError("meeting")
+                    if not recorder.active:
+                        raise _HotkeyAbortError("meeting")
 
-            self._early_asr_text = None
-            try:
-                pcm = segmenter.next_segment(
-                    self._deadline,
-                    poll=_poll,
-                    early_check=early,
-                    early_check_interval_s=early_interval_s,
-                    early_check_min_s=early_min_s,
+                # Early ASR: local commands only (stop alone, or wake+stop after
+                # configured wake strip). Wake-only waits for silence so continuous
+                # «wake + stop» is not cut off mid-phrase.
+                early = self._make_early_check(
+                    for_wake=False,
+                    match_wake=False,
+                    match_commands=True,
                 )
-            except _HotkeyAbortError:
-                self._apply(self.session.on_event(Hotkey("meeting")))
-                break
+                early_min_s, early_interval_s = self._early_asr_cadence()
 
-            # Capture early hit *before* any discard — next iteration clears
-            # ``_early_asr_text`` at the top of the loop.
-            early_text = self._early_asr_text
-            self._early_asr_text = None
+                self._early_asr_text = None
+                try:
+                    pcm = segmenter.next_segment(
+                        self._deadline,
+                        poll=_poll,
+                        early_check=early,
+                        early_check_interval_s=early_interval_s,
+                        early_check_min_s=early_min_s,
+                    )
+                except _HotkeyAbortError:
+                    self._apply(self.session.on_event(Hotkey("meeting")))
+                    break
 
-            if pcm is None:
-                self._apply(self.session.on_event(Timeout()))
-                continue
-            # Quiet clips are noise — but an early ASR/KWS hit already matched
-            # a stop/wake command; never drop that (RMS gate was discarding
-            # «закончить запись» and leaving the meeting recording).
-            if early_text is None and frame_rms(pcm) < energy * 0.5:
-                continue
+                # Capture early hit *before* any discard — next iteration clears
+                # ``_early_asr_text`` at the top of the loop.
+                early_text = self._early_asr_text
+                self._early_asr_text = None
 
-            if early_text is not None:
-                text = early_text
-            else:
-                text = ""
-                if self.asr is not None:
-                    try:
-                        text = _transcribe(
-                            self.asr, pcm, sample_rate=self.cfg.sample_rate
-                        )
-                    except Exception:
-                        text = ""
-            if text:
-                tag = "early" if early_text is not None else "meeting-asr"
-                matched = early_text is not None or _is_wake_or_command(
-                    text, cfg=self.cfg, for_wake=False
+                if pcm is None:
+                    self._apply(self.session.on_event(Timeout()))
+                    continue
+                # Quiet clips are noise — but an early ASR/KWS hit already matched
+                # a stop/wake command; never drop that (RMS gate was discarding
+                # «закончить запись» and leaving the meeting recording).
+                if early_text is None and frame_rms(pcm) < energy * 0.5:
+                    continue
+
+                if early_text is not None:
+                    text = early_text
+                else:
+                    text = ""
+                    if self.asr is not None:
+                        try:
+                            text = _transcribe(
+                                self.asr, pcm, sample_rate=self.cfg.sample_rate
+                            )
+                        except Exception:
+                            text = ""
+                if text:
+                    tag = "early" if early_text is not None else "meeting-asr"
+                    matched = early_text is not None or _is_wake_or_command(
+                        text, cfg=self.cfg, for_wake=False
+                    )
+                    _log_asr_text(text, tag=tag, matched=matched)
+                self._pending_pcm = pcm
+                self._apply(
+                    self.session.on_event(
+                        Segment(text, upload_if_empty=self.asr is None)
+                    )
                 )
-                _log_asr_text(text, tag=tag, matched=matched)
-            self._pending_pcm = pcm
-            self._apply(
-                self.session.on_event(
-                    Segment(text, upload_if_empty=self.asr is None)
-                )
-            )
-            if self.session.mode is not Mode.MEETING:
-                break
-
-        if self._recorder is not None and self.session.mode is not Mode.MEETING:
-            # StopMeeting effect already handled upload.
-            pass
+                if self.session.mode is not Mode.MEETING:
+                    break
+        finally:
+            # Worker death / early return must not leave MEETING + paused main mic.
+            self._finalize_meeting_session()
 
     def _meeting_hotkey_only(self, recorder: MeetingRecorder) -> None:
         last_print = 0.0
@@ -1235,6 +1280,31 @@ def run_loop(config: VoiceClientConfig | None = None) -> int:
     _log(f"device_id={cfg.device_id}")
     _log(f"wake_mode={cfg.wake_mode}, ptt={'on' if cfg.ptt_enabled else 'off'}")
     _log(f"audio.listen_source={cfg.audio_listen_source}")
+
+    # onnxruntime MUST load before WinRT (mic permission). Reverse order =
+    # native ACCESS_VIOLATION; PyInstaller console shows no Python traceback.
+    if sys.platform == "win32" and (cfg.vad_backend or "silero").strip().lower() == "silero":
+        try:
+            from krabobot_voice.silero_vad import preload_onnxruntime
+
+            preload_onnxruntime()
+        except Exception as e:
+            _log(f"WARNING: onnxruntime preload failed ({e})")
+
+    needs_mic = cfg.audio_listen_source == "mic" or cfg.meeting_enabled
+    if needs_mic and sys.platform == "win32":
+        from krabobot_voice.mic_permission import ensure_microphone_access
+
+        _log("Запрос доступа к микрофону (системное окно Windows)…")
+        mic_access = ensure_microphone_access(interactive=True)
+        _log(f"mic access: {mic_access.status}" + (f" ({mic_access.detail})" if mic_access.detail else ""))
+        if mic_access.status == "denied":
+            _log(
+                "ERROR: нет доступа к микрофону. "
+                "Разрешите в системном окне / Параметрах и запустите снова."
+            )
+            return 4
+
     auto_threads = max(1, cpu_n // 2)
     if stt_threads == auto_threads:
         _log(f"ASR threads: {stt_threads} (50% of {cpu_n} CPUs)")
@@ -1473,9 +1543,62 @@ def _configure_stdio_utf8() -> None:
             pass
 
 
+def _pause_on_fatal_if_frozen() -> None:
+    """Keep the console open after a fatal error in a double-clicked frozen exe."""
+    from krabobot_voice.config import is_frozen
+
+    if not is_frozen():
+        return
+    try:
+        input("\nНажмите Enter для выхода… ")
+    except Exception:
+        time.sleep(8.0)
+
+
 def main(argv: list[str] | None = None) -> int:
     _configure_stdio_utf8()
+    try:
+        return _main_inner(argv)
+    except SystemExit:
+        raise
+    except KeyboardInterrupt:
+        _log("stopped.")
+        return 0
+    except BaseException as e:
+        import traceback
+
+        traceback.print_exc()
+        try:
+            sys.stderr.flush()
+            sys.stdout.flush()
+        except Exception:
+            pass
+        _log(f"FATAL: {type(e).__name__}: {e}")
+        _pause_on_fatal_if_frozen()
+        return 1
+
+
+def _main_inner(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    if "--list-devices" in args:
+        from krabobot_voice.audio_io import (
+            format_input_devices_lines,
+            list_input_devices,
+            mic_privacy_hint,
+            require_sounddevice,
+        )
+
+        try:
+            require_sounddevice()
+        except RuntimeError as e:
+            _log(f"ERROR: {e}")
+            return 2
+        devices = list_input_devices()
+        _log("Input devices (PortAudio / sounddevice):")
+        _log(format_input_devices_lines(devices))
+        _log(mic_privacy_hint())
+        _log("Задайте audio.input_device подстрокой имени или индексом, либо оставьте пустым.")
+        return 0
     if "--test-loopback" in args:
         args = [a for a in args if a != "--test-loopback"]
         path = args[0] if args and not args[0].startswith("-") else None

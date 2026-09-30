@@ -6,3 +6,5 @@ dist/
 # Working config lives next to the app (copied from config.example.yaml)
 /config.yaml
 /config.yml
+# Local / build-time model copies (portable bundles into build/*/models/)
+/models/

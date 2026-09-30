@@ -403,3 +403,68 @@ def test_meeting_early_asr_wake_plus_stop_typo(monkeypatch, tmp_path: Path) -> N
     driver.run_meeting_loop()
     assert session.mode is Mode.IDLE
     _join_meeting_upload(driver)
+
+
+def test_stop_meeting_open_error_message(monkeypatch) -> None:
+    """Open-phase failure must log «не удалось начать», not «остановка»."""
+    logs: list[str] = []
+    monkeypatch.setattr("krabobot_voice.app._log", logs.append)
+    monkeypatch.setattr("krabobot_voice.app.play_beeps", lambda *_a, **_k: None)
+
+    session = VoiceSession(VoiceSessionConfig())
+    session.mode = Mode.MEETING
+    driver = _Driver(
+        VoiceClientConfig(),
+        MagicMock(),
+        session,
+        asr=None,
+        kws=None,
+        ptt=None,
+        meeting_hk=None,
+        wake_energy=0.01,
+    )
+
+    class BoomRec:
+        warning = ""
+
+        def stop(self):
+            raise RuntimeError("[open] Не удалось открыть WASAPI loopback")
+
+    driver._recorder = BoomRec()  # type: ignore[assignment]
+    driver._stop_meeting_and_upload()
+    assert session.mode is Mode.IDLE
+    assert any("не удалось начать запись встречи" in x for x in logs)
+    assert not any("остановка записи встречи" in x for x in logs)
+
+
+def test_finalize_meeting_clears_stuck_recorder(monkeypatch) -> None:
+    """Worker death without StopMeeting must still leave IDLE and clear recorder."""
+    logs: list[str] = []
+    monkeypatch.setattr("krabobot_voice.app._log", logs.append)
+    monkeypatch.setattr("krabobot_voice.app.play_beeps", lambda *_a, **_k: None)
+
+    session = VoiceSession(VoiceSessionConfig())
+    session.mode = Mode.MEETING
+    driver = _Driver(
+        VoiceClientConfig(),
+        MagicMock(),
+        session,
+        asr=None,
+        kws=None,
+        ptt=None,
+        meeting_hk=None,
+        wake_energy=0.01,
+    )
+
+    class DeadRec:
+        active = False
+        warning = ""
+
+        def stop(self):
+            raise RuntimeError("[open] loopback failed")
+
+    driver._recorder = DeadRec()  # type: ignore[assignment]
+    driver.run_meeting_loop()
+    assert session.mode is Mode.IDLE
+    assert driver._recorder is None
+    assert any("не удалось начать" in x for x in logs)

@@ -253,6 +253,141 @@ def _match_device_name(name: str, needle: str) -> bool:
     return n in (name or "").strip().lower()
 
 
+def _is_frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def _hostapi_name(hostapi: int) -> str:
+    require_sounddevice()
+    try:
+        apis = sd.query_hostapis()
+        if 0 <= int(hostapi) < len(apis):
+            return str(apis[int(hostapi)].get("name") or "")
+    except Exception:
+        pass
+    return ""
+
+
+def _is_virtual_mapper_name(name: str) -> bool:
+    n = (name or "").strip().lower()
+    if not n:
+        return False
+    needles = (
+        "mapper",
+        "переназначение",
+        "primary sound",
+        "первичн",
+        "microsoft sound mapper",
+    )
+    return any(x in n for x in needles)
+
+
+def list_input_devices() -> list[dict[str, Any]]:
+    """Enumerate PortAudio input devices (skip WDM-KS). Empty list if unavailable."""
+    require_sounddevice()
+    out: list[dict[str, Any]] = []
+    try:
+        apis = list(sd.query_hostapis())
+        for i, info in enumerate(sd.query_devices()):
+            if int(info.get("max_input_channels") or 0) < 1:
+                continue
+            ha = int(info.get("hostapi") or 0)
+            ha_name = str(apis[ha].get("name") or "") if ha < len(apis) else ""
+            if "WDM-KS" in ha_name:
+                continue
+            out.append(
+                {
+                    "index": i,
+                    "name": str(info.get("name") or ""),
+                    "hostapi": ha_name,
+                    "max_input_channels": int(info.get("max_input_channels") or 0),
+                    "default_samplerate": int(info.get("default_samplerate") or 0),
+                    "virtual_mapper": _is_virtual_mapper_name(str(info.get("name") or "")),
+                }
+            )
+    except Exception:
+        return []
+    return out
+
+
+def format_input_devices_lines(devices: list[dict[str, Any]] | None = None) -> str:
+    """Human-readable input device list for logs / --list-devices."""
+    rows = list_input_devices() if devices is None else devices
+    if not rows:
+        return "(нет входных устройств PortAudio — проверьте драйверы / Privacy → Microphone)"
+    lines: list[str] = []
+    for d in rows:
+        mark = " [mapper]" if d.get("virtual_mapper") else ""
+        lines.append(
+            f"  [{d['index']}] {d.get('name')!r} "
+            f"api={d.get('hostapi')!r} ch={d.get('max_input_channels')} "
+            f"rate={d.get('default_samplerate')}{mark}"
+        )
+    return "\n".join(lines)
+
+
+def mic_privacy_hint(*, frozen: bool | None = None) -> str:
+    """Windows Privacy → Microphone guidance (exe vs Python)."""
+    is_exe = _is_frozen() if frozen is None else bool(frozen)
+    if is_exe:
+        app = "krabobot-voice.exe (классическое / desktop-приложение)"
+    else:
+        app = "Python / терминал (python.exe)"
+    return (
+        "Параметры Windows → Конфиденциальность и защита → Микрофон: "
+        "включите «Доступ к микрофону» и "
+        "«Разрешить классическим приложениям доступ к микрофону», "
+        f"затем разрешите {app}. "
+        "Быстрый путь: ms-settings:privacy-microphone. "
+        "Закройте другие программы, занявшие микрофон. "
+        "При устаревшем audio.input_device — очистите его или задайте "
+        "подстроку имени; см. --list-devices."
+    )
+
+
+def open_windows_mic_privacy_settings() -> bool:
+    """Open ms-settings:privacy-microphone (delegates to mic_permission)."""
+    try:
+        from krabobot_voice.mic_permission import (
+            open_windows_mic_privacy_settings as _open,
+        )
+
+        return _open()
+    except Exception:
+        return False
+
+
+def resolve_preferred_input_device(
+    preferred: str | int | None,
+) -> int | None:
+    """Resolve YAML hint (index or name substring) to a PortAudio input index.
+
+    Stale indexes / unmatched names return ``None`` (caller falls back to default).
+    """
+    if preferred is None or str(preferred).strip() == "":
+        return None
+    require_sounddevice()
+    try:
+        if isinstance(preferred, int) or str(preferred).strip().isdigit():
+            idx = int(preferred)
+            info = sd.query_devices(idx)
+            if int(info.get("max_input_channels") or 0) >= 1:
+                return idx
+            return None
+        needle = str(preferred).strip()
+        for i, info in enumerate(sd.query_devices()):
+            if int(info.get("max_input_channels") or 0) < 1:
+                continue
+            ha = int(info.get("hostapi") or 0)
+            if "WDM-KS" in _hostapi_name(ha):
+                continue
+            if _match_device_name(str(info.get("name") or ""), needle):
+                return i
+    except Exception:
+        return None
+    return None
+
+
 def _candidate_input_devices(
     preferred: str | int | None = None,
 ) -> list[tuple[int | None, int, int]]:
@@ -267,27 +402,15 @@ def _candidate_input_devices(
             seen.add(key)
             out.append(key)
 
-    # Explicit preferred device first (index or name substring).
-    if preferred is not None and str(preferred).strip() != "":
+    # Explicit preferred device first (index or name substring). Stale → skip.
+    resolved = resolve_preferred_input_device(preferred)
+    if resolved is not None:
         try:
-            if isinstance(preferred, int) or str(preferred).strip().isdigit():
-                idx = int(preferred)
-                info = sd.query_devices(idx)
-                if int(info.get("max_input_channels") or 0) >= 1:
-                    rate = int(info.get("default_samplerate") or 48000)
-                    ch = min(2, int(info.get("max_input_channels") or 1))
-                    add(idx, rate, ch)
-                    add(idx, rate, 1)
-            else:
-                needle = str(preferred).strip()
-                for i, info in enumerate(sd.query_devices()):
-                    if int(info.get("max_input_channels") or 0) < 1:
-                        continue
-                    if _match_device_name(str(info.get("name") or ""), needle):
-                        rate = int(info.get("default_samplerate") or 48000)
-                        ch = min(2, int(info.get("max_input_channels") or 1))
-                        add(i, rate, ch)
-                        add(i, rate, 1)
+            info = sd.query_devices(resolved)
+            rate = int(info.get("default_samplerate") or 48000)
+            ch = min(2, int(info.get("max_input_channels") or 1))
+            add(resolved, rate, ch)
+            add(resolved, rate, 1)
         except Exception:
             pass
 
@@ -304,6 +427,8 @@ def _candidate_input_devices(
                 if din is None or int(din) < 0:
                     continue
                 info = sd.query_devices(int(din))
+                if _is_virtual_mapper_name(str(info.get("name") or "")):
+                    continue
                 ch = min(2, int(info.get("max_input_channels") or 1))
                 rate = int(info.get("default_samplerate") or 48000)
                 add(int(din), rate, ch)
@@ -315,17 +440,20 @@ def _candidate_input_devices(
         default_in = sd.default.device[0] if sd.default.device else None
         if default_in is not None and int(default_in) >= 0:
             info = sd.query_devices(int(default_in))
-            rate = int(info.get("default_samplerate") or 48000)
-            ch = min(2, int(info.get("max_input_channels") or 1))
-            add(int(default_in), rate, ch)
+            if not _is_virtual_mapper_name(str(info.get("name") or "")):
+                rate = int(info.get("default_samplerate") or 48000)
+                ch = min(2, int(info.get("max_input_channels") or 1))
+                add(int(default_in), rate, ch)
+                add(int(default_in), rate, 1)
     except Exception:
         pass
 
+    # Default device (PortAudio picks) — important fallback when indexes are stale.
     add(None, 48000, 1)
     add(None, 44100, 1)
     add(None, 16000, 1)
 
-    # Explicit scan of a few input devices (skip WDM-KS)
+    # Explicit scan of a few input devices (skip WDM-KS / virtual mappers)
     try:
         apis = sd.query_hostapis()
         for i, info in enumerate(sd.query_devices()):
@@ -335,14 +463,72 @@ def _candidate_input_devices(
             ha_name = str(apis[ha].get("name") or "") if ha < len(apis) else ""
             if "WDM-KS" in ha_name:
                 continue
+            if _is_virtual_mapper_name(str(info.get("name") or "")):
+                continue
             rate = int(info.get("default_samplerate") or 48000)
             ch = min(2, int(info.get("max_input_channels") or 1))
             add(i, rate, ch)
-            if len(out) > 24:
+            add(i, rate, 1)
+            if len(out) > 32:
                 break
     except Exception:
         pass
     return out
+
+
+def _open_input_stream(
+    *,
+    device: int | None,
+    rate: int,
+    channels: int,
+) -> Any:
+    """Open + start InputStream; try WASAPI shared then exclusive when needed."""
+    require_sounddevice()
+    kwargs: dict[str, Any] = {
+        "device": device,
+        "samplerate": rate,
+        "channels": channels,
+        "dtype": "float32",
+        "blocksize": 0,
+        "latency": "high",
+    }
+    extra_attempts: list[dict[str, Any]] = []
+    try:
+        ha_name = ""
+        if device is not None:
+            info = sd.query_devices(device)
+            ha_name = _hostapi_name(int(info.get("hostapi") or 0))
+        if device is None or "WASAPI" in ha_name:
+            # Shared first (coexists with other apps); exclusive often works when
+            # shared returns Invalid device (-9996) on some USB headsets.
+            for exclusive in (False, True):
+                for auto_convert in (False, True):
+                    try:
+                        ws = sd.WasapiSettings(
+                            exclusive=exclusive, auto_convert=auto_convert
+                        )
+                    except TypeError:
+                        ws = sd.WasapiSettings(exclusive=exclusive)
+                    extra_attempts.append({**kwargs, "extra_settings": ws})
+    except Exception:
+        pass
+    extra_attempts.append(dict(kwargs))
+
+    last: Exception | None = None
+    for kw in extra_attempts:
+        try:
+            stream = sd.InputStream(**kw)
+            stream.start()
+            return stream
+        except Exception as e:
+            last = e
+            try:
+                if "stream" in locals():
+                    stream.close()  # type: ignore[name-defined]
+            except Exception:
+                pass
+    assert last is not None
+    raise last
 
 
 def resolve_loopback_device_info(
@@ -438,6 +624,105 @@ def resolve_loopback_device_info(
         pa.terminate()
 
 
+def list_loopback_device_infos() -> list[dict[str, Any]]:
+    """All WASAPI loopback endpoints (fresh PyAudio instance)."""
+    require_pyaudiowpatch()
+    assert pyaudio is not None
+    pa = pyaudio.PyAudio()
+    try:
+        return [dict(lb) for lb in pa.get_loopback_device_info_generator()]
+    finally:
+        pa.terminate()
+
+
+def _loopback_open_candidates(
+    *,
+    device: str | int | None = None,
+    output_device: str | int | None = None,
+) -> list[dict[str, Any]]:
+    """Preferred loopback first, then other WASAPI loopback endpoints."""
+    preferred = resolve_loopback_device_info(
+        device=device, output_device=output_device
+    )
+    out: list[dict[str, Any]] = [preferred]
+    seen = {int(preferred["index"])}
+    try:
+        for lb in list_loopback_device_infos():
+            idx = int(lb["index"])
+            if idx in seen:
+                continue
+            seen.add(idx)
+            out.append(dict(lb))
+    except Exception:
+        pass
+    return out
+
+
+def _try_open_pyaudio_loopback(
+    pa: Any,
+    info: dict[str, Any],
+) -> tuple[Any, str, int, int]:
+    """Try format/channel/rate combos for one loopback device.
+
+    Returns ``(stream, fmt_name, channels, rate)``.
+    """
+    assert pyaudio is not None
+    idx = int(info["index"])
+    channels = max(1, int(info.get("maxInputChannels") or 2))
+    raw_default = info.get("defaultSampleRate") or 48000
+    try:
+        default_rate = int(round(float(raw_default)))
+    except (TypeError, ValueError):
+        default_rate = 48000
+    # Device default first; WASAPI shared mode often accepts only that rate.
+    rates: list[int] = []
+    for rate in (
+        default_rate,
+        48000,
+        44100,
+        96000,
+        88200,
+        32000,
+        22050,
+        16000,
+    ):
+        if rate > 0 and rate not in rates:
+            rates.append(rate)
+    last_err: Exception | None = None
+    # Prefer device channel count + documented 1024-frame buffers first.
+    frame_opts = (
+        1024,
+        max(512, int(default_rate * 0.03)),
+        max(256, int(default_rate * 0.02)),
+        0,  # paFramesPerBufferUnspecified
+    )
+    for rate in rates:
+        for fmt, fmt_name in (
+            (pyaudio.paInt16, "int16"),
+            (pyaudio.paFloat32, "float32"),
+        ):
+            for ch in (channels, 2, 1):
+                if ch < 1:
+                    continue
+                for frames in frame_opts:
+                    try:
+                        kwargs: dict[str, Any] = {
+                            "format": fmt,
+                            "channels": ch,
+                            "rate": rate,
+                            "input": True,
+                            "input_device_index": idx,
+                        }
+                        if frames > 0:
+                            kwargs["frames_per_buffer"] = frames
+                        stream = pa.open(**kwargs)
+                        return stream, fmt_name, ch, rate
+                    except Exception as e:
+                        last_err = e
+    assert last_err is not None
+    raise last_err
+
+
 # Soft boost for WASAPI loopback (often quieter than a close mic after downmix).
 DEFAULT_LOOPBACK_GAIN = 2.5
 
@@ -465,17 +750,16 @@ class MicStream:
 
     def __enter__(self) -> MicStream:
         last_err: Exception | None = None
-        for device, rate, channels in _candidate_input_devices(self._preferred):
+        preferred = self._preferred
+        if preferred is not None and str(preferred).strip() != "":
+            if resolve_preferred_input_device(preferred) is None:
+                # Stale index / unmatched substring → clear to system default.
+                preferred = None
+        for device, rate, channels in _candidate_input_devices(preferred):
             try:
-                stream = sd.InputStream(
-                    device=device,
-                    samplerate=rate,
-                    channels=channels,
-                    dtype="float32",
-                    blocksize=0,
-                    latency="high",
+                stream = _open_input_stream(
+                    device=device, rate=rate, channels=channels
                 )
-                stream.start()
                 # Smoke-read one chunk
                 n = max(256, int(rate * 0.02))
                 stream.read(n)
@@ -484,8 +768,10 @@ class MicStream:
                 self._channels = channels
                 self._device_index = int(device) if device is not None else None
                 try:
-                    info = sd.query_devices(device) if device is not None else sd.query_devices(
-                        kind="input"
+                    info = (
+                        sd.query_devices(device)
+                        if device is not None
+                        else sd.query_devices(kind="input")
                     )
                     self._device_name = str(info.get("name") or "")
                 except Exception:
@@ -498,14 +784,41 @@ class MicStream:
                         stream.close()  # type: ignore[name-defined]
                 except Exception:
                     pass
+
+        # Last resort after PortAudio open failed: native dialog → Privacy settings.
+        opened_settings = False
+        if sys.platform == "win32":
+            try:
+                from krabobot_voice.mic_permission import (
+                    open_windows_mic_privacy_settings,
+                    show_mic_access_dialog,
+                )
+
+                show_mic_access_dialog(
+                    "Не удалось открыть микрофон (PortAudio).\n\n"
+                    "Нажмите OK — откроются параметры «Микрофон».\n"
+                    "Разрешите доступ и перезапустите krabobot-voice.\n\n"
+                    "Также: .\\krabobot-voice.exe --list-devices"
+                )
+                opened_settings = open_windows_mic_privacy_settings()
+            except Exception:
+                if _is_frozen():
+                    opened_settings = open_windows_mic_privacy_settings()
+
+        devices = list_input_devices()
+        device_block = format_input_devices_lines(devices)
         hint = (
             "Не удалось открыть микрофон. "
-            "Проверьте: Параметры Windows → Конфиденциальность → Микрофон "
-            "(доступ для классических приложений / Python / терминала). "
-            "Закройте другие программы, занявшие микрофон."
+            + mic_privacy_hint()
+            + (
+                " Открыта страница Параметров микрофона."
+                if opened_settings
+                else ""
+            )
+            + f"\nДоступные входы PortAudio:\n{device_block}"
         )
         if last_err is not None:
-            raise RuntimeError(f"{hint} Детали: {last_err}") from last_err
+            raise RuntimeError(f"{hint}\nДетали: {last_err}") from last_err
         raise RuntimeError(hint)
 
     def __exit__(self, *exc: object) -> None:
@@ -628,53 +941,44 @@ class LoopbackStream:
 
     def __enter__(self) -> LoopbackStream:
         assert pyaudio is not None
-        info = resolve_loopback_device_info(
+        candidates = _loopback_open_candidates(
             device=self._device_pref,
             output_device=self._output_pref,
         )
         self._pa = pyaudio.PyAudio()
-        idx = int(info["index"])
-        channels = max(1, int(info.get("maxInputChannels") or 2))
-        rate = int(info.get("defaultSampleRate") or 48000)
-        self._device_name = str(info.get("name") or "")
-        self._device_index = idx
-        # Official PyAudioWPatch examples prefer int16 + exact device channel count.
         last_err: Exception | None = None
-        stream = None
-        for fmt, fmt_name in (
-            (pyaudio.paInt16, "int16"),
-            (pyaudio.paFloat32, "float32"),
-        ):
-            for ch in (channels, 2, 1):
-                if ch < 1:
-                    continue
-                try:
-                    stream = self._pa.open(
-                        format=fmt,
-                        channels=ch,
-                        rate=rate,
-                        input=True,
-                        input_device_index=idx,
-                        frames_per_buffer=max(512, int(rate * 0.03)),
-                    )
-                    self._fmt = fmt_name
-                    self._channels = ch
-                    break
-                except Exception as e:
-                    last_err = e
-                    stream = None
-            if stream is not None:
-                break
-        if stream is None:
-            raise RuntimeError(
-                f"Не удалось открыть WASAPI loopback "
-                f"idx={idx} name={self._device_name!r}. "
-                f"Проверьте Privacy->Microphone и устройство воспроизведения. "
-                f"Детали: {last_err}"
-            ) from last_err
-        self._stream = stream
-        self._capture_rate = rate
-        return self
+        tried: list[str] = []
+        for info in candidates:
+            idx = int(info["index"])
+            name = str(info.get("name") or "")
+            tried.append(f"{idx}:{name}")
+            try:
+                stream, fmt_name, ch, rate = _try_open_pyaudio_loopback(
+                    self._pa, info
+                )
+            except Exception as e:
+                last_err = e
+                continue
+            self._stream = stream
+            self._fmt = fmt_name
+            self._channels = ch
+            self._capture_rate = rate
+            self._device_name = name
+            self._device_index = idx
+            return self
+        # Close unused PyAudio if every candidate failed.
+        try:
+            self._pa.terminate()
+        except Exception:
+            pass
+        self._pa = None
+        detail = f" Детали: {last_err}" if last_err is not None else ""
+        raise RuntimeError(
+            "Не удалось открыть WASAPI loopback "
+            f"(tried={tried!r}). "
+            "Проверьте Privacy->Microphone и устройство воспроизведения."
+            f"{detail}"
+        ) from last_err
 
     def __exit__(self, *exc: object) -> None:
         if self._stream is not None:

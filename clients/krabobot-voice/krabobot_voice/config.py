@@ -59,6 +59,20 @@ def app_base_dir() -> Path:
 portable_base_dir = app_base_dir
 
 
+def app_models_dir(base: Path | None = None) -> Path:
+    """``<app>/models`` — bundled Silero VAD + sherpa STT for portable / app-dir mode."""
+    root = base if base is not None else app_base_dir()
+    return root / "models"
+
+
+def app_silero_model_path(base: Path | None = None) -> Path:
+    return app_models_dir(base) / "silero_vad.onnx"
+
+
+def app_stt_models_dir(base: Path | None = None) -> Path:
+    return app_models_dir(base) / "stt"
+
+
 def app_config_candidates(base: Path | None = None) -> list[Path]:
     """``config.yaml`` then ``config.yml`` under the app base dir."""
     root = base if base is not None else app_base_dir()
@@ -345,7 +359,7 @@ class VoiceClientConfig:
     vad_threshold: float = 0.5  # Silero speech probability threshold
     # Skip Silero when frame RMS is below this (pure silence CPU save). Music is louder.
     vad_energy_pregate: float = 0.0008
-    vad_model_path: str = ""  # empty = %LOCALAPPDATA%/krabobot-voice/models/silero_vad.onnx
+    vad_model_path: str = ""  # empty = <app>/models/silero_vad.onnx
     # Empty listen window (no speech yet): keep ~10s before idle / follow-up end
     talk_listen_timeout_s: float = 10.0  # post-wake window; falls back from no_speech_timeout_s
     # After speech in LISTEN/DIALOG: close segment on this silence (snappy commands).

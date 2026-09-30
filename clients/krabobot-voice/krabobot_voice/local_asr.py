@@ -1,4 +1,9 @@
-"""Local sherpa-onnx ASR for wake-word windows (reuses ~/.krabobot STT models)."""
+"""Local sherpa-onnx ASR for wake-word windows.
+
+Model resolution (empty ``stt_model_dir``):
+1. ``<app>/models/stt/<preferred>/`` or first child with ``tokens.txt``
+2. Legacy ``~/.krabobot/models/stt/…`` when not frozen
+"""
 
 from __future__ import annotations
 
@@ -8,15 +13,42 @@ from pathlib import Path
 
 import numpy as np
 
+# Same folder name as krabobot gateway STT download.
+PREFERRED_STT_FOLDER = (
+    "sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16"
+)
+
+_STT_MISSING_HINT = (
+    "Положите модель в models/stt/<folder>/ рядом с приложением "
+    "(нужен tokens.txt; или укажите stt_model_dir)."
+)
+
 
 def default_stt_model_dir() -> Path:
-    return (
-        Path.home()
-        / ".krabobot"
-        / "models"
-        / "stt"
-        / "sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16"
-    )
+    """Preferred STT dir under app models (may not exist yet)."""
+    from krabobot_voice.config import app_stt_models_dir
+
+    return app_stt_models_dir() / PREFERRED_STT_FOLDER
+
+
+def legacy_stt_base() -> Path:
+    return Path.home() / ".krabobot" / "models" / "stt"
+
+
+def legacy_stt_model_dir() -> Path:
+    return legacy_stt_base() / PREFERRED_STT_FOLDER
+
+
+def _first_stt_child(base: Path) -> Path | None:
+    if not base.is_dir():
+        return None
+    preferred = base / PREFERRED_STT_FOLDER
+    if (preferred / "tokens.txt").is_file():
+        return preferred
+    for child in sorted(base.iterdir()):
+        if child.is_dir() and (child / "tokens.txt").is_file():
+            return child
+    return None
 
 
 def resolve_stt_model_dir(explicit: str | None = None) -> Path:
@@ -25,16 +57,25 @@ def resolve_stt_model_dir(explicit: str | None = None) -> Path:
         if (p / "tokens.txt").is_file():
             return p
         raise FileNotFoundError(f"STT model dir missing tokens.txt: {p}")
-    base = Path.home() / ".krabobot" / "models" / "stt"
-    preferred = default_stt_model_dir()
-    if (preferred / "tokens.txt").is_file():
-        return preferred
-    if base.is_dir():
-        for child in sorted(base.iterdir()):
-            if child.is_dir() and (child / "tokens.txt").is_file():
-                return child
+
+    from krabobot_voice.config import app_stt_models_dir, is_frozen
+
+    app_hit = _first_stt_child(app_stt_models_dir())
+    if app_hit is not None:
+        return app_hit
+
+    if is_frozen():
+        raise FileNotFoundError(
+            f"No sherpa STT model under {app_stt_models_dir()}. {_STT_MISSING_HINT}"
+        )
+
+    legacy_hit = _first_stt_child(legacy_stt_base())
+    if legacy_hit is not None:
+        return legacy_hit
+
     raise FileNotFoundError(
-        f"No sherpa STT model under {base}. Run `krabobot serve` once to download models."
+        f"No sherpa STT model under {app_stt_models_dir()} or {legacy_stt_base()}. "
+        f"{_STT_MISSING_HINT}"
     )
 
 
