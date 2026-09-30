@@ -25,8 +25,23 @@ asr = ["sherpa-onnx>=1.10", "onnxruntime>=1.16"]
 wake = ["sherpa-onnx>=1.10", "onnxruntime>=1.16"]
 # Speech vs non-speech VAD only (no sherpa)
 vad = ["onnxruntime>=1.16"]
+# Tray + window UI (Architecture A — same process as voice loop)
+ui = [
+    "customtkinter>=5.2",
+    "pystray>=0.19",
+    "Pillow>=10.0",
+]
 # Portable Windows build (scripts/build_portable.ps1)
 packaging = ["pyinstaller>=6.0"]
+# Full portable + UI
+all = [
+    "sherpa-onnx>=1.10",
+    "onnxruntime>=1.16",
+    "customtkinter>=5.2",
+    "pystray>=0.19",
+    "Pillow>=10.0",
+    "pyinstaller>=6.0",
+]
 
 [project.scripts]
 krabobot-voice = "krabobot_voice.app:main"
@@ -37,3 +52,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["krabobot_voice*"]
+
+[tool.setuptools.package-data]
+krabobot_voice = ["ui/assets/*"]

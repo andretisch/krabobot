@@ -143,7 +143,8 @@ meeting:
   # Empty = loopback for default output (or audio.output_device)
   loopback_device: ""
   max_s: 7200
-  # Empty = %LOCALAPPDATA%\krabobot-voice\meetings\YYYYMMDD-HHMMSS.wav
+  # Empty = <app>/meetings next to exe / package (portable-friendly).
+  # Legacy: %LOCALAPPDATA%\krabobot-voice\meetings (not auto-migrated).
   save_dir: ""
   # file (default) = multipart `files` like a large chat video — NO server STT on the WAV.
   # audio = legacy short-clip path (posts as `audio` for sherpa STT) — not for long meetings.
@@ -174,4 +175,11 @@ min_speech_s: 1.2
 silence_end_s: 2.0
 no_speech_timeout_s: 5.0
 energy_threshold: 0.008
+
+# ---------------------------------------------------------------------------
+# UI (tray + window). Default off: first start shows the main window.
+# CLI --minimized / --start-minimized forces hidden-to-tray for that run only.
+# ---------------------------------------------------------------------------
+ui:
+  start_minimized: false
 

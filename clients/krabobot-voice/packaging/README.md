@@ -84,7 +84,13 @@
 .\krabobot-voice.exe D:\path\to\config.yaml
 ```
 
-Ожидаемый статус в консоли: `waiting for wake / PTT / meeting…`
+Ожидаемый статус в UI / логе: `waiting for wake / PTT / meeting…`
+
+## UI (portable)
+
+Сборка windowed (`console=False`): tray + окно в том же процессе, что и voice loop.
+Конфиг и папка `meetings/` — рядом с exe. Кнопка Apply в окне сохраняет YAML и
+перезапускает loop (не hot-reload устройств mid-stream).
 
 ## Модели (в комплекте)
 
@@ -92,7 +98,7 @@
 |-----------|-----------|------------|
 | Silero VAD | `models/silero_vad.onnx` | Бандл; portable **не** скачивает |
 | Sherpa STT (wake ASR) | `models/stt/<folder>/` | Бандл; `stt_model_dir` пустой → этот путь |
-| Записи совещаний | `%LOCALAPPDATA%\krabobot-voice\meetings\` | runtime-данные, не конфиг |
+| Записи совещаний | `<app>/meetings/` | рядом с exe; legacy LocalAppData не мигрируется |
 
 Если модели удалили — положите файлы обратно в `models/` (см. таблицу выше).
 Клиент выдаст явную ошибку «положите модель в models/…», а не тихое скачивание.
@@ -119,7 +125,7 @@ Preferred STT: `sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16`
 ```powershell
 # из корня репозитория krabobot
 .\.venv\Scripts\Activate.ps1
-pip install -e ".\clients\krabobot-voice[asr,packaging]"
+pip install -e ".\clients\krabobot-voice[asr,ui,packaging]"
 .\clients\krabobot-voice\scripts\build_portable.ps1
 ```
 

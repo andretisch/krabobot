@@ -433,10 +433,13 @@ class VoiceClientConfig:
         "обработай аудиофайл по пути во вложении (как большое медиа в чате)."
     )
     meeting_max_s: float = 7200.0
-    # Empty = %LOCALAPPDATA%/krabobot-voice/meetings
+    # Empty = <app>/meetings next to exe / package (portable).
+    # Legacy builds used %LOCALAPPDATA%\krabobot-voice\meetings (not auto-migrated).
     meeting_save_dir: str = ""
     # file = multipart files (no server STT); audio = legacy short-clip STT path
     meeting_upload_as: str = "file"
+    # UI: start with main window hidden to tray (default off — first start shows window)
+    ui_start_minimized: bool = False
 
     @classmethod
     def from_env(cls) -> VoiceClientConfig:
@@ -524,6 +527,7 @@ class VoiceClientConfig:
         meeting = data.get("meeting") if isinstance(data.get("meeting"), dict) else {}
         audio = data.get("audio") if isinstance(data.get("audio"), dict) else {}
         vad = data.get("vad") if isinstance(data.get("vad"), dict) else {}
+        ui = data.get("ui") if isinstance(data.get("ui"), dict) else {}
 
         def pick(key: str, *alts: str, default: Any = None) -> Any:
             for k in (key, *alts):
@@ -813,4 +817,71 @@ class VoiceClientConfig:
                     meeting, "upload_as", "meeting_upload_as", cfg.meeting_upload_as
                 )
             ),
+            ui_start_minimized=_as_bool(
+                pick_nested(
+                    ui,
+                    "start_minimized",
+                    "ui_start_minimized",
+                    cfg.ui_start_minimized,
+                ),
+                cfg.ui_start_minimized,
+            ),
         )
+
+
+def resolve_config_file_path(path: str | Path | None = None) -> Path | None:
+    """Return the config file that ``load(path)`` would read (if it exists)."""
+    if path is not None:
+        p = Path(path).expanduser().resolve()
+        return p if p.is_file() else None
+    for candidate in default_config_candidates():
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
+def _deep_set(data: dict[str, Any], keys: tuple[str, ...], value: Any) -> None:
+    cur: dict[str, Any] = data
+    for key in keys[:-1]:
+        nxt = cur.get(key)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            cur[key] = nxt
+        cur = nxt
+    cur[keys[-1]] = value
+
+
+def merge_config_yaml(path: Path | str, updates: dict[str, Any]) -> Path:
+    """Merge nested updates into an existing YAML config and write it back.
+
+    ``updates`` may use dotted keys (``wake.phrase``) or nested dicts.
+    Comments are not preserved (PyYAML round-trip).
+    """
+    target = Path(path).expanduser().resolve()
+    try:
+        import yaml  # type: ignore[import-untyped]
+    except ImportError as e:
+        raise RuntimeError("PyYAML required for config.yaml") from e
+
+    data: dict[str, Any] = {}
+    if target.is_file():
+        loaded = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
+        if isinstance(loaded, dict):
+            data = loaded
+
+    for key, value in updates.items():
+        if isinstance(key, str) and "." in key:
+            _deep_set(data, tuple(key.split(".")), value)
+        elif isinstance(value, dict) and isinstance(data.get(key), dict):
+            merged = dict(data[key])
+            merged.update(value)
+            data[key] = merged
+        else:
+            data[key] = value
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    return target

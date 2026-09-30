@@ -39,8 +39,15 @@ hiddenimports = [
     "krabobot_voice.ptt",
     "krabobot_voice.segmenter",
     "krabobot_voice.silero_vad",
+    "krabobot_voice.status_bus",
     "krabobot_voice.vad",
     "krabobot_voice.wake",
+    "krabobot_voice.ui",
+    "krabobot_voice.ui.app_ui",
+    "krabobot_voice.ui.controller",
+    "krabobot_voice.ui.tray",
+    "krabobot_voice.ui.window",
+    "krabobot_voice.ui.icons",
     "yaml",
     "numpy",
     "httpx",
@@ -51,6 +58,13 @@ hiddenimports = [
     "pynput.mouse._win32",
     "sherpa_onnx",
     "onnxruntime",
+    "customtkinter",
+    "pystray",
+    "pystray._win32",
+    "PIL",
+    "PIL.Image",
+    "PIL.ImageDraw",
+    "PIL.ImageTk",
 ]
 
 if EXAMPLE_CFG.is_file():
@@ -58,7 +72,12 @@ if EXAMPLE_CFG.is_file():
 if PACKAGING_README.is_file():
     datas.append((str(PACKAGING_README), "."))
 
-for pkg in ("sherpa_onnx",):
+# Window / tray icons (PNG + ICO); must not depend on site/ at runtime.
+_UI_ASSETS = CLIENT_ROOT / "krabobot_voice" / "ui" / "assets"
+if _UI_ASSETS.is_dir():
+    datas.append((str(_UI_ASSETS), "krabobot_voice/ui/assets"))
+
+for pkg in ("sherpa_onnx", "customtkinter"):
     try:
         pkg_datas, pkg_binaries, pkg_hidden = collect_all(pkg)
         datas += pkg_datas
@@ -169,12 +188,13 @@ exe = EXE(  # noqa: F821
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(_UI_ASSETS / "favicon.ico") if (_UI_ASSETS / "favicon.ico").is_file() else None,
 )
 
 coll = COLLECT(  # noqa: F821

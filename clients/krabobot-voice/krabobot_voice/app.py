@@ -7,6 +7,7 @@ Dialog follow-up after Talk reply. Meeting: same segmenter on mic tap.
 from __future__ import annotations
 
 import os
+import queue
 import sys
 import threading
 import time
@@ -45,10 +46,11 @@ from krabobot_voice.dialog import (
 from krabobot_voice.http_client import VoiceHttpClient
 from krabobot_voice.kws import EmbeddingKws, default_refs_dir
 from krabobot_voice.link import ensure_device_linked
-from krabobot_voice.meeting import MeetingCaptureConfig, MeetingRecorder
+from krabobot_voice.meeting import MeetingCaptureConfig, MeetingRecorder, default_meetings_dir
 from krabobot_voice.protocol import ClientState
 from krabobot_voice.ptt import PttHotkey
 from krabobot_voice.segmenter import VadSegmenter
+from krabobot_voice.status_bus import StatusBus, get_status_bus
 from krabobot_voice.vad import frame_rms, pcm_stats
 from krabobot_voice.wake import command_after_wake, matches_wake_phrase
 
@@ -64,6 +66,17 @@ _EARLY_ASR_INTERVAL_S = 0.6
 
 def _log(msg: str) -> None:
     print(msg, flush=True)
+    bus = get_status_bus()
+    if bus is not None:
+        bus.emit_log(str(msg))
+
+
+def resolve_meetings_save_dir(cfg: VoiceClientConfig) -> Path:
+    """Explicit ``meeting.save_dir`` or portable ``<app>/meetings``."""
+    raw = (cfg.meeting_save_dir or "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return default_meetings_dir().resolve()
 
 
 def _debug_enabled() -> bool:
@@ -357,6 +370,9 @@ class _Driver:
         wake_energy: float,
         speech_gate: Callable[[np.ndarray], bool] | None = None,
         silero: object | None = None,
+        stop_event: threading.Event | None = None,
+        command_queue: queue.Queue[str] | None = None,
+        status_bus: StatusBus | None = None,
     ) -> None:
         self.cfg = cfg
         self.http = http
@@ -368,6 +384,9 @@ class _Driver:
         self.wake_energy = wake_energy
         self.speech_gate = speech_gate
         self._silero = silero
+        self._stop_event = stop_event
+        self._command_queue = command_queue
+        self._status_bus = status_bus if status_bus is not None else get_status_bus()
         self._deadline: float | None = None
         self._pending_pcm: np.ndarray | None = None
         self._recorder: MeetingRecorder | None = None
@@ -376,6 +395,21 @@ class _Driver:
         self._meeting_upload_lock = threading.Lock()
         self._meeting_upload_thread: threading.Thread | None = None
         self._meeting_upload_path: Path | None = None
+        self._turn_inflight = False
+        self._turn_queue: queue.Queue[tuple[str, object]] = queue.Queue()
+        self._turn_sink: deque[np.ndarray] | None = None
+        self._publish_mode()
+
+    def _stopped(self) -> bool:
+        return self._stop_event is not None and self._stop_event.is_set()
+
+    def _bus(self) -> StatusBus | None:
+        return self._status_bus if self._status_bus is not None else get_status_bus()
+
+    def _publish_mode(self) -> None:
+        bus = self._bus()
+        if bus is not None:
+            bus.set_mode(self.session.mode.value)
 
     def _reset_vad_state(self) -> None:
         reset = getattr(self._silero, "reset", None)
@@ -386,6 +420,10 @@ class _Driver:
         if msg != self._last_status:
             _log(msg)
             self._last_status = msg
+            bus = self._bus()
+            if bus is not None:
+                bus.set_status(msg)
+                self._publish_mode()
 
     def _apply(self, effects: list[object], *, mic: object | None = None) -> None:
         for eff in effects:
@@ -414,6 +452,37 @@ class _Driver:
             elif isinstance(eff, RunTest):
                 now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 _log(f"[test] {now} — тест выполнен")
+        self._publish_mode()
+
+    def _start_turn_worker(
+        self,
+        call: Callable[[], object],
+        *,
+        mic: object | None,
+    ) -> None:
+        """Run HTTP turn off the voice control path; loop polls for completion."""
+        bus = self._bus()
+        if bus is not None:
+            bus.set_activity("thinking")
+        self._status("thinking…")
+        sink: deque[np.ndarray] | None = None
+        if mic is not None:
+            sink = deque(maxlen=_KEEPALIVE_SINK_MAX)
+        self._turn_sink = sink
+        self._turn_inflight = True
+
+        def _worker() -> None:
+            try:
+                result = call()
+                self._turn_queue.put(("ok", result))
+            except Exception as e:  # noqa: BLE001 — delivered to voice loop
+                self._turn_queue.put(("err", e))
+
+        threading.Thread(
+            target=_worker,
+            name="voice-turn",
+            daemon=True,
+        ).start()
 
     def _do_text_turn(self, text: str, *, mic: object | None) -> None:
         cleaned = (text or "").strip()
@@ -424,39 +493,12 @@ class _Driver:
             )
             return
         _log(f"  you (wake): {cleaned}")
-        _log("thinking…")
-        sink: deque[np.ndarray] | None = None
-        try:
-            if mic is not None:
-                sink = deque(maxlen=_KEEPALIVE_SINK_MAX)
+        state = _client_state(self.session)
 
-                def _call() -> object:
-                    return self.http.turn(
-                        instruct=cleaned,
-                        client_state=_client_state(self.session),
-                    )
+        def _call() -> object:
+            return self.http.turn(instruct=cleaned, client_state=state)
 
-                result = with_stream_keepalive(mic, _call, sink=sink)
-            else:
-                result = self.http.turn(
-                    instruct=cleaned,
-                    client_state=_client_state(self.session),
-                )
-        except Exception as e:
-            _log(f"ERROR: запрос /v1/voice/turn: {e}")
-            self._apply(self.session.on_event(TurnDone(ok=False)), mic=mic)
-            return
-        finally:
-            # Backlog feed happens in the talk loop after apply returns if segmenter set.
-            self._last_sink = sink
-
-        ok = self._finish_turn(result, mic=mic)
-        self._apply(
-            self.session.on_event(
-                TurnDone(ok=ok, actions=tuple(getattr(result, "actions", None) or ()))
-            ),
-            mic=mic,
-        )
+        self._start_turn_worker(_call, mic=mic)
 
     def _do_audio_turn(self, *, mic: object | None) -> None:
         pcm = self._pending_pcm
@@ -471,33 +513,54 @@ class _Driver:
         )
         if stats.near_silent:
             _log("WARNING: clip looks near-silent — speak louder / closer after beep")
-        _log("thinking…")
-        sink: deque[np.ndarray] | None = None
-        try:
-            if mic is not None:
-                sink = deque(maxlen=_KEEPALIVE_SINK_MAX)
+        state = _client_state(self.session)
 
-                def _call() -> object:
-                    return self.http.turn(
-                        audio_bytes=wav,
-                        audio_filename="utterance.wav",
-                        client_state=_client_state(self.session),
-                    )
+        def _call() -> object:
+            return self.http.turn(
+                audio_bytes=wav,
+                audio_filename="utterance.wav",
+                client_state=state,
+            )
 
-                result = with_stream_keepalive(mic, _call, sink=sink)
-            else:
-                result = self.http.turn(
-                    audio_bytes=wav,
-                    audio_filename="utterance.wav",
-                    client_state=_client_state(self.session),
-                )
-        except Exception as e:
-            _log(f"ERROR: запрос /v1/voice/turn: {e}")
-            self._apply(self.session.on_event(TurnDone(ok=False)), mic=mic)
+        self._start_turn_worker(_call, mic=mic)
+
+    def _drain_turn_keepalive(self, mic: object | None) -> None:
+        sink = self._turn_sink
+        if mic is None or sink is None:
             return
-        finally:
-            self._last_sink = sink
+        try:
+            drain = getattr(mic, "drain_available", None)
+            if callable(drain):
+                drain()
+            block = getattr(mic, "read_block", None)
+            if callable(block):
+                sink.append(block())
+        except Exception:
+            pass
 
+    def _poll_pending_turn(self, *, mic: object | None) -> bool:
+        """Keep mic drained while HTTP runs. Return True if still in flight."""
+        if not self._turn_inflight:
+            return False
+        self._drain_turn_keepalive(mic)
+        try:
+            kind, payload = self._turn_queue.get_nowait()
+        except queue.Empty:
+            return True
+
+        self._turn_inflight = False
+        self._last_sink = self._turn_sink
+        self._turn_sink = None
+        bus = self._bus()
+        if bus is not None and bus.snapshot().activity == "thinking":
+            bus.set_activity("")
+
+        if kind == "err":
+            _log(f"ERROR: запрос /v1/voice/turn: {payload}")
+            self._apply(self.session.on_event(TurnDone(ok=False)), mic=mic)
+            return False
+
+        result = payload
         ok = self._finish_turn(result, mic=mic)
         self._apply(
             self.session.on_event(
@@ -505,6 +568,7 @@ class _Driver:
             ),
             mic=mic,
         )
+        return False
 
     def _finish_turn(self, result: object, *, mic: object | None) -> bool:
         status = int(getattr(result, "status_code", 500) or 500)
@@ -527,7 +591,7 @@ class _Driver:
     def _start_meeting(self) -> None:
         if self._recorder is not None and self._recorder.active:
             return
-        save_dir = self.cfg.meeting_save_dir.strip() or None
+        save_dir = str(resolve_meetings_save_dir(self.cfg))
         recorder = MeetingRecorder(
             MeetingCaptureConfig(
                 capture=self.cfg.meeting_capture,
@@ -551,6 +615,7 @@ class _Driver:
             _log(f"ERROR: не удалось начать запись встречи: {e}")
             self._recorder = None
             self.session.mode = Mode.IDLE
+            self._publish_mode()
             return
         warn = getattr(recorder, "warning", "") or ""
         if warn:
@@ -577,6 +642,7 @@ class _Driver:
                 detail = msg.removeprefix("[record] ").removeprefix("[open] ")
                 _log(f"ERROR: остановка записи встречи: {detail}")
             self.session.mode = Mode.IDLE
+            self._publish_mode()
             return
         warn = getattr(recorder, "warning", "") or ""
         if warn:
@@ -603,9 +669,11 @@ class _Driver:
             # Worker died or loop exited without StopMeeting effect.
             if self.session.mode is Mode.MEETING:
                 self.session.mode = Mode.IDLE
+                self._publish_mode()
             self._stop_meeting_and_upload()
         elif self.session.mode is Mode.MEETING:
             self.session.mode = Mode.IDLE
+            self._publish_mode()
 
     def _handle_meeting_upload(
         self,
@@ -637,6 +705,9 @@ class _Driver:
                 _log("meeting upload already in progress — skip duplicate")
                 return
             _log("upload meeting (async)…")
+            bus = self._bus()
+            if bus is not None:
+                bus.set_uploading(True)
             thread = threading.Thread(
                 target=self._meeting_upload_worker,
                 args=(path, upload_as, wav_bytes),
@@ -655,6 +726,7 @@ class _Driver:
     ) -> None:
         """Background HTTP POST; must not raise into the main process."""
         meeting_timeout = min(float(self.cfg.timeout_s), 60.0)
+        bus = self._bus()
         try:
             if upload_as == "audio":
                 # Legacy short-clip path (server STT on `audio`) — not for long meetings.
@@ -681,6 +753,9 @@ class _Driver:
         except Exception as e:
             _log(f"ERROR: запрос /v1/voice/turn (meeting): {e}")
             return
+        finally:
+            if bus is not None:
+                bus.set_uploading(False)
         if result.status_code >= 400:
             _log(
                 f"ERROR HTTP {result.status_code}: "
@@ -692,8 +767,29 @@ class _Driver:
             return
         _log("WARNING: сервер принял встречу без async=queued; проверьте версию krabobot serve")
 
+    def _poll_ui_command(self) -> str | None:
+        q = self._command_queue
+        if q is None:
+            return None
+        try:
+            raw = str(q.get_nowait() or "").strip().lower()
+        except queue.Empty:
+            return None
+        if raw in {"meeting", "ptt", "quit"}:
+            return raw
+        return None
+
     def _poll_hotkeys(self) -> list[object] | None:
-        """Return effects if a hotkey was consumed; else None."""
+        """Return effects if a hotkey/UI command was consumed; else None."""
+        ui = self._poll_ui_command()
+        if ui == "quit":
+            if self._stop_event is not None:
+                self._stop_event.set()
+            return None
+        if ui == "meeting":
+            return self.session.on_event(Hotkey("meeting"))
+        if ui == "ptt":
+            return self.session.on_event(Hotkey("ptt"))
         if self.meeting_hk is not None and self.meeting_hk.consume_edge_down():
             return self.session.on_event(Hotkey("meeting"))
         if self.ptt is not None and self.ptt.consume_edge_down():
@@ -879,6 +975,28 @@ class _Driver:
         last_listen_log = 0.0
 
         while True:
+            if self._stopped():
+                return
+
+            # HTTP turn runs on a worker; keep draining mic and accept meeting stop.
+            if self._turn_inflight:
+                if self._stopped():
+                    return
+                self._status("thinking…")
+                hot = self._poll_hotkeys()
+                if hot is not None:
+                    # Allow meeting toggle even while thinking (stop/start).
+                    if any(isinstance(e, StartMeeting) or isinstance(e, StopMeeting) for e in hot):
+                        self._apply(hot, mic=mic)
+                        if self.session.mode is Mode.MEETING:
+                            return
+                    # Ignore PTT arm while turn is in flight.
+                if self._poll_pending_turn(mic=mic):
+                    time.sleep(0.01)
+                    continue
+                self._feed_last_sink(segmenter)
+                continue
+
             # Meeting session owns its own mic tap; leave the talk stream.
             if self.session.mode is Mode.MEETING:
                 return
@@ -958,6 +1076,17 @@ class _Driver:
 
             def _poll() -> None:
                 nonlocal last_listen_log
+                if self._stopped():
+                    raise _HotkeyAbortError("stop")
+                ui = self._poll_ui_command()
+                if ui == "quit":
+                    if self._stop_event is not None:
+                        self._stop_event.set()
+                    raise _HotkeyAbortError("stop")
+                if ui == "meeting":
+                    raise _HotkeyAbortError("meeting")
+                if ui == "ptt":
+                    raise _HotkeyAbortError("ptt")
                 if self.meeting_hk is not None and self.meeting_hk.consume_edge_down():
                     raise _HotkeyAbortError("meeting")
                 if self.ptt is not None and self.ptt.consume_edge_down():
@@ -987,6 +1116,8 @@ class _Driver:
                     early_check_min_s=early_min_s,
                 )
             except _HotkeyAbortError as abort:
+                if abort.kind == "stop":
+                    return
                 effects = self.session.on_event(Hotkey(abort.kind))
                 if (
                     abort.kind == "ptt"
@@ -1107,7 +1238,20 @@ class _Driver:
             )
             last_print = 0.0
             while self.session.mode is Mode.MEETING and recorder.active:
-                if self.meeting_hk is not None and self.meeting_hk.consume_edge_down():
+                if self._stopped():
+                    break
+                if self._turn_inflight:
+                    if self._poll_pending_turn(mic=None):
+                        time.sleep(0.01)
+                        continue
+                ui = self._poll_ui_command()
+                if ui == "quit":
+                    if self._stop_event is not None:
+                        self._stop_event.set()
+                    break
+                if ui == "meeting" or (
+                    self.meeting_hk is not None and self.meeting_hk.consume_edge_down()
+                ):
                     self._apply(self.session.on_event(Hotkey("meeting")))
                     break
                 now = time.monotonic()
@@ -1126,6 +1270,15 @@ class _Driver:
                     last_print = now
 
                 def _poll() -> None:
+                    if self._stopped():
+                        raise _HotkeyAbortError("stop")
+                    ui_cmd = self._poll_ui_command()
+                    if ui_cmd == "quit":
+                        if self._stop_event is not None:
+                            self._stop_event.set()
+                        raise _HotkeyAbortError("stop")
+                    if ui_cmd == "meeting":
+                        raise _HotkeyAbortError("meeting")
                     if self.meeting_hk is not None and self.meeting_hk.consume_edge_down():
                         raise _HotkeyAbortError("meeting")
                     if not recorder.active:
@@ -1150,7 +1303,9 @@ class _Driver:
                         early_check_interval_s=early_interval_s,
                         early_check_min_s=early_min_s,
                     )
-                except _HotkeyAbortError:
+                except _HotkeyAbortError as abort:
+                    if abort.kind == "stop":
+                        break
                     self._apply(self.session.on_event(Hotkey("meeting")))
                     break
 
@@ -1200,7 +1355,16 @@ class _Driver:
     def _meeting_hotkey_only(self, recorder: MeetingRecorder) -> None:
         last_print = 0.0
         while self.session.mode is Mode.MEETING and recorder.active:
-            if self.meeting_hk is not None and self.meeting_hk.consume_edge_down():
+            if self._stopped():
+                break
+            ui = self._poll_ui_command()
+            if ui == "quit":
+                if self._stop_event is not None:
+                    self._stop_event.set()
+                break
+            if ui == "meeting" or (
+                self.meeting_hk is not None and self.meeting_hk.consume_edge_down()
+            ):
                 self._apply(self.session.on_event(Hotkey("meeting")))
                 break
             now = time.monotonic()
@@ -1267,8 +1431,33 @@ def run_test_loopback(config: VoiceClientConfig | None = None, *, duration_s: fl
     return 2
 
 
-def run_loop(config: VoiceClientConfig | None = None) -> int:
+def run_loop(
+    config: VoiceClientConfig | None = None,
+    *,
+    stop_event: threading.Event | None = None,
+    command_queue: queue.Queue[str] | None = None,
+    status_bus: StatusBus | None = None,
+    config_path: str | Path | None = None,
+) -> int:
     cfg = config or VoiceClientConfig.load()
+    bus = status_bus if status_bus is not None else get_status_bus()
+    if bus is not None:
+        cfg_path = ""
+        if config_path is not None:
+            cfg_path = str(Path(config_path).expanduser())
+        else:
+            from krabobot_voice.config import app_config_candidates, ensure_app_config
+
+            ensured = ensure_app_config()
+            cfg_path = str(ensured) if ensured else str(app_config_candidates()[0])
+        bus.set_paths(
+            config_path=cfg_path,
+            meetings_dir=str(resolve_meetings_save_dir(cfg)),
+        )
+        bus.set_mode("idle")
+        bus.set_activity("")
+        bus.set_status("starting…")
+
     cpu_n = max(1, int(os.cpu_count() or 1))
     # load() already resolves; re-resolve so bare VoiceClientConfig() (0) is safe.
     stt_threads = resolve_stt_num_threads(cfg.stt_num_threads, cpu_count=cpu_n)
@@ -1280,6 +1469,7 @@ def run_loop(config: VoiceClientConfig | None = None) -> int:
     _log(f"device_id={cfg.device_id}")
     _log(f"wake_mode={cfg.wake_mode}, ptt={'on' if cfg.ptt_enabled else 'off'}")
     _log(f"audio.listen_source={cfg.audio_listen_source}")
+    _log(f"meetings dir: {resolve_meetings_save_dir(cfg)}")
 
     # onnxruntime MUST load before WinRT (mic permission). Reverse order =
     # native ACCESS_VIOLATION; PyInstaller console shows no Python traceback.
@@ -1304,6 +1494,9 @@ def run_loop(config: VoiceClientConfig | None = None) -> int:
                 "Разрешите в системном окне / Параметрах и запустите снова."
             )
             return 4
+
+    if stop_event is not None and stop_event.is_set():
+        return 0
 
     auto_threads = max(1, cpu_n // 2)
     if stt_threads == auto_threads:
@@ -1486,11 +1679,17 @@ def run_loop(config: VoiceClientConfig | None = None) -> int:
         wake_energy=wake_energy,
         speech_gate=speech_gate,
         silero=silero,
+        stop_event=stop_event,
+        command_queue=command_queue,
+        status_bus=bus,
     )
     talk_enabled = cfg.wake_mode != "off" or ptt is not None
 
     try:
         while True:
+            if stop_event is not None and stop_event.is_set():
+                _log("stopped.")
+                return 0
             if session.mode is Mode.MEETING:
                 if driver._recorder is None:
                     driver._start_meeting()
@@ -1500,6 +1699,18 @@ def run_loop(config: VoiceClientConfig | None = None) -> int:
             if meeting_hk is not None and meeting_hk.consume_edge_down():
                 driver._apply(session.on_event(Hotkey("meeting")))
                 continue
+            ui = driver._poll_ui_command()
+            if ui == "quit":
+                if stop_event is not None:
+                    stop_event.set()
+                _log("stopped.")
+                return 0
+            if ui == "meeting":
+                driver._apply(session.on_event(Hotkey("meeting")))
+                continue
+            if ui == "ptt":
+                driver._apply(session.on_event(Hotkey("ptt")))
+                # Fall through to open talk stream if needed.
 
             if not talk_enabled:
                 time.sleep(0.05)
@@ -1529,6 +1740,10 @@ def run_loop(config: VoiceClientConfig | None = None) -> int:
             ptt.stop()
         if meeting_hk is not None:
             meeting_hk.stop()
+        if bus is not None:
+            bus.set_activity("")
+            bus.set_mode("idle")
+            bus.set_status("stopped")
 
 
 def _configure_stdio_utf8() -> None:
@@ -1604,8 +1819,32 @@ def _main_inner(argv: list[str] | None = None) -> int:
         path = args[0] if args and not args[0].startswith("-") else None
         cfg = VoiceClientConfig.load(path)
         return run_test_loopback(cfg, duration_s=3.0)
+
+    console_only = "--console" in args
+    # CLI forces this run only; persistent default is ui.start_minimized in YAML.
+    cli_minimized = "--minimized" in args or "--start-minimized" in args
+    args = [
+        a
+        for a in args
+        if a not in {"--console", "--ui", "--minimized", "--start-minimized"}
+    ]
     path = None
     if args and not args[0].startswith("-"):
         path = args[0]
     cfg = VoiceClientConfig.load(path)
-    return run_loop(cfg)
+
+    if console_only:
+        return run_loop(cfg, config_path=path)
+
+    # Default: tray + window UI (Architecture A — one process).
+    try:
+        from krabobot_voice.ui.app_ui import run_ui
+    except ImportError as e:
+        _log(
+            f"WARNING: UI deps missing ({e}). "
+            'Install: pip install -e ".\\clients\\krabobot-voice[ui]" '
+            "or run with --console"
+        )
+        return run_loop(cfg, config_path=path)
+    start_minimized = bool(cli_minimized or cfg.ui_start_minimized)
+    return run_ui(cfg, config_path=path, start_minimized=start_minimized)

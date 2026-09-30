@@ -86,23 +86,38 @@ wake:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
-pip install -e ".\clients\krabobot-voice[asr]"
+pip install -e ".\clients\krabobot-voice[asr,ui]"
 ```
 
 Без локального wake (только PTT / KWS):
 
 ```powershell
-pip install -e ".\clients\krabobot-voice"
+pip install -e ".\clients\krabobot-voice[ui]"
 ```
 
+Extras: `[asr]` / `[vad]` — sherpa/onnx; `[ui]` — tray + window (customtkinter, pystray, Pillow);
+`[packaging]` — PyInstaller; `[all]` — всё сразу.
+
 ## Запуск
+
+По умолчанию открывается **окно + tray** (один процесс: UI + voice-loop на worker-thread):
 
 ```powershell
 # serve должен уже слушать :8900
 python -m krabobot_voice
 ```
 
-Статус (один раз при входе в idle): `waiting for wake / PTT / meeting…` → на каждом закрытом VAD-сегменте одна строка `[wake-asr] …` → при match `wake: …` → `listening…` → (`local command` \| `thinking…` → `playing…` → `follow-up listening…`) → снова wake. Строка `waiting…` не печатается каждые N секунд / hop.
+Консольный режим без UI (отладка):
+
+```powershell
+python -m krabobot_voice --console
+```
+
+В окне: статус (idle / listen / dialog / meeting / thinking / uploading), лог,
+Meeting start/stop, PTT (listening), Open config / Meetings folder, Apply & restart
+(сохраняет YAML и перезапускает voice loop). Закрытие окна прячет в tray; Quit — выход.
+
+Статус в логе (idle): `waiting for wake / PTT / meeting…` → на каждом закрытом VAD-сегменте одна строка `[wake-asr] …` → при match `wake: …` → `listening…` → (`local command` \| `thinking…` → `playing…` → `follow-up listening…`) → снова wake. Строка `waiting…` не печатается каждые N секунд / hop.
 
 ### Dialog follow-up
 
@@ -204,9 +219,10 @@ python -m krabobot_voice --test-loopback
 
 По умолчанию hotkey **Ctrl+Alt+M** — старт/стоп. Запись идёт в **отдельном процессе** и сразу пишется на диск:
 
-`%LOCALAPPDATA%\krabobot-voice\meetings\YYYYMMDD-HHMMSS.wav`
+`<app>/meetings/YYYYMMDD-HHMMSS.wav`
 
-(или `meeting.save_dir`). На стопе («закончить запись совещания» / hotkey) клиент шлёт WAV как multipart **`files`** + `async=1` — **не ждёт** ответ бота/TTS; в логе: `meeting queued — результат придёт на почту`. Сервер обрабатывает запись в фоне и шлёт письмо **owner** на первый привязанный аккаунт `email:…` (веб-UI → Users → owner → Links). Нужны `channels.email` (SMTP) и `consentGranted: true`; должен работать **gateway** (или spool outbound при `krabobot serve`). Вложение — Markdown с протоколом; тело письма — краткое резюме.
+(рядом с exe / корнем пакета; или явный `meeting.save_dir`). Раньше по умолчанию был
+`%LOCALAPPDATA%\krabobot-voice\meetings\` — старые файлы **не** переносятся автоматически. На стопе («закончить запись совещания» / hotkey) клиент шлёт WAV как multipart **`files`** + `async=1` — **не ждёт** ответ бота/TTS; в логе: `meeting queued — результат придёт на почту`. Сервер обрабатывает запись в фоне и шлёт письмо **owner** на первый привязанный аккаунт `email:…` (веб-UI → Users → owner → Links). Нужны `channels.email` (SMTP) и `consentGranted: true`; должен работать **gateway** (или spool outbound при `krabobot serve`). Вложение — Markdown с протоколом; тело письма — краткое резюме.
 
 `meeting.upload_as: audio` — устаревший путь (короткие клипы через STT); для длинных совещаний не используйте.
 
@@ -254,7 +270,7 @@ Loopback идёт через **PyAudioWPatch** (ставится с клиент
 | `meeting.capture` | `mix` (default) \| `loopback` \| `mic` |
 | `meeting.hotkey` | Toggle старт/стоп (default `ctrl+alt+m`) |
 | `meeting.loopback_device` | Имя/индекс loopback; пусто → default output |
-| `meeting.save_dir` | Локальный каталог WAV; пусто → `%LOCALAPPDATA%\krabobot-voice\meetings` |
+| `meeting.save_dir` | Локальный каталог WAV; пусто → `<app>/meetings` (рядом с exe/пакетом) |
 | `meeting.upload_as` | `file` (default, multipart files) \| `audio` (legacy STT) |
 | `meeting.instruct` | Текст к upload на стопе |
 | `audio.listen_source` / `KRABOBOT_VOICE_LISTEN_SOURCE` | `mic` (default) \| `loopback` — wake + Talk/PTT; env перекрывает YAML |
@@ -319,7 +335,7 @@ Onedir без Python на целевой машине. Скрипт:
 | Что | Зачем |
 |-----|--------|
 | Windows, Python 3.11+, venv репозитория | рантайм сборки |
-| `pip install -e ".\clients\krabobot-voice[asr,packaging]"` | sherpa-onnx, onnxruntime, **PyInstaller** |
+| `pip install -e ".\clients\krabobot-voice[asr,ui,packaging]"` | sherpa, UI, **PyInstaller** |
 | Silero ONNX на машине сборки | копируется в `models/silero_vad.onnx` |
 | Sherpa STT dir (`tokens.txt` внутри) | копируется в `models/stt/<имя>/` |
 | Работающий `krabobot serve` на целевой машине | API для Talk/Meeting (не для VAD/ASR) |
@@ -339,7 +355,7 @@ Preferred STT folder name: `sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
-pip install -e ".\clients\krabobot-voice[asr,packaging]"
+pip install -e ".\clients\krabobot-voice[asr,ui,packaging]"
 .\clients\krabobot-voice\scripts\build_portable.ps1
 ```
 
@@ -368,8 +384,10 @@ pip install -e ".\clients\krabobot-voice[asr,packaging]"
 1. Убедитесь, что `krabobot serve` слушает API (обычно `http://127.0.0.1:8900`).
 2. При необходимости отредактируйте `config.yaml` рядом с exe
    (`wake.phrase`, `base_url`, `token` / adminToken).
-3. Запустите `.\krabobot-voice.exe` — при первом старте Windows спросит доступ
-   к микрофону (WinRT); portable exe и `python -m` — разные записи в Privacy.
+3. Запустите `.\krabobot-voice.exe` — windowed (без консоли); UI + tray.
+   Для отладки в dev: `python -m krabobot_voice --console`.
+   При первом старте Windows спросит доступ к микрофону (WinRT);
+   portable exe и `python -m` — разные записи в Privacy.
 4. VAD и локальный wake-STT работают **офлайн** из `models/`. Сеть нужна
    только до API `krabobot serve`.
 
@@ -380,6 +398,7 @@ pip install -e ".\clients\krabobot-voice[asr,packaging]"
 ```
 krabobot_voice/
   app.py         # главный цикл (wake / PTT / meeting / follow-up)
+  status_bus.py  # queue + snapshot для UI
   dialog.py      # follow-up state machine (unit-tested)
   commands.py    # локальные фразы: meeting / exit
   preprocess.py  # 16 kHz / trim / normalize перед ASR и upload
@@ -396,8 +415,9 @@ krabobot_voice/
   link.py        # auto-link device → owner
   http_client.py # POST /v1/voice/turn
   config.py
+  ui/            # tray + window (Architecture A, one process)
 packaging/
-  krabobot-voice.spec   # PyInstaller onedir
+  krabobot-voice.spec   # PyInstaller onedir (console=False)
   README.md             # инструкция рядом с portable-сборкой
 scripts/
   build_portable.ps1    # → build/krabobot-voice-portable/

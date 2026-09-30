@@ -2,13 +2,14 @@
 #
 # From repo root (recommended):
 #   .\.venv\Scripts\Activate.ps1
-#   pip install -e ".\clients\krabobot-voice[asr,packaging]"
+#   pip install -e ".\clients\krabobot-voice[asr,ui,packaging]"
 #   .\clients\krabobot-voice\scripts\build_portable.ps1
 #
 # User-facing output (self-contained — VAD + STT bundled, no first-run download):
 #   clients\krabobot-voice\build\krabobot-voice-portable\krabobot-voice.exe
 # Intermediate PyInstaller dist: build\krabobot-voice\ (then synced to -portable).
 # Docs: clients\krabobot-voice\README.md (Portable build) and packaging\README.md.
+# Windowed exe (console=False); tray+UI in-process. Dev debug: python -m … --console.
 
 [CmdletBinding()]
 param(
@@ -111,7 +112,7 @@ Write-Host "==> STT source:    $sttSrc"
 
 if (-not $SkipInstall) {
     Write-Host "==> Ensuring packaging deps (asr + pyinstaller)..."
-    python -m pip install -e "$ClientRoot[asr,packaging]"
+    python -m pip install -e "$ClientRoot[asr,ui,packaging]"
 }
 
 $pyi = Get-Command pyinstaller -ErrorAction SilentlyContinue

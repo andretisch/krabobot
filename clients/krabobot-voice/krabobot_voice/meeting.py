@@ -24,10 +24,25 @@ from krabobot_voice.audio_io import (
 )
 
 
-def default_meetings_dir() -> Path:
-    """``%LOCALAPPDATA%/krabobot-voice/meetings`` (or ``~/…`` fallback)."""
+def legacy_meetings_dir() -> Path:
+    """Previous default: ``%LOCALAPPDATA%/krabobot-voice/meetings``.
+
+    Kept for docs / optional migration; new installs use :func:`default_meetings_dir`.
+    """
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
     return Path(base) / "krabobot-voice" / "meetings"
+
+
+def default_meetings_dir() -> Path:
+    """``<app>/meetings`` next to exe / package root (portable-friendly).
+
+    Override with ``meeting.save_dir`` in config.yaml. Older builds used
+    :func:`legacy_meetings_dir` under LocalAppData — files are not moved
+    automatically.
+    """
+    from krabobot_voice.config import app_base_dir
+
+    return app_base_dir() / "meetings"
 
 
 def new_meeting_wav_path(save_dir: str | Path | None = None) -> Path:
