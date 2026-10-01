@@ -843,7 +843,10 @@ class AgentLoop:
 
         meta = dict(msg.metadata or {})
         meta["_tts_enabled_for_user"] = await self._tts_enabled_for_user(msg)
-        if on_stream is not None:
+        # _run_agent_loop clears stream callbacks when anonymize is on so masked
+        # tokens are not shown before decode. _streamed means ChannelManager
+        # already delivered the text as deltas; setting it here would skip send().
+        if on_stream is not None and not self.anonymize:
             meta["_streamed"] = True
         return OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id, content=final_content,

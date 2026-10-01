@@ -15,6 +15,7 @@ from krabobot.bus.events import OutboundMessage
 from krabobot.bus.queue import MessageBus
 from krabobot.channels.telegram import TELEGRAM_REPLY_CONTEXT_MAX_LEN, TelegramChannel, _StreamBuf
 from krabobot.channels.telegram import TelegramConfig
+from krabobot.users import UserResolver
 
 
 class _FakeHTTPXRequest:
@@ -537,6 +538,22 @@ def test_telegram_transcribe_defaults_voice_only() -> None:
 def test_sender_id_is_numeric_even_when_username_is_set() -> None:
     user = SimpleNamespace(id=423648236, username="alice")
     assert TelegramChannel._sender_id(user) == "423648236"
+
+
+@pytest.mark.asyncio
+async def test_numeric_sender_id_matches_admin_telegram_link(tmp_path: Path) -> None:
+    """Admin saves telegram:{digits}; inbound with username must still register."""
+    user = SimpleNamespace(id=423648236, username="redeyex")
+    sender_id = TelegramChannel._sender_id(user)
+    assert sender_id == "423648236"
+    assert "|" not in sender_id
+
+    resolver = UserResolver(tmp_path)
+    await resolver.link_account("owner", "telegram", "423648236")
+
+    assert await resolver.is_registered("telegram", sender_id) is True
+    assert await resolver.lookup("telegram", sender_id) == "owner"
+    assert await resolver.is_registered("telegram", "423648236|redeyex") is False
 
 
 def test_is_allowed_accepts_legacy_telegram_id_username_formats() -> None:
