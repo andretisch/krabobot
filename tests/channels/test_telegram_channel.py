@@ -534,6 +534,11 @@ def test_telegram_transcribe_defaults_voice_only() -> None:
     assert cfg.transcribe_audio is False
 
 
+def test_sender_id_is_numeric_even_when_username_is_set() -> None:
+    user = SimpleNamespace(id=423648236, username="alice")
+    assert TelegramChannel._sender_id(user) == "423648236"
+
+
 def test_is_allowed_accepts_legacy_telegram_id_username_formats() -> None:
     channel = TelegramChannel(TelegramConfig(allow_from=["12345", "alice", "67890|bob"]), MessageBus())
 
