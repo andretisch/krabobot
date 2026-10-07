@@ -6,7 +6,7 @@ import re
 import sys
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from loguru import logger
 
@@ -29,6 +29,8 @@ class ExecTool(Tool):
         restrict_to_workspace: bool = False,
         path_append: str = "",
         bus: "MessageBus | None" = None,
+        on_background_done: Callable[[Any], None] | None = None,
+        consumer_alive: Callable[[], bool] | None = None,
     ):
         self.timeout = timeout
         self.working_dir = working_dir
@@ -48,6 +50,8 @@ class ExecTool(Tool):
         self.restrict_to_workspace = restrict_to_workspace
         self.path_append = path_append
         self.bus = bus
+        self._on_background_done = on_background_done
+        self._consumer_alive = consumer_alive
         self._origin_channel = "cli"
         self._origin_chat_id = "direct"
         self._session_key = "cli:direct"
@@ -283,8 +287,11 @@ Command: {command}
 Output:
 {result}
 
-Continue the task using this result (e.g. read saved artifacts, summarize for the user). \
-Keep the user update brief. Do not mention technical details like job IDs unless asked."""
+This is a new turn. The background command you started has finished.
+Resume the user's unfinished task now: read the output and any files it wrote,
+complete the remaining work, and deliver the result.
+Do not stop at a status acknowledgement.
+Do not mention technical details like job IDs unless asked."""
 
         msg = InboundMessage(
             channel="system",
@@ -293,13 +300,32 @@ Keep the user update brief. Do not mention technical details like job IDs unless
             content=announce_content,
             user_id=user_id,
         )
-        await self.bus.publish_inbound(msg)
+        await self._publish_wakeup(msg)
         logger.debug(
             "Background exec [{}] announced to {}:{}",
             job_id,
             origin["channel"],
             origin["chat_id"],
         )
+
+    async def _publish_wakeup(self, msg: Any) -> None:
+        """Resume the main agent when this job finishes.
+
+        Prefer the bus so ``AgentLoop.run`` keeps session locks with live
+        turns. If that consumer is not running, start the turn directly —
+        otherwise the completion sits in the queue and the agent never
+        continues.
+        """
+        if self.bus is None:
+            return
+        if (
+            self._on_background_done is not None
+            and self._consumer_alive is not None
+            and not self._consumer_alive()
+        ):
+            self._on_background_done(msg)
+            return
+        await self.bus.publish_inbound(msg)
 
     def _format_job_output(
         self, stdout_text: str, stderr_text: str, exit_code: int | None

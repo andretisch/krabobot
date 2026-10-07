@@ -1,4 +1,11 @@
 from krabobot.api.server import _ui_text_from_stored_content, derive_session_title
+from krabobot.bus.events import is_background_wakeup
+
+
+def test_background_wakeup_text_is_hidden_from_web_history() -> None:
+    assert is_background_wakeup("[Background exec 'stt' completed successfully]\n\ndone")
+    assert is_background_wakeup("  [Subagent 'report' failed]\n\nboom")
+    assert not is_background_wakeup("Уверен что готово")
 
 
 def test_ui_text_strips_linked_accounts_from_stored_history() -> None:

@@ -40,6 +40,16 @@ class InboundMessage:
         return f"user:{self.user_id}:{base}" if self.user_id else base
 
 
+def is_background_wakeup(text: str) -> bool:
+    """True for exec/subagent completion notices that wake the main agent.
+
+    These are injected as user turns so the model resumes work. The web UI
+    hides them; the assistant reply is what the user should see.
+    """
+    body = (text or "").lstrip()
+    return body.startswith("[Background exec ") or body.startswith("[Subagent ")
+
+
 @dataclass
 class OutboundMessage:
     """Message to send to a chat channel."""

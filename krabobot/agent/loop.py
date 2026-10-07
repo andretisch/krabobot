@@ -230,6 +230,7 @@ class AgentLoop:
         self.timezone = timezone
 
         self._running = False
+        self._inbound_consumer_alive = False
         self._mcp_servers = mcp_servers or {}
         self._mcp_stack: AsyncExitStack | None = None
         self._mcp_connected = False
@@ -290,6 +291,8 @@ class AgentLoop:
             web_proxy=self.web_proxy,
             exec_config=self.exec_config,
             restrict_to_workspace=self.restrict_to_workspace,
+            on_background_done=self._schedule_wakeup,
+            consumer_alive=self._consumer_alive,
         )
         memory_consolidator = MemoryConsolidator(
             workspace=workspace,
@@ -329,6 +332,8 @@ class AgentLoop:
                 path_append=self.exec_config.path_append,
                 internal_url_allowlist=self.exec_config.internal_url_allowlist,
                 bus=self.bus,
+                on_background_done=self._schedule_wakeup,
+                consumer_alive=self._consumer_alive,
             ))
         runtime.tools.register(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
         runtime.tools.register(WebFetchTool(proxy=self.web_proxy))
@@ -397,7 +402,10 @@ class AgentLoop:
     async def _runtime_for_message(self, msg: InboundMessage) -> AgentRuntime:
         """Resolve per-user runtime bundle for an inbound message."""
         await self._ensure_identity(msg)
-        user_id = msg.user_id or ("system" if msg.channel == "system" else None)
+        # Background completions arrive as channel=system. With no user_id they
+        # belong to the default runtime that started the job — not a fake user
+        # named "system", which would write the resume turn into another workspace.
+        user_id = msg.user_id
         if not user_id:
             return self._default_runtime
 
@@ -563,33 +571,69 @@ class AgentLoop:
         self._running = True
         await self._connect_mcp()
         logger.info("Agent loop started")
+        self._inbound_consumer_alive = True
+        try:
+            while self._running:
+                try:
+                    msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+                except asyncio.CancelledError:
+                    # Preserve real task cancellation so shutdown can complete cleanly.
+                    # Only ignore non-task CancelledError signals that may leak from integrations.
+                    if not self._running or asyncio.current_task().cancelling():
+                        raise
+                    continue
+                except Exception as e:
+                    logger.warning("Error consuming inbound message: {}, continuing...", e)
+                    continue
 
-        while self._running:
-            try:
-                msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
-            except asyncio.TimeoutError:
-                continue
-            except asyncio.CancelledError:
-                # Preserve real task cancellation so shutdown can complete cleanly.
-                # Only ignore non-task CancelledError signals that may leak from integrations.
-                if not self._running or asyncio.current_task().cancelling():
+                try:
+                    raw = self._user_content_plaintext(msg.content).strip()
+                    runtime = await self._runtime_for_message(msg)
+                    if self.commands.is_priority(raw):
+                        ctx = CommandContext(
+                            msg=msg, session=None, key=msg.session_key,
+                            raw=raw, loop=self, runtime=runtime,
+                        )
+                        result = await self.commands.dispatch_priority(ctx)
+                        if result:
+                            await self.bus.publish_outbound(self._mark_command_response(result))
+                        continue
+                    self._track_dispatch(msg)
+                except asyncio.CancelledError:
                     raise
-                continue
-            except Exception as e:
-                logger.warning("Error consuming inbound message: {}, continuing...", e)
-                continue
+                except Exception:
+                    logger.exception(
+                        "Failed to accept inbound from {}",
+                        getattr(msg, "sender_id", "?"),
+                    )
+        finally:
+            self._inbound_consumer_alive = False
 
-            raw = msg.content.strip()
-            runtime = await self._runtime_for_message(msg)
-            if self.commands.is_priority(raw):
-                ctx = CommandContext(msg=msg, session=None, key=msg.session_key, raw=raw, loop=self, runtime=runtime)
-                result = await self.commands.dispatch_priority(ctx)
-                if result:
-                    await self.bus.publish_outbound(self._mark_command_response(result))
-                continue
-            task = asyncio.create_task(self._dispatch(msg))
-            self._active_tasks.setdefault(msg.dispatch_key, []).append(task)
-            task.add_done_callback(lambda t, k=msg.dispatch_key: self._active_tasks.get(k, []) and self._active_tasks[k].remove(t) if t in self._active_tasks.get(k, []) else None)
+    def _consumer_alive(self) -> bool:
+        return self._inbound_consumer_alive
+
+    def _schedule_wakeup(self, msg: InboundMessage) -> None:
+        """Start an agent turn for a background completion when ``run()`` is down."""
+        logger.info(
+            "Dispatching background wakeup directly from {} for {}",
+            msg.sender_id,
+            msg.session_key,
+        )
+        self._track_dispatch(msg)
+
+    def _track_dispatch(self, msg: InboundMessage) -> None:
+        task = asyncio.create_task(self._dispatch(msg))
+        key = msg.dispatch_key
+        self._active_tasks.setdefault(key, []).append(task)
+
+        def _done(done_task: asyncio.Task, dispatch_key: str = key) -> None:
+            bucket = self._active_tasks.get(dispatch_key)
+            if bucket and done_task in bucket:
+                bucket.remove(done_task)
+
+        task.add_done_callback(_done)
 
     async def _dispatch(self, msg: InboundMessage) -> None:
         """Process a message: per-session serial, cross-session concurrent."""
@@ -646,10 +690,41 @@ class AgentLoop:
                 raise
             except Exception:
                 logger.exception("Error processing message for session {}", msg.session_key)
-                await self.bus.publish_outbound(OutboundMessage(
-                    channel=msg.channel, chat_id=msg.chat_id,
-                    content="Sorry, I encountered an error.",
-                ))
+                await self._report_dispatch_failure(msg, runtime)
+
+    @staticmethod
+    def _origin_channel_chat(msg: InboundMessage) -> tuple[str, str]:
+        """Channel and chat the user is actually in.
+
+        System completions store that origin in ``chat_id`` as ``channel:chat_id``.
+        """
+        if msg.channel == "system" and ":" in (msg.chat_id or ""):
+            channel, chat_id = msg.chat_id.split(":", 1)
+            return channel, chat_id
+        return msg.channel, msg.chat_id
+
+    async def _report_dispatch_failure(
+        self,
+        msg: InboundMessage,
+        runtime: AgentRuntime | None,
+    ) -> None:
+        """Surface a failed turn on the origin channel.
+
+        Local channels (api/voice/cli) have no gateway adapter. Publishing the
+        error on ``system`` drops it, so the user never sees that the wakeup ran.
+        """
+        channel, chat_id = self._origin_channel_chat(msg)
+        text = "Sorry, I encountered an error."
+        if runtime is not None and channel in self._LOCAL_OUTBOUND_CHANNELS:
+            session = runtime.sessions.get_or_create(f"{channel}:{chat_id}")
+            session.add_message("assistant", text)
+            runtime.sessions.save(session)
+            return
+        await self.bus.publish_outbound(OutboundMessage(
+            channel=channel,
+            chat_id=chat_id,
+            content=text,
+        ))
 
     async def close_mcp(self) -> None:
         """Drain pending background archives, then close MCP connections."""
@@ -723,11 +798,12 @@ class AgentLoop:
                 sender_id=msg.sender_id,
             )
             history = session.get_history(max_messages=0)
-            current_role = "assistant" if msg.sender_id == "subagent" else "user"
+            # Always a user turn. An assistant role makes the model treat the
+            # notice as its own previous reply and skip the rest of the task.
             messages = runtime.context.build_messages(
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
-                current_role=current_role,
+                current_role="user",
             )
             final_content, _, all_msgs = await self._run_agent_loop(
                 runtime,
@@ -737,6 +813,17 @@ class AgentLoop:
                 message_id=msg.metadata.get("message_id"),
                 sender_id=msg.sender_id,
             )
+            if not (final_content or "").strip():
+                final_content = "Background task completed."
+                if (
+                    all_msgs
+                    and all_msgs[-1].get("role") == "assistant"
+                    and not str(all_msgs[-1].get("content") or "").strip()
+                    and not all_msgs[-1].get("tool_calls")
+                ):
+                    all_msgs[-1]["content"] = final_content
+                else:
+                    all_msgs.append({"role": "assistant", "content": final_content})
             self._save_turn(session, all_msgs, 1 + len(history))
             runtime.sessions.save(session)
             self._schedule_background(runtime.memory_consolidator.maybe_consolidate_by_tokens(session))

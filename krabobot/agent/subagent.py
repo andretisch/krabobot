@@ -4,12 +4,12 @@ import asyncio
 import json
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from loguru import logger
 
 from krabobot.agent.hook import AgentHook, AgentHookContext
-from krabobot.agent.runner import AgentRunSpec, AgentRunner
+from krabobot.agent.runner import AgentRunner, AgentRunSpec
 from krabobot.agent.skills import BUILTIN_SKILLS_DIR
 from krabobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from krabobot.agent.tools.registry import ToolRegistry
@@ -19,6 +19,9 @@ from krabobot.bus.events import InboundMessage
 from krabobot.bus.queue import MessageBus
 from krabobot.config.schema import ExecToolConfig
 from krabobot.providers.base import LLMProvider
+
+if TYPE_CHECKING:
+    from krabobot.config.schema import WebSearchConfig
 
 
 class _SubagentHook(AgentHook):
@@ -49,6 +52,8 @@ class SubagentManager:
         web_proxy: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
         restrict_to_workspace: bool = False,
+        on_background_done: Callable[[InboundMessage], None] | None = None,
+        consumer_alive: Callable[[], bool] | None = None,
     ):
         from krabobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -60,6 +65,8 @@ class SubagentManager:
         self.web_proxy = web_proxy
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
+        self._on_background_done = on_background_done
+        self._consumer_alive = consumer_alive
         self.runner = AgentRunner(provider)
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
@@ -122,13 +129,18 @@ class SubagentManager:
             tools.register(EditFileTool(workspace=runtime_workspace, allowed_dir=allowed_dir))
             tools.register(ListDirTool(workspace=runtime_workspace, allowed_dir=allowed_dir))
             if self.exec_config.enable:
-                tools.register(ExecTool(
+                exec_tool = ExecTool(
                     working_dir=str(runtime_workspace),
                     timeout=self.exec_config.timeout,
                     restrict_to_workspace=self.restrict_to_workspace,
                     path_append=self.exec_config.path_append,
                     internal_url_allowlist=self.exec_config.internal_url_allowlist,
-                ))
+                    bus=self.bus,
+                    on_background_done=self._on_background_done,
+                    consumer_alive=self._consumer_alive,
+                )
+                exec_tool.set_context(origin["channel"], origin["chat_id"], user_id=user_id)
+                tools.register(exec_tool)
             tools.register(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
             tools.register(WebFetchTool(proxy=self.web_proxy))
 
@@ -200,9 +212,11 @@ Task: {task}
 Result:
 {result}
 
-Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not mention technical details like "subagent" or task IDs."""
+This is a new turn. The background task you started has finished.
+Resume the user's unfinished work now: use this result, finish any remaining
+deliverable, and send it. Do not stop at a status acknowledgement.
+Do not mention technical details like "subagent" or task IDs unless asked."""
 
-        # Inject as system message to trigger main agent
         msg = InboundMessage(
             channel="system",
             sender_id="subagent",
@@ -211,8 +225,24 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
             user_id=user_id,
         )
 
-        await self.bus.publish_inbound(msg)
+        await self._publish_wakeup(msg)
         logger.debug("Subagent [{}] announced result to {}:{}", task_id, origin['channel'], origin['chat_id'])
+
+    async def _publish_wakeup(self, msg: InboundMessage) -> None:
+        """Hand a completion to the main agent.
+
+        The bus consumer (``AgentLoop.run``) is the normal path. If that loop
+        is not running, dispatch the turn directly so the notice is not stuck
+        in the queue until something else publishes inbound.
+        """
+        if (
+            self._on_background_done is not None
+            and self._consumer_alive is not None
+            and not self._consumer_alive()
+        ):
+            self._on_background_done(msg)
+            return
+        await self.bus.publish_inbound(msg)
 
     @staticmethod
     def _format_partial_progress(result) -> str:

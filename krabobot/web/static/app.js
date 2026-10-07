@@ -1750,20 +1750,100 @@
     }
   }
 
+  let syncedVisibleCount = 0;
+  let turnInFlight = false;
+  let historyLoading = false;
+  let sessionPollTimer = 0;
+
+  function chatViewIsOpen() {
+    return !!(
+      viewChat &&
+      !viewChat.hidden &&
+      !viewChat.classList.contains("kb-view--hidden")
+    );
+  }
+
+  function appendVisibleMessage(m) {
+    const role = m.role === "user" ? "user" : "assistant";
+    appendMessage(role, String(m.content || ""));
+  }
+
   async function loadHistoryForSession(id) {
+    historyLoading = true;
     logEl.innerHTML = "";
+    syncedVisibleCount = 0;
     setStatus("Загрузка истории…");
     try {
       const msgs = await fetchSessionMessages(id);
-      for (const m of msgs) {
-        const role = m.role === "user" ? "user" : "assistant";
-        appendMessage(role, String(m.content || ""));
+      if (getSessionId() !== id) {
+        return;
       }
+      for (const m of msgs) {
+        appendVisibleMessage(m);
+      }
+      syncedVisibleCount = msgs.length;
       setStatus("");
     } catch (err) {
       setStatus("");
       appendMessage("assistant", String(err.message || err), "error");
+    } finally {
+      historyLoading = false;
     }
+  }
+
+  async function pullSessionUpdates() {
+    if (turnInFlight || historyLoading || document.hidden || !chatViewIsOpen()) {
+      return;
+    }
+    const id = getSessionId();
+    let msgs;
+    try {
+      msgs = await fetchSessionMessages(id);
+    } catch (err) {
+      console.warn(err);
+      return;
+    }
+    if (getSessionId() !== id || turnInFlight || historyLoading) {
+      return;
+    }
+    if (msgs.length <= syncedVisibleCount) {
+      return;
+    }
+    for (const m of msgs.slice(syncedVisibleCount)) {
+      appendVisibleMessage(m);
+    }
+    syncedVisibleCount = msgs.length;
+  }
+
+  async function absorbServerTail(locallyRendered) {
+    const id = getSessionId();
+    try {
+      const msgs = await fetchSessionMessages(id);
+      if (getSessionId() !== id) {
+        return;
+      }
+      const arrived = msgs.length - syncedVisibleCount;
+      if (arrived > locallyRendered) {
+        for (const m of msgs.slice(syncedVisibleCount + locallyRendered)) {
+          appendVisibleMessage(m);
+        }
+      }
+      if (msgs.length >= syncedVisibleCount) {
+        syncedVisibleCount = msgs.length;
+      }
+    } catch (err) {
+      console.warn(err);
+      syncedVisibleCount += locallyRendered;
+    }
+  }
+
+  function startSessionPoll() {
+    if (sessionPollTimer) {
+      return;
+    }
+    sessionPollTimer = window.setInterval(() => {
+      void pullSessionUpdates();
+    }, 3000);
   }
 
   async function sendMessage(userText, files) {
@@ -1800,12 +1880,14 @@
 
   async function postChatTurn(displayText, apiText, filesSnapshot) {
     appendMessage("user", displayText);
+    turnInFlight = true;
     sendBtn.disabled = true;
     setStatus("Запрос…");
     try {
       const reply = await sendMessage(apiText, filesSnapshot);
       appendMessage("assistant", reply);
       setStatus("");
+      await absorbServerTail(2);
       await refreshSessions();
     } catch (err) {
       const hint =
@@ -1814,7 +1896,9 @@
           : "";
       appendMessage("assistant", friendlyAttachError(err, hint), "error");
       setStatus("");
+      await absorbServerTail(1);
     } finally {
+      turnInFlight = false;
       sendBtn.disabled = false;
       inputEl.focus();
     }
@@ -2112,6 +2196,7 @@
           await refreshSettingsPanel();
           await refreshSessions();
           await loadHistoryForSession(getSessionId());
+          startSessionPoll();
         } catch (err) {
           appendMessage(
             "assistant",
@@ -2687,6 +2772,7 @@
       await refreshSettingsPanel();
       await refreshSessions();
       await loadHistoryForSession(getSessionId());
+      startSessionPoll();
     } catch (err) {
       appendMessage(
         "assistant",

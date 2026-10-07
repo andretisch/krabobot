@@ -53,7 +53,7 @@ from krabobot.api.web_users import (
     handle_users_create,
     handle_users_list,
 )
-from krabobot.bus.events import InboundMessage
+from krabobot.bus.events import InboundMessage, is_background_wakeup
 from krabobot.utils.helpers import ensure_dir, safe_filename
 
 
@@ -935,6 +935,9 @@ async def handle_web_session_messages(request: web.Request) -> web.Response:
             continue
         text = _ui_text_from_stored_content(content)
         if role == "assistant" and not text.strip():
+            continue
+        # Exec/subagent notices wake the model. They are not something the user typed.
+        if role == "user" and is_background_wakeup(text):
             continue
         out.append({"role": role, "content": text})
     return web.json_response({"object": "list", "data": out})

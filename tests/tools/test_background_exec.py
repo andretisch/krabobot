@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -198,6 +199,120 @@ async def test_background_exec_processed_by_agent_loop(tmp_path: Path) -> None:
             pytest.fail(f"Announce was not processed; messages={session.messages!r}")
 
         assert provider.chat_with_retry.await_count >= 2
+    finally:
+        loop.stop()
+        loop_task.cancel()
+        try:
+            await asyncio.wait_for(loop_task, timeout=3.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+
+
+def _loop_with_reply(tmp_path: Path, reply: str) -> tuple[Any, Any]:
+    from krabobot.agent.loop import AgentLoop
+
+    bus = MessageBus()
+    provider = MagicMock()
+    provider.get_default_model.return_value = "test-model"
+    provider.generation = GenerationSettings(max_tokens=64)
+
+    async def _chat(**_kwargs):
+        return LLMResponse(content=reply, tool_calls=[])
+
+    provider.chat_with_retry = AsyncMock(side_effect=_chat)
+    provider.chat_stream_with_retry = AsyncMock(
+        return_value=LLMResponse(content="unused", tool_calls=[])
+    )
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=tmp_path,
+        model="test-model",
+        restrict_to_workspace=True,
+        anonymize=False,
+    )
+    return loop, provider
+
+
+@pytest.mark.asyncio
+async def test_background_exec_wakes_agent_when_loop_is_not_consuming(tmp_path: Path) -> None:
+    """Completion must resume the origin session even if AgentLoop.run() is down."""
+    loop, provider = _loop_with_reply(tmp_path, "Resumed the task.")
+    exec_tool = loop.tools.get("exec")
+    assert isinstance(exec_tool, ExecTool)
+    exec_tool.set_context("api", "web-1")
+
+    await exec_tool.execute(command="echo transcript-ready", background=True, label="stt-job")
+
+    for _ in range(50):
+        session = loop.sessions.get_or_create("api:web-1")
+        texts = [
+            (m.get("content") or "")
+            for m in session.messages
+            if m.get("role") == "assistant"
+        ]
+        if any("Resumed the task." in t for t in texts):
+            break
+        await asyncio.sleep(0.1)
+    else:
+        session = loop.sessions.get_or_create("api:web-1")
+        pytest.fail(f"Agent was not resumed; messages={session.messages!r}")
+
+    assert provider.chat_with_retry.await_count == 1
+    assert loop.bus.inbound_size == 0
+    assert not (tmp_path / "users" / "system").exists()
+
+
+@pytest.mark.asyncio
+async def test_subagent_wakeup_is_a_user_turn(tmp_path: Path) -> None:
+    loop, provider = _loop_with_reply(tmp_path, "Continued.")
+    msg = InboundMessage(
+        channel="system",
+        sender_id="subagent",
+        chat_id="api:web-1",
+        content="[Subagent 'report' completed successfully]\n\nResult:\ndone",
+    )
+    response = await loop._process_message(msg, runtime=loop._default_runtime)
+    assert response is not None
+    assert response.channel == "api"
+    assert response.chat_id == "web-1"
+    sent = provider.chat_with_retry.await_args.kwargs["messages"]
+    wake = next(m for m in sent if "[Subagent" in str(m.get("content")))
+    assert wake["role"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_run_survives_non_string_inbound(tmp_path: Path) -> None:
+    loop, _provider = _loop_with_reply(tmp_path, "Still alive.")
+    loop_task = asyncio.create_task(loop.run())
+    try:
+        await asyncio.sleep(0.05)
+        await loop.bus.publish_inbound(InboundMessage(
+            channel="api",
+            sender_id="x",
+            chat_id="x",
+            content=[{"type": "text", "text": "not a plain string"}],
+        ))
+        await loop.bus.publish_inbound(InboundMessage(
+            channel="system",
+            sender_id="background_exec",
+            chat_id="api:web-1",
+            content="[Background exec 'job' completed successfully]\n\ndone",
+        ))
+        for _ in range(50):
+            if loop_task.done():
+                pytest.fail(f"Agent loop exited: {loop_task.exception()!r}")
+            session = loop.sessions.get_or_create("api:web-1")
+            if any(
+                "Still alive." in (m.get("content") or "")
+                for m in session.messages
+                if m.get("role") == "assistant"
+            ):
+                break
+            await asyncio.sleep(0.1)
+        else:
+            pytest.fail("Loop stayed up but did not resume the origin session")
+        assert not loop_task.done()
     finally:
         loop.stop()
         loop_task.cancel()
