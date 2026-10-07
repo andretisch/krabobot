@@ -79,8 +79,9 @@ class ExecTool(Tool):
     def description(self) -> str:
         return (
             "Execute a shell command and return its output. "
-            "Set background=true for long-running commands: returns immediately and "
-            "notifies this session via a system message when the process exits."
+            "Set background=true for long-running commands: returns immediately. "
+            "When the process exits, this same dialogue continues and the model "
+            "processes the command output."
         )
 
     @property
@@ -108,10 +109,9 @@ class ExecTool(Tool):
                 "background": {
                     "type": "boolean",
                     "description": (
-                        "If true, run the command in the background inside the gateway "
-                        "process and announce completion into this session when it exits. "
-                        "Use for long jobs (e.g. STT); prefer over cron for same-session "
-                        "callbacks."
+                        "If true, run the command without blocking this turn. "
+                        "When the process exits, the agent loop continues in this "
+                        "same session with the command output."
                     ),
                 },
                 "label": {
@@ -181,7 +181,7 @@ class ExecTool(Tool):
         logger.info("Background exec [{}] started: {}", job_id, display_label)
         return (
             f"Background exec [{display_label}] started (id: {job_id}). "
-            "I'll notify you when it completes."
+            "When it exits, this dialogue continues with the command output."
         )
 
     async def _run_background_job(
@@ -280,6 +280,8 @@ class ExecTool(Tool):
 
         status_text = "completed successfully" if status == "ok" else "failed"
         exit_line = f"Exit code: {exit_code}\n" if exit_code is not None else ""
+        # Resume the agent loop in the origin session. The output is the next
+        # input of this dialogue, not a message to deliver elsewhere.
         announce_content = f"""[Background exec '{label}' {status_text}]
 
 Command: {command}
@@ -287,11 +289,7 @@ Command: {command}
 Output:
 {result}
 
-This is a new turn. The background command you started has finished.
-Resume the user's unfinished task now: read the output and any files it wrote,
-complete the remaining work, and deliver the result.
-Do not stop at a status acknowledgement.
-Do not mention technical details like job IDs unless asked."""
+The exec tool finished. Continue processing this dialogue from the output above."""
 
         msg = InboundMessage(
             channel="system",

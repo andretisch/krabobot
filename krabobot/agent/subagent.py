@@ -212,10 +212,7 @@ Task: {task}
 Result:
 {result}
 
-This is a new turn. The background task you started has finished.
-Resume the user's unfinished work now: use this result, finish any remaining
-deliverable, and send it. Do not stop at a status acknowledgement.
-Do not mention technical details like "subagent" or task IDs unless asked."""
+The task finished. Continue processing this dialogue from the result above."""
 
         msg = InboundMessage(
             channel="system",

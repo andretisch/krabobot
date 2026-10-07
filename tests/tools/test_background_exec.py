@@ -259,6 +259,21 @@ async def test_background_exec_wakes_agent_when_loop_is_not_consuming(tmp_path: 
         pytest.fail(f"Agent was not resumed; messages={session.messages!r}")
 
     assert provider.chat_with_retry.await_count == 1
+    sent = provider.chat_with_retry.await_args.kwargs["messages"]
+    wake = next(m for m in sent if "[Background exec" in str(m.get("content")))
+    assert wake["role"] == "user"
+    body = str(wake["content"])
+    assert "transcript-ready" in body
+    assert "Continue processing this dialogue" in body
+    assert "deliver" not in body.lower()
+    session = loop.sessions.get_or_create("api:web-1")
+    assistant = [
+        m.get("content") or ""
+        for m in session.messages
+        if m.get("role") == "assistant"
+    ]
+    assert any("Resumed the task." in t for t in assistant)
+    assert not any(t.strip() == "transcript-ready" for t in assistant)
     assert loop.bus.inbound_size == 0
     assert not (tmp_path / "users" / "system").exists()
 
