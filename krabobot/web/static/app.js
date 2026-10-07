@@ -1185,6 +1185,7 @@
     wrap.appendChild(body);
     logEl.appendChild(wrap);
     logEl.scrollTop = logEl.scrollHeight;
+    return wrap;
   }
 
   /** Soft: ≤50 MiB — usual attach (multipart or inline). Above — folder stream upload. */
@@ -1581,7 +1582,8 @@
 
   async function fetchSessionMessages(id) {
     const r = await kbApiFetch(
-      "/v1/web/sessions/" + encodeURIComponent(id) + "/messages"
+      "/v1/web/sessions/" + encodeURIComponent(id) + "/messages",
+      { cache: "no-store", headers: { "Cache-Control": "no-cache" } }
     );
     if (!r.ok) {
       throw new Error("История: " + r.status);
@@ -1754,6 +1756,16 @@
   let turnInFlight = false;
   let historyLoading = false;
   let sessionPollTimer = 0;
+  let sessionSync = Promise.resolve();
+
+  function enqueueSessionSync(fn) {
+    const run = sessionSync.then(fn, fn);
+    sessionSync = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
 
   function chatViewIsOpen() {
     return !!(
@@ -1791,50 +1803,65 @@
     }
   }
 
-  async function pullSessionUpdates() {
-    if (turnInFlight || historyLoading || document.hidden || !chatViewIsOpen()) {
-      return;
+  function pullSessionUpdates() {
+    if (turnInFlight || historyLoading || !chatViewIsOpen()) {
+      return Promise.resolve();
     }
-    const id = getSessionId();
-    let msgs;
-    try {
-      msgs = await fetchSessionMessages(id);
-    } catch (err) {
-      console.warn(err);
-      return;
-    }
-    if (getSessionId() !== id || turnInFlight || historyLoading) {
-      return;
-    }
-    if (msgs.length <= syncedVisibleCount) {
-      return;
-    }
-    for (const m of msgs.slice(syncedVisibleCount)) {
-      appendVisibleMessage(m);
-    }
-    syncedVisibleCount = msgs.length;
+    return enqueueSessionSync(async () => {
+      if (turnInFlight || historyLoading || !chatViewIsOpen()) {
+        return;
+      }
+      const id = getSessionId();
+      let msgs;
+      try {
+        msgs = await fetchSessionMessages(id);
+      } catch (err) {
+        console.warn(err);
+        return;
+      }
+      if (getSessionId() !== id || turnInFlight || historyLoading) {
+        return;
+      }
+      if (msgs.length <= syncedVisibleCount) {
+        return;
+      }
+      for (const m of msgs.slice(syncedVisibleCount)) {
+        appendVisibleMessage(m);
+      }
+      syncedVisibleCount = msgs.length;
+    });
   }
 
-  async function absorbServerTail(locallyRendered) {
-    const id = getSessionId();
-    try {
-      const msgs = await fetchSessionMessages(id);
+  function pendingTurnNodes() {
+    return logEl.querySelectorAll(".kb-msg[data-pending-turn='1']");
+  }
+
+  function absorbServerTail() {
+    return enqueueSessionSync(async () => {
+      const id = getSessionId();
+      const pending = pendingTurnNodes();
+      let msgs;
+      try {
+        msgs = await fetchSessionMessages(id);
+      } catch (err) {
+        console.warn(err);
+        return;
+      }
       if (getSessionId() !== id) {
         return;
       }
-      const arrived = msgs.length - syncedVisibleCount;
-      if (arrived > locallyRendered) {
-        for (const m of msgs.slice(syncedVisibleCount + locallyRendered)) {
+      const unsynced = msgs.slice(syncedVisibleCount);
+      // Optimistic bubbles are this HTTP turn. A background completion can sit
+      // before or after them. Replace the bubbles with the server tail so that
+      // message is drawn without a reload.
+      if (unsynced.length >= pending.length) {
+        pending.forEach((node) => node.remove());
+        for (const m of unsynced) {
           appendVisibleMessage(m);
         }
-      }
-      if (msgs.length >= syncedVisibleCount) {
         syncedVisibleCount = msgs.length;
       }
-    } catch (err) {
-      console.warn(err);
-      syncedVisibleCount += locallyRendered;
-    }
+    });
   }
 
   function startSessionPoll() {
@@ -1844,6 +1871,14 @@
     sessionPollTimer = window.setInterval(() => {
       void pullSessionUpdates();
     }, 3000);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) {
+        void pullSessionUpdates();
+      }
+    });
+    window.addEventListener("focus", () => {
+      void pullSessionUpdates();
+    });
   }
 
   async function sendMessage(userText, files) {
@@ -1879,24 +1914,26 @@
   }
 
   async function postChatTurn(displayText, apiText, filesSnapshot) {
-    appendMessage("user", displayText);
+    const userNode = appendMessage("user", displayText);
+    userNode.dataset.pendingTurn = "1";
     turnInFlight = true;
     sendBtn.disabled = true;
     setStatus("Запрос…");
     try {
       const reply = await sendMessage(apiText, filesSnapshot);
-      appendMessage("assistant", reply);
+      const replyNode = appendMessage("assistant", reply);
+      replyNode.dataset.pendingTurn = "1";
       setStatus("");
-      await absorbServerTail(2);
+      await absorbServerTail();
       await refreshSessions();
     } catch (err) {
       const hint =
         filesSnapshot && filesSnapshot.length
           ? attachDisplayName(filesSnapshot[0])
           : "";
+      userNode.removeAttribute("data-pending-turn");
       appendMessage("assistant", friendlyAttachError(err, hint), "error");
       setStatus("");
-      await absorbServerTail(1);
     } finally {
       turnInFlight = false;
       sendBtn.disabled = false;

@@ -535,6 +535,7 @@ async def test_web_session_delete_and_messages(aiohttp_client) -> None:
 
     resp2 = await client.get("/v1/web/sessions/xyz/messages")
     assert resp2.status == 200
+    assert resp2.headers.get("Cache-Control") == "no-store"
     body = await resp2.json()
     assert body["data"] == []
 

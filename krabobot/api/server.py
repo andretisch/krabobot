@@ -940,7 +940,10 @@ async def handle_web_session_messages(request: web.Request) -> web.Response:
         if role == "user" and is_background_wakeup(text):
             continue
         out.append({"role": role, "content": text})
-    return web.json_response({"object": "list", "data": out})
+    return web.json_response(
+        {"object": "list", "data": out},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 async def handle_web_config(_request: web.Request) -> web.Response:
