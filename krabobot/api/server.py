@@ -41,6 +41,7 @@ from krabobot.api.web_config import (
     restore_backup,
     save_web_config_sections,
 )
+from krabobot.api.web_files import handle_web_file_download
 from krabobot.api.web_users import (
     handle_registration_approve,
     handle_registration_reject,
@@ -1469,6 +1470,7 @@ def create_app(
     app.router.add_get("/v1/web/config/backups", handle_web_config_backups)
     app.router.add_post("/v1/web/config/restore", handle_web_config_restore)
     app.router.add_get("/v1/web/backup/download", handle_web_backup_download)
+    app.router.add_get("/v1/web/files", handle_web_file_download)
     app.router.add_get("/v1/web/users", handle_users_list)
     app.router.add_post("/v1/web/users", handle_users_create)
     app.router.add_get("/v1/web/users/{user_id}", handle_user_get)

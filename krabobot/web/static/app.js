@@ -155,12 +155,44 @@
     }
     marked.setOptions({ gfm: true, breaks: true });
     DOMPurify.addHook("afterSanitizeAttributes", function (node) {
-      if (node.tagName === "A" && node.hasAttribute("href")) {
-        node.setAttribute("target", "_blank");
-        node.setAttribute("rel", "noopener noreferrer");
+      if (node.tagName !== "A" || !node.hasAttribute("href")) {
+        return;
       }
+      const href = node.getAttribute("href") || "";
+      if (href.indexOf("/v1/web/files?") === 0) {
+        node.setAttribute("download", "");
+        node.classList.add("kb-file-download");
+        return;
+      }
+      node.setAttribute("target", "_blank");
+      node.setAttribute("rel", "noopener noreferrer");
     });
     kbMarkdownHooksInstalled = true;
+  }
+
+  function kbAnnotateFilePaths(text) {
+    const sid = encodeURIComponent(getSessionId());
+    function link(path) {
+      const href =
+        "/v1/web/files?path=" + encodeURIComponent(path) + "&session_id=" + sid;
+      return "[" + path + "](" + href + ")";
+    }
+    let out = String(text || "").replace(
+      /\[Файл сохранён в workspace:\s*([^\]]+)\]/g,
+      function (_full, path) {
+        return link(String(path || "").trim());
+      }
+    );
+    out = out.replace(
+      /(^|[\s("'«])((?:\/[^\s"'<>|*?\]]+|~\/[^\s"'<>|*?\]]+|[A-Za-z]:[\\/][^\s"'<>|*?\]]+)\.[A-Za-z0-9]{1,12})/g,
+      function (full, lead, path) {
+        if (path.indexOf("..") !== -1) {
+          return full;
+        }
+        return lead + link(path);
+      }
+    );
+    return out;
   }
 
   /**
@@ -173,7 +205,7 @@
       return null;
     }
     try {
-      const raw = marked.parse(String(text || ""), { async: false });
+      const raw = marked.parse(kbAnnotateFilePaths(text), { async: false });
       return DOMPurify.sanitize(raw);
     } catch (_e) {
       return null;
