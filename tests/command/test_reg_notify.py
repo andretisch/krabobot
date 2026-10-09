@@ -148,6 +148,29 @@ async def test_deliver_outbound_api_does_not_warn_unknown_channel(tmp_path: Path
     assert session.messages[-1]["content"] == "hello owner"
 
 
+@pytest.mark.asyncio
+async def test_api_message_with_media_is_stored_for_download(tmp_path: Path):
+    """Web chat has no channel adapter: attachment paths must land in the session."""
+    loop, bus = _make_loop(tmp_path)
+    owner = await loop.user_resolver.resolve_or_create("api", "s1")
+    await loop.user_resolver.ensure_owner(owner)
+
+    await loop._send_tool_message(
+        OutboundMessage(
+            channel="api",
+            chat_id="s1",
+            content="Отправил ещё раз",
+            media=["/home/workspace/report.docx"],
+        )
+    )
+    assert bus.outbound_size == 0
+    sm = await loop.session_manager_for_api("s1")
+    session = sm.get_or_create("api:s1")
+    text = session.messages[-1]["content"]
+    assert "Отправил ещё раз" in text
+    assert "/home/workspace/report.docx" in text
+
+
 async def _cli_session(loop, chat_id: str = "direct"):
     """Resolve the SessionManager used for local cli outbound (per-user workspace)."""
     stub = InboundMessage(channel="cli", sender_id=chat_id, chat_id="default", content="")

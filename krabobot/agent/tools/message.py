@@ -208,6 +208,8 @@ class MessageTool(Tool):
                 except Exception:
                     meta_tts = False
             metadata["_tts_enabled_for_user"] = meta_tts
+        if recipient_user_id and "_user_id" not in metadata:
+            metadata["_user_id"] = recipient_user_id
 
         msg = OutboundMessage(
             channel=channel,

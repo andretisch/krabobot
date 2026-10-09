@@ -178,6 +178,15 @@
       return "[" + path + "](" + href + ")";
     }
     let out = String(text || "").replace(
+      /!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g,
+      function (full, path) {
+        if (/^(https?:|data:|\/v1\/)/i.test(path)) {
+          return full;
+        }
+        return link(path);
+      }
+    );
+    out = out.replace(
       /\[Файл сохранён в workspace:\s*([^\]]+)\]/g,
       function (_full, path) {
         return link(String(path || "").trim());

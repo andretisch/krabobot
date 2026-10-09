@@ -354,7 +354,14 @@ class AgentLoop:
         instead of silently queueing messages that channels will later skip.
         """
         channel = (msg.channel or "").strip().lower()
-        if channel in {"", "cli", "system", "api", "voice"}:
+        if channel in {"api", "voice"}:
+            await self.deliver_outbound(msg)
+            return
+        if channel == "cli":
+            await self.deliver_outbound(msg)
+            await self.bus.publish_outbound(msg)
+            return
+        if channel in {"", "system"}:
             await self.bus.publish_outbound(msg)
             return
 
@@ -1109,7 +1116,7 @@ class AgentLoop:
         channel = (msg.channel or "").strip().lower()
         session_id = (msg.chat_id or "").strip() or "default"
         key = f"{channel}:{session_id}"
-        content = (msg.content or "").strip()
+        content = self._local_outbound_text(msg)
         if not content:
             return
         stub = InboundMessage(
@@ -1124,6 +1131,19 @@ class AgentLoop:
         session.add_message("assistant", content, source="local_outbound")
         runtime.sessions.save(session)
         logger.info("Delivered local outbound to session {}", key)
+
+    @staticmethod
+    def _local_outbound_text(msg: OutboundMessage) -> str:
+        """Text plus attachment paths. Paths are what the web chat turns into downloads."""
+        parts: list[str] = []
+        content = (msg.content or "").strip()
+        if content:
+            parts.append(content)
+        for raw in msg.media or []:
+            path = str(raw or "").strip()
+            if path and path not in parts:
+                parts.append(path)
+        return "\n".join(parts)
 
     async def process_direct(
         self,
