@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import os
 import time
@@ -38,6 +39,23 @@ from krabobot.utils.helpers import sync_workspace_templates
 if TYPE_CHECKING:
     from krabobot.config.schema import ChannelsConfig, ExecToolConfig, WebSearchConfig
     from krabobot.cron.service import CronService
+
+
+class _LocalTurn:
+    """File paths from a message-tool send into the session that is being answered."""
+
+    __slots__ = ("key", "paths", "note")
+
+    def __init__(self, key: str) -> None:
+        self.key = key
+        self.paths: list[str] = []
+        self.note = ""
+
+
+_local_turn: contextvars.ContextVar[_LocalTurn | None] = contextvars.ContextVar(
+    "krabobot_local_turn",
+    default=None,
+)
 
 
 @dataclass(slots=True)
@@ -355,6 +373,19 @@ class AgentLoop:
         """
         channel = (msg.channel or "").strip().lower()
         if channel in {"api", "voice"}:
+            target = f"{channel}:{(msg.chat_id or '').strip() or 'default'}"
+            turn = _local_turn.get()
+            # Same chat that is open right now: the model's reply is already the
+            # message. A second bubble would only repeat it. Keep the file paths.
+            if turn is not None and turn.key == target:
+                note = (msg.content or "").strip()
+                if note:
+                    turn.note = note
+                for raw in msg.media or []:
+                    path = str(raw or "").strip()
+                    if path and path not in turn.paths:
+                        turn.paths.append(path)
+                return
             await self.deliver_outbound(msg)
             return
         if channel == "cli":
@@ -812,27 +843,32 @@ class AgentLoop:
                 current_message=msg.content, channel=channel, chat_id=chat_id,
                 current_role="user",
             )
-            final_content, _, all_msgs = await self._run_agent_loop(
-                runtime,
-                messages,
-                channel=channel,
-                chat_id=chat_id,
-                message_id=msg.metadata.get("message_id"),
-                sender_id=msg.sender_id,
-            )
-            if not (final_content or "").strip():
-                final_content = "Background task completed."
-                if (
-                    all_msgs
-                    and all_msgs[-1].get("role") == "assistant"
-                    and not str(all_msgs[-1].get("content") or "").strip()
-                    and not all_msgs[-1].get("tool_calls")
-                ):
-                    all_msgs[-1]["content"] = final_content
-                else:
-                    all_msgs.append({"role": "assistant", "content": final_content})
-            self._save_turn(session, all_msgs, 1 + len(history))
-            runtime.sessions.save(session)
+            turn = self._begin_local_turn(channel, chat_id)
+            try:
+                final_content, _, all_msgs = await self._run_agent_loop(
+                    runtime,
+                    messages,
+                    channel=channel,
+                    chat_id=chat_id,
+                    message_id=msg.metadata.get("message_id"),
+                    sender_id=msg.sender_id,
+                )
+                if not (final_content or "").strip():
+                    final_content = "Background task completed."
+                    if (
+                        all_msgs
+                        and all_msgs[-1].get("role") == "assistant"
+                        and not str(all_msgs[-1].get("content") or "").strip()
+                        and not all_msgs[-1].get("tool_calls")
+                    ):
+                        all_msgs[-1]["content"] = final_content
+                    else:
+                        all_msgs.append({"role": "assistant", "content": final_content})
+                self._save_turn(session, all_msgs, 1 + len(history))
+                self._attach_turn_files(session)
+                runtime.sessions.save(session)
+            finally:
+                self._reset_local_turn(turn)
             self._schedule_background(runtime.memory_consolidator.maybe_consolidate_by_tokens(session))
             return OutboundMessage(channel=channel, chat_id=chat_id,
                                   content=final_content or "Background task completed.")
@@ -910,26 +946,43 @@ class AgentLoop:
                 channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
             ))
 
-        final_content, _, all_msgs = await self._run_agent_loop(
-            runtime,
-            initial_messages,
-            on_progress=on_progress or _bus_progress,
-            on_stream=on_stream,
-            on_stream_end=on_stream_end,
-            channel=msg.channel,
-            chat_id=msg.chat_id,
-            message_id=msg.metadata.get("message_id"),
-            sender_id=msg.sender_id,
-        )
+        turn = self._begin_local_turn(msg.channel, msg.chat_id)
+        try:
+            final_content, _, all_msgs = await self._run_agent_loop(
+                runtime,
+                initial_messages,
+                on_progress=on_progress or _bus_progress,
+                on_stream=on_stream,
+                on_stream_end=on_stream_end,
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                message_id=msg.metadata.get("message_id"),
+                sender_id=msg.sender_id,
+            )
 
-        if final_content is None:
-            final_content = "I've completed processing but have no response to give."
+            if final_content is None:
+                final_content = "I've completed processing but have no response to give."
 
-        self._save_turn(session, all_msgs, 1 + len(history))
-        runtime.sessions.save(session)
+            self._save_turn(session, all_msgs, 1 + len(history))
+            self._attach_turn_files(session)
+            runtime.sessions.save(session)
+        finally:
+            self._reset_local_turn(turn)
         self._schedule_background(runtime.memory_consolidator.maybe_consolidate_by_tokens(session))
 
-        if (mt := runtime.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
+        origin = (msg.channel or "").strip().lower()
+        sent_same = (
+            (mt := runtime.tools.get("message"))
+            and isinstance(mt, MessageTool)
+            and mt._sent_in_turn
+        )
+        if sent_same and origin in {"api", "voice"}:
+            # The web client shows this return value. None makes the API retry
+            # the whole turn and the user sees the same request twice.
+            shown = self._last_assistant_text(session)
+            if shown:
+                final_content = shown
+        elif sent_same:
             return None
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
@@ -1088,6 +1141,71 @@ class AgentLoop:
 
     # Channels without ChannelManager adapters — deliver into session history instead.
     _LOCAL_OUTBOUND_CHANNELS = frozenset({"api", "cli", "voice"})
+
+    def _begin_local_turn(self, channel: str, chat_id: str) -> contextvars.Token | None:
+        channel = (channel or "").strip().lower()
+        if channel not in self._LOCAL_OUTBOUND_CHANNELS:
+            return None
+        key = f"{channel}:{(chat_id or '').strip() or 'default'}"
+        return _local_turn.set(_LocalTurn(key))
+
+    @staticmethod
+    def _reset_local_turn(token: contextvars.Token | None) -> None:
+        if token is not None:
+            _local_turn.reset(token)
+
+    def _attach_turn_files(self, session: Session) -> None:
+        """Add file paths to the reply already saved for this turn.
+
+        The message tool's own text is not written again: that text is what
+        showed up as a second bubble under the model's answer. If the turn
+        saved no answer, the tool text is the answer and is kept.
+        """
+        turn = _local_turn.get()
+        if turn is None or (not turn.paths and not turn.note):
+            return
+        for entry in reversed(session.messages):
+            if entry.get("role") != "assistant":
+                continue
+            content = entry.get("content")
+            if isinstance(content, list):
+                blob = json.dumps(content, ensure_ascii=False)
+                extra = [path for path in turn.paths if path not in blob]
+                if extra:
+                    content.append({"type": "text", "text": "\n".join(extra)})
+                return
+            if not isinstance(content, str):
+                continue
+            if not content.strip() and entry.get("tool_calls"):
+                continue
+            extra = [path for path in turn.paths if path not in content]
+            if extra:
+                entry["content"] = (content.rstrip() + "\n" + "\n".join(extra)).strip()
+            return
+        parts = [turn.note] if turn.note else []
+        parts.extend(path for path in turn.paths if path not in turn.note)
+        body = "\n".join(part for part in parts if part)
+        if body:
+            session.add_message("assistant", body)
+
+    @staticmethod
+    def _last_assistant_text(session: Session) -> str:
+        for entry in reversed(session.messages):
+            if entry.get("role") != "assistant":
+                continue
+            content = entry.get("content")
+            if isinstance(content, str) and content.strip():
+                return content
+            if isinstance(content, list):
+                lines = [
+                    str(block.get("text") or "")
+                    for block in content
+                    if isinstance(block, dict) and block.get("type") in ("text", "input_text")
+                ]
+                text = "\n".join(line for line in lines if line.strip())
+                if text.strip():
+                    return text
+        return ""
 
     async def deliver_outbound(self, msg: OutboundMessage) -> bool:
         """Deliver an outbound message without blocking the caller on channel I/O.

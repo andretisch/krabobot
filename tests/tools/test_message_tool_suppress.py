@@ -89,6 +89,44 @@ class TestMessageToolSuppressLogic:
         assert result is not None
         assert "Hello" in result.content
 
+    @pytest.mark.asyncio
+    async def test_api_same_chat_keeps_file_on_the_reply(self, tmp_path: Path) -> None:
+        """Web chat already shows the model reply. The tool text must not be a second bubble."""
+        loop = _make_loop(tmp_path)
+        tool_call = ToolCallRequest(
+            id="call1",
+            name="message",
+            arguments={
+                "content": "Вот тестовый файл",
+                "channel": "api",
+                "chat_id": "s1",
+                "media": ["/home/workspace/test_file.txt"],
+            },
+        )
+        calls = iter([
+            LLMResponse(content="", tool_calls=[tool_call]),
+            LLMResponse(content="Готово! Отправил тестовый файл", tool_calls=[]),
+        ])
+        loop.provider.chat_with_retry = AsyncMock(side_effect=lambda *a, **kw: next(calls))
+        loop.tools.get_definitions = MagicMock(return_value=[])
+
+        msg = InboundMessage(channel="api", sender_id="s1", chat_id="s1", content="пришли файл")
+        runtime = await loop._runtime_for_message(msg)
+        result = await loop._process_message(msg, runtime=runtime)
+
+        assert result is not None
+        assert "Готово" in result.content
+        assert "/home/workspace/test_file.txt" in result.content
+        assert "Вот тестовый файл" not in result.content
+        visible = [
+            m for m in runtime.sessions.get_or_create("api:s1").messages
+            if m.get("role") == "assistant" and str(m.get("content") or "").strip()
+            and not (m.get("tool_calls") and not str(m.get("content") or "").strip())
+        ]
+        texts = [str(m.get("content") or "") for m in visible if "Готово" in str(m.get("content"))]
+        assert len(texts) == 1
+        assert texts[0].count("/home/workspace/test_file.txt") == 1
+
     async def test_progress_hides_internal_reasoning(self, tmp_path: Path) -> None:
         loop = _make_loop(tmp_path)
         tool_call = ToolCallRequest(id="call1", name="read_file", arguments={"path": "foo.txt"})
