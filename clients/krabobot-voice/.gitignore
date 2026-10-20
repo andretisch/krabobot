@@ -17,3 +17,5 @@ packaging/*~
 /models/
 # Meeting WAV / runtime recordings next to the app
 /meetings/
+# Local mic/audio probe scratch (ffmpeg, WASAPI/WDM-KS, WebView2)
+/_mic_probes/
