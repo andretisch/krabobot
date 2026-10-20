@@ -54,6 +54,7 @@ def _user_payload(agent_loop: Any, entry: dict[str, Any]) -> dict[str, Any]:
         "is_owner": bool(entry.get("is_owner")),
         "tts_enabled": bool(entry.get("tts_enabled")),
         "accounts": list(entry.get("accounts") or []),
+        "ldap_usernames": list(entry.get("ldap_usernames") or []),
     }
 
 
@@ -96,6 +97,7 @@ async def handle_users_create(request: web.Request) -> web.Response:
             "accounts": ([f"{channel}:{sender_id}"] if channel and sender_id else []),
             "tts_enabled": False,
             "is_owner": False,
+            "ldap_usernames": [],
         }
     return web.json_response(
         {"object": "user", **_user_payload(agent_loop, entry)},
@@ -254,8 +256,68 @@ async def handle_user_link_remove(request: web.Request) -> web.Response:
                 "is_owner": await agent_loop.user_resolver.is_owner(user_id),
                 "tts_enabled": False,
                 "accounts": [],
+                "ldap_usernames": [],
             }
         )
+    return web.json_response({"object": "user", **_user_payload(agent_loop, entry)})
+
+
+async def handle_user_ldap_add(request: web.Request) -> web.Response:
+    """POST /v1/web/users/{user_id}/ldap — {username: sAMAccountName}."""
+    agent_loop = request.app["agent_loop"]
+    user_id = request.match_info.get("user_id", "").strip()
+    if not user_id:
+        return _error(400, "Missing user id")
+    if not await agent_loop.user_resolver.user_exists(user_id):
+        return _error(404, "User not found", err_type="not_found")
+    try:
+        body = await request.json()
+    except Exception:
+        return _error(400, "Invalid JSON body")
+    username = str((body or {}).get("username") or "").strip()
+    if not username:
+        return _error(400, "username is required")
+    try:
+        await agent_loop.user_resolver.link_ldap(user_id, username)
+    except ValueError as exc:
+        code = str(exc)
+        if code == "ldap_identity_taken":
+            return _error(409, "Эта доменная учётная запись уже привязана к другому пользователю")
+        return _error(400, "Некорректное доменное имя")
+    users = await agent_loop.user_resolver.list_users()
+    entry = next((u for u in users if u["user_id"] == user_id), None)
+    if entry is None:
+        return _error(404, "User not found", err_type="not_found")
+    return web.json_response({"object": "user", **_user_payload(agent_loop, entry)})
+
+
+async def handle_user_ldap_remove(request: web.Request) -> web.Response:
+    """DELETE /v1/web/users/{user_id}/ldap — {username}."""
+    agent_loop = request.app["agent_loop"]
+    user_id = request.match_info.get("user_id", "").strip()
+    if not user_id:
+        return _error(400, "Missing user id")
+    if not await agent_loop.user_resolver.user_exists(user_id):
+        return _error(404, "User not found", err_type="not_found")
+    username = ""
+    if request.can_read_body:
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                username = str(body.get("username") or "").strip()
+        except Exception:
+            pass
+    if not username:
+        username = (request.rel_url.query.get("username") or "").strip()
+    if not username:
+        return _error(400, "username is required")
+    removed = await agent_loop.user_resolver.unlink_ldap(user_id, username)
+    if not removed:
+        return _error(404, "LDAP link not found for this user", err_type="not_found")
+    users = await agent_loop.user_resolver.list_users()
+    entry = next((u for u in users if u["user_id"] == user_id), None)
+    if entry is None:
+        return _error(404, "User not found", err_type="not_found")
     return web.json_response({"object": "user", **_user_payload(agent_loop, entry)})
 
 

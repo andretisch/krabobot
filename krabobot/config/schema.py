@@ -84,6 +84,37 @@ class ApiAuthConfig(Base):
     admin_token: str = ""  # optional persistent Bearer token (API key)
 
 
+class LdapConfig(Base):
+    """Active Directory / LDAP sign-in for the web UI (GitLab-style).
+
+    Omitted or ``enabled: false`` keeps the feature off; old configs still load.
+    ``bind_password`` belongs only in the user's config.json.
+
+    ``user_filter`` may contain ``%{username}`` (replaced with the escaped login).
+    Without that placeholder the username attribute is AND-ed with the filter,
+    same idea as GitLab's ``uid`` + ``user_filter``.
+
+    ``auto_create`` (default true): after a successful LDAP bind, a missing local
+    user is created and may use web chat only. The owner (password / admin token,
+    or an LDAP identity linked to the owner) keeps admin and settings.
+    """
+
+    enabled: bool = False
+    host: str = ""
+    port: int = Field(default=389, ge=1, le=65535)
+    use_ssl: bool = False
+    start_tls: bool = False
+    verify_certificates: bool = True
+    bind_dn: str = ""
+    bind_password: str = ""
+    base_dn: str = ""
+    user_filter: str = "(sAMAccountName=%{username})"
+    username_attribute: str = "sAMAccountName"
+    display_name_attribute: str = "displayName"
+    email_attribute: str = "mail"
+    auto_create: bool = True
+
+
 class ApiConfig(Base):
     """OpenAI-compatible API server configuration."""
 
@@ -201,6 +232,7 @@ class Config(BaseSettings):
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     tts: TTSConfig = Field(default_factory=TTSConfig)
     stt: STTConfig = Field(default_factory=STTConfig)
+    ldap: LdapConfig = Field(default_factory=LdapConfig)
 
     @property
     def workspace_path(self) -> Path:

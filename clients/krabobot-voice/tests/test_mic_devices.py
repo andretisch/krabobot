@@ -97,6 +97,15 @@ def test_candidates_include_none_and_skip_mapper(fake_sd: _FakeSd) -> None:
     assert all(c[0] != 0 for c in cands)
 
 
+def test_wdmks_candidates_prefer_lenovo(fake_sd: _FakeSd) -> None:
+    rows = audio_io._wdmks_input_candidates("Lenovo")
+    assert rows
+    assert rows[0][0] == 3  # Mic WDM is the only WDM-KS input in fixture
+    # Preferred WASAPI name still maps to WDM-KS list (name-based open path).
+    rows2 = audio_io._wdmks_input_candidates(1)
+    assert rows2 and rows2[0][0] == 3
+
+
 def test_mic_privacy_hint_mentions_exe_when_frozen(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(audio_io, "_is_frozen", lambda: True)
     text = audio_io.mic_privacy_hint()
@@ -105,6 +114,39 @@ def test_mic_privacy_hint_mentions_exe_when_frozen(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(audio_io, "_is_frozen", lambda: False)
     text2 = audio_io.mic_privacy_hint()
     assert "python.exe" in text2.lower() or "Python" in text2
+
+
+def test_mic_read_block_serves_carry_without_reading_more() -> None:
+    """Large WDM-KS callback chunks must drain from carry at realtime pace.
+
+    Regression: reading more raw while a full block was already buffered
+    throttled capture to <0.5x realtime and lag grew without bound, so
+    wake speech reached ASR far too late to match.
+    """
+    import numpy as np
+
+    mic = object.__new__(audio_io.MicStream)
+    mic.sample_rate = 16000
+    mic.block = 480
+    mic._stream = object()  # carry path must not touch the stream
+    mic._carry = np.full(1000, 0.5, dtype=np.float32)
+    out = mic.read_block()
+    assert out.shape == (480,)
+    assert int(out[0]) > 16000
+    assert mic._carry.size == 520
+
+
+def test_loopback_read_block_serves_carry_without_reading_more() -> None:
+    import numpy as np
+
+    lb = object.__new__(audio_io.LoopbackStream)
+    lb.sample_rate = 16000
+    lb.block = 480
+    lb._stream = object()
+    lb._carry = np.full(1000, 0.5, dtype=np.float32)
+    out = lb.read_block()
+    assert out.shape == (480,)
+    assert lb._carry.size == 520
 
 
 def test_format_input_devices_lines(fake_sd: _FakeSd) -> None:

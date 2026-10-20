@@ -81,4 +81,8 @@ def _migrate_config(data: dict) -> dict:
             if isinstance(blob, dict):
                 blob.pop("ttsEnabled", None)
                 blob.pop("tts_enabled", None)
+    # Missing LDAP block stays disabled via schema defaults. Explicit null must
+    # not fail validation on configs written before the section existed.
+    if "ldap" in data and data.get("ldap") is None:
+        data.pop("ldap", None)
     return data

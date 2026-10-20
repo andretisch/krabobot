@@ -15,7 +15,9 @@ from krabobot.providers.registry import PROVIDERS
 
 # Known channel-wide flags (camelCase aliases from model_dump by_alias=True)
 _CHANNEL_COMMON_KEYS: frozenset[str] = frozenset({"sendProgress", "sendToolHints", "sendMaxRetries"})
-_OTHER_SECTION_KEYS_UI: frozenset[str] = frozenset({"api", "gateway", "tools", "tts", "stt"})
+_OTHER_SECTION_KEYS_UI: frozenset[str] = frozenset(
+    {"api", "gateway", "tools", "tts", "stt", "ldap"}
+)
 SECRET_DISPLAY_MASK = "••••••••"
 _BACKUP_LEGACY = re.compile(r"^config\.backup\.[0-9]{8}-[0-9]{6}\.json$")
 # Microseconds + optional hex disambiguator (Windows clock often shares the same %f).
@@ -154,7 +156,7 @@ def build_web_config_payload() -> dict[str, Any]:
     ch_named = {k: v for k, v in sorted(raw_channels.items()) if k not in _CHANNEL_COMMON_KEYS}
 
     other: dict[str, Any] = {}
-    for key in ("api", "gateway", "tools", "tts", "stt"):
+    for key in ("api", "gateway", "tools", "tts", "stt", "ldap"):
         if key in data:
             other[key] = data[key]
 

@@ -1312,10 +1312,15 @@ body {
   box-sizing: border-box;
 }
 
+.kb-auth-user-label,
 .kb-auth-token-label {
   margin-top: 0.35rem;
   font-size: 0.78rem;
   color: var(--muted);
+}
+
+.kb-dropdown-item[hidden] {
+  display: none;
 }
 
 /* —— Admin —— */

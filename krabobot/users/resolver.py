@@ -118,6 +118,89 @@ class UserResolver:
             logger.info("Unlinked account {}", account)
             return True
 
+    async def lookup_ldap(self, username: str) -> str | None:
+        """User id linked to a domain login, or None. Does not touch channel accounts."""
+        from krabobot.users.ldap_auth import normalize_ldap_username
+
+        key = normalize_ldap_username(username)
+        if not key:
+            return None
+        async with self._lock:
+            db = self._load()
+            found = (db.get("ldap_identities") or {}).get(key)
+            return str(found) if found else None
+
+    async def link_ldap(self, user_id: str, username: str) -> None:
+        """Attach a domain login to an existing user. One login maps to one user."""
+        from krabobot.users.ldap_auth import normalize_ldap_username
+
+        uid = str(user_id or "").strip()
+        key = normalize_ldap_username(username)
+        if not uid or not key:
+            raise ValueError("invalid_ldap_username")
+        async with self._lock:
+            db = self._load()
+            ldap_map = db.setdefault("ldap_identities", {})
+            current = str(ldap_map.get(key) or "").strip()
+            if current and current != uid:
+                raise ValueError("ldap_identity_taken")
+            ldap_map[key] = uid
+            self._save(db)
+            logger.info("Linked LDAP identity {} to user {}", key, uid)
+
+    async def unlink_ldap(self, user_id: str, username: str) -> bool:
+        """Remove a domain login from this user. False if it is not their link."""
+        from krabobot.users.ldap_auth import normalize_ldap_username
+
+        uid = str(user_id or "").strip()
+        key = normalize_ldap_username(username)
+        if not uid or not key:
+            return False
+        async with self._lock:
+            db = self._load()
+            ldap_map = db.get("ldap_identities") or {}
+            if str(ldap_map.get(key) or "") != uid:
+                return False
+            del ldap_map[key]
+            db["ldap_identities"] = ldap_map
+            self._save(db)
+            logger.info("Unlinked LDAP identity {}", key)
+            return True
+
+    async def resolve_ldap_identity(
+        self,
+        username: str,
+        *,
+        display_name: str,
+        auto_create: bool,
+    ) -> tuple[str | None, bool]:
+        """Return ``(user_id, created)`` for a directory login.
+
+        Does not assign ``owner_user_id``. ``(None, False)`` means the login is
+        not linked and auto-create is off. Channel account keys are not written.
+        """
+        from krabobot.users.ldap_auth import normalize_ldap_username
+
+        key = normalize_ldap_username(username)
+        if not key:
+            return None, False
+        async with self._lock:
+            db = self._load()
+            ldap_map = db.setdefault("ldap_identities", {})
+            existing = str(ldap_map.get(key) or "").strip()
+            if existing:
+                return existing, False
+            if not auto_create:
+                return None, False
+            user_id = uuid.uuid4().hex
+            prefs = db.setdefault("user_prefs", {})
+            user_pref = prefs.setdefault(user_id, {})
+            user_pref["display_name"] = (display_name or "").strip() or key
+            ldap_map[key] = user_id
+            self._save(db)
+            logger.info("Provisioned LDAP user {} as {}", key, user_id)
+            return user_id, True
+
     async def accounts_for_user(self, user_id: str) -> list[str]:
         """Return all account keys linked to a user id."""
         if not user_id:
@@ -370,54 +453,53 @@ class UserResolver:
             accounts = db.get("accounts", {}) or {}
             prefs = db.get("user_prefs", {}) or {}
             owner = str(db.get("owner_user_id") or "").strip()
+            ldap_raw = dict(db.get("ldap_identities") or {})
+
+        def _blank(user_id: str, *, is_owner: bool = False) -> dict[str, Any]:
+            return {
+                "user_id": user_id,
+                "display_name": "",
+                "accounts": [],
+                "ldap_usernames": [],
+                "tts_enabled": False,
+                "is_owner": is_owner,
+            }
 
         by_id: dict[str, dict[str, Any]] = {}
         if owner:
-            by_id[owner] = {
-                "user_id": owner,
-                "display_name": "",
-                "accounts": [],
-                "tts_enabled": False,
-                "is_owner": True,
-            }
+            by_id[owner] = _blank(owner, is_owner=True)
         for account_key, uid in accounts.items():
             user_id = str(uid)
             if not user_id:
                 continue
-            entry = by_id.setdefault(
-                user_id,
-                {
-                    "user_id": user_id,
-                    "display_name": "",
-                    "accounts": [],
-                    "tts_enabled": False,
-                    "is_owner": False,
-                },
-            )
+            entry = by_id.setdefault(user_id, _blank(user_id))
             entry["accounts"].append(str(account_key))
 
         for user_id, pref in prefs.items():
             uid = str(user_id)
             if not uid:
                 continue
-            entry = by_id.setdefault(
-                uid,
-                {
-                    "user_id": uid,
-                    "display_name": "",
-                    "accounts": [],
-                    "tts_enabled": False,
-                    "is_owner": False,
-                },
-            )
+            entry = by_id.setdefault(uid, _blank(uid))
             if isinstance(pref, dict):
                 entry["display_name"] = str(pref.get("display_name") or "").strip()
                 if pref.get("tts_enabled") is not None:
                     entry["tts_enabled"] = bool(pref.get("tts_enabled"))
 
+        ldap_by_user: dict[str, list[str]] = {}
+        for name, uid in ldap_raw.items():
+            ldap_by_user.setdefault(str(uid), []).append(str(name))
+        for uid, names in ldap_by_user.items():
+            if not uid:
+                continue
+            entry = by_id.setdefault(uid, _blank(uid))
+            names.sort()
+            entry["ldap_usernames"] = names
+
         for entry in by_id.values():
             entry["is_owner"] = bool(owner) and entry["user_id"] == owner
             entry["accounts"].sort()
+            entry.setdefault("ldap_usernames", [])
+            entry["ldap_usernames"] = sorted(entry["ldap_usernames"])
 
         users = list(by_id.values())
         users.sort(key=lambda u: (not u["is_owner"], u["user_id"]))
@@ -475,6 +557,10 @@ class UserResolver:
             for k in to_drop:
                 del accounts[k]
             db["accounts"] = accounts
+            ldap_map = db.get("ldap_identities") or {}
+            db["ldap_identities"] = {
+                k: v for k, v in ldap_map.items() if str(v) != uid
+            }
             prefs = db.get("user_prefs", {}) or {}
             prefs.pop(uid, None)
             db["user_prefs"] = prefs
@@ -493,6 +579,9 @@ class UserResolver:
                 return True
             accounts = db.get("accounts", {}) or {}
             if any(str(v) == uid for v in accounts.values()):
+                return True
+            ldap_map = db.get("ldap_identities") or {}
+            if any(str(v) == uid for v in ldap_map.values()):
                 return True
             prefs = db.get("user_prefs", {}) or {}
             return uid in prefs
@@ -580,6 +669,7 @@ class UserResolver:
                 "owner_user_id": None,
                 "registration_requests": {},
                 "registration_codes": {},
+                "ldap_identities": {},
             }
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
@@ -590,6 +680,7 @@ class UserResolver:
                 data.setdefault("owner_user_id", None)
                 data.setdefault("registration_requests", {})
                 data.setdefault("registration_codes", {})
+                data.setdefault("ldap_identities", {})
                 return data
         except Exception:
             logger.exception("Failed to load user links from {}", self._path)
@@ -600,6 +691,7 @@ class UserResolver:
             "owner_user_id": None,
             "registration_requests": {},
             "registration_codes": {},
+            "ldap_identities": {},
         }
 
     def _save(self, payload: dict[str, Any]) -> None:

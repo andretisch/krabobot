@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import queue
 import sys
 import tempfile
 import threading
@@ -388,10 +389,70 @@ def resolve_preferred_input_device(
     return None
 
 
+def _is_wdmks_hostapi(hostapi_index: int) -> bool:
+    return "WDM-KS" in _hostapi_name(hostapi_index)
+
+
+def _resolve_preferred_name(preferred: str | int | None) -> str:
+    """Map preferred index/name to a device name for cross-hostapi matching."""
+    if preferred is None or str(preferred).strip() == "":
+        return ""
+    require_sounddevice()
+    try:
+        if isinstance(preferred, int) or str(preferred).strip().isdigit():
+            info = sd.query_devices(int(preferred))
+            return str(info.get("name") or "")
+        return str(preferred).strip()
+    except Exception:
+        return str(preferred).strip()
+
+
+def _wdmks_input_candidates(
+    preferred: str | int | None = None,
+) -> list[tuple[int, int, int]]:
+    """WDM-KS input devices (callback PortAudio API). Prefer name match / Lenovo.
+
+    When the preferred/Lenovo device is absent, other present WDM-KS inputs
+    follow (microphone-named first) so capture falls back instead of waiting
+    on a dead device.
+    """
+    require_sounddevice()
+    needle = _resolve_preferred_name(preferred).lower()
+    rows: list[tuple[int, int, int, str]] = []
+    for i, info in enumerate(sd.query_devices()):
+        if int(info.get("max_input_channels") or 0) < 1:
+            continue
+        if not _is_wdmks_hostapi(int(info.get("hostapi") or 0)):
+            continue
+        rate = int(info.get("default_samplerate") or 48000)
+        ch = min(2, int(info.get("max_input_channels") or 1))
+        name = str(info.get("name") or "")
+        rows.append((i, rate, ch, name))
+    if not rows:
+        return []
+
+    def score(row: tuple[int, int, int, str]) -> tuple[int, int]:
+        _i, _r, _c, name = row
+        low = name.lower()
+        if needle and needle in low:
+            return (0, _i)
+        if "lenovo" in low or "headset" in low:
+            return (1, _i)
+        if "microphone" in low or "микрофон" in low:
+            return (2, _i)
+        return (3, _i)
+
+    rows.sort(key=score)
+    return [(i, rate, ch) for i, rate, ch, _name in rows]
+
+
 def _candidate_input_devices(
     preferred: str | int | None = None,
 ) -> list[tuple[int | None, int, int]]:
-    """Return (device_id|None, sample_rate, channels) candidates for open attempts."""
+    """Return (device_id|None, sample_rate, channels) candidates for open attempts.
+
+    WDM-KS is handled separately via callback (blocking API unsupported).
+    """
     require_sounddevice()
     out: list[tuple[int | None, int, int]] = []
     seen: set[tuple[int | None, int, int]] = set()
@@ -482,53 +543,22 @@ def _open_input_stream(
     rate: int,
     channels: int,
 ) -> Any:
-    """Open + start InputStream; try WASAPI shared then exclusive when needed."""
-    require_sounddevice()
-    kwargs: dict[str, Any] = {
-        "device": device,
-        "samplerate": rate,
-        "channels": channels,
-        "dtype": "float32",
-        "blocksize": 0,
-        "latency": "high",
-    }
-    extra_attempts: list[dict[str, Any]] = []
-    try:
-        ha_name = ""
-        if device is not None:
-            info = sd.query_devices(device)
-            ha_name = _hostapi_name(int(info.get("hostapi") or 0))
-        if device is None or "WASAPI" in ha_name:
-            # Shared first (coexists with other apps); exclusive often works when
-            # shared returns Invalid device (-9996) on some USB headsets.
-            for exclusive in (False, True):
-                for auto_convert in (False, True):
-                    try:
-                        ws = sd.WasapiSettings(
-                            exclusive=exclusive, auto_convert=auto_convert
-                        )
-                    except TypeError:
-                        ws = sd.WasapiSettings(exclusive=exclusive)
-                    extra_attempts.append({**kwargs, "extra_settings": ws})
-    except Exception:
-        pass
-    extra_attempts.append(dict(kwargs))
+    """Open + start a blocking InputStream in shared mode (no exclusive WASAPI).
 
-    last: Exception | None = None
-    for kw in extra_attempts:
-        try:
-            stream = sd.InputStream(**kw)
-            stream.start()
-            return stream
-        except Exception as e:
-            last = e
-            try:
-                if "stream" in locals():
-                    stream.close()  # type: ignore[name-defined]
-            except Exception:
-                pass
-    assert last is not None
-    raise last
+    Live capture prefers the WDM-KS callback path in ``MicStream``; this is
+    only a fallback for non-WDM-KS host APIs.
+    """
+    require_sounddevice()
+    stream = sd.InputStream(
+        device=device,
+        samplerate=rate,
+        channels=channels,
+        dtype="float32",
+        blocksize=0,
+        latency="high",
+    )
+    stream.start()
+    return stream
 
 
 def resolve_loopback_device_info(
@@ -688,7 +718,7 @@ def _try_open_pyaudio_loopback(
     ):
         if rate > 0 and rate not in rates:
             rates.append(rate)
-    last_err: Exception | None = None
+    first_err: Exception | None = None
     # Prefer device channel count + documented 1024-frame buffers first.
     frame_opts = (
         1024,
@@ -718,9 +748,13 @@ def _try_open_pyaudio_loopback(
                         stream = pa.open(**kwargs)
                         return stream, fmt_name, ch, rate
                     except Exception as e:
-                        last_err = e
-    assert last_err is not None
-    raise last_err
+                        if first_err is None:
+                            first_err = e
+    # Report the native-rate failure, not the last fallback rate: a long
+    # rate ladder otherwise masks e.g. -9996 Invalid device at 48 kHz with
+    # a misleading -9997 Invalid sample rate from the final 16 kHz attempt.
+    assert first_err is not None
+    raise first_err
 
 
 # Soft boost for WASAPI loopback (often quieter than a close mic after downmix).
@@ -728,7 +762,13 @@ DEFAULT_LOOPBACK_GAIN = 2.5
 
 
 class MicStream:
-    """Blocking mic reader producing int16 mono @ target sample_rate."""
+    """Blocking mic reader producing int16 mono @ target sample_rate.
+
+    On Windows, prefer PortAudio **WDM-KS callback** capture: shared WASAPI /
+    MME / DirectSound often returns E_INVALIDARG on some USB headsets, while
+    WDM-KS callback still delivers PCM. Blocking WDM-KS reads are unsupported
+    by PortAudio (``-9999``), so callback mode queues PCM for ``read_block``.
+    """
 
     def __init__(
         self,
@@ -747,9 +787,23 @@ class MicStream:
         self._carry = np.zeros(0, dtype=np.float32)
         self._device_name = ""
         self._device_index: int | None = None
+        self._mode: str = "blocking"  # blocking | callback
+        self._q: queue.Queue[np.ndarray] = queue.Queue(maxsize=64)
+        self._cb_lock = threading.Lock()
+        self._cb_overflow = 0
 
     def __enter__(self) -> MicStream:
         last_err: Exception | None = None
+        # 1) WDM-KS callback first (proven on Lenovo USB Headset). If that
+        # device is absent, candidates fall back to other present WDM-KS inputs.
+        for device, rate, channels in _wdmks_input_candidates(self._preferred):
+            try:
+                self._open_callback(device, rate, channels)
+                return self
+            except Exception as e:
+                last_err = e
+                self._close_stream_quiet()
+        # 2) Blocking opens on other host APIs (shared only, no exclusive).
         preferred = self._preferred
         if preferred is not None and str(preferred).strip() != "":
             if resolve_preferred_input_device(preferred) is None:
@@ -764,6 +818,7 @@ class MicStream:
                 n = max(256, int(rate * 0.02))
                 stream.read(n)
                 self._stream = stream
+                self._mode = "blocking"
                 self._capture_rate = rate
                 self._channels = channels
                 self._device_index = int(device) if device is not None else None
@@ -821,7 +876,63 @@ class MicStream:
             raise RuntimeError(f"{hint}\nДетали: {last_err}") from last_err
         raise RuntimeError(hint)
 
-    def __exit__(self, *exc: object) -> None:
+    def _open_callback(self, device: int, rate: int, channels: int) -> None:
+        """Open sounddevice InputStream with callback; smoke-wait for first PCM."""
+        while True:
+            try:
+                self._q.get_nowait()
+            except queue.Empty:
+                break
+        self._cb_overflow = 0
+        got = threading.Event()
+
+        def callback(indata, frames, time_info, status):  # noqa: ARG001
+            if status:
+                with self._cb_lock:
+                    self._cb_overflow += 1
+            mono = downmix_to_mono_float(np.asarray(indata, dtype=np.float32))
+            try:
+                self._q.put_nowait(mono.copy())
+            except queue.Full:
+                try:
+                    self._q.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self._q.put_nowait(mono.copy())
+                except queue.Full:
+                    pass
+            got.set()
+
+        stream = sd.InputStream(
+            device=device,
+            samplerate=rate,
+            channels=channels,
+            dtype="float32",
+            blocksize=0,
+            callback=callback,
+        )
+        stream.start()
+        if not got.wait(timeout=2.0):
+            try:
+                stream.stop()
+                stream.close()
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"WDM-KS callback opened but delivered 0 frames (device={device})"
+            )
+        self._stream = stream
+        self._mode = "callback"
+        self._capture_rate = rate
+        self._channels = channels
+        self._device_index = int(device)
+        try:
+            self._device_name = str(sd.query_devices(device).get("name") or "")
+        except Exception:
+            self._device_name = ""
+
+    def _close_stream_quiet(self) -> None:
         if self._stream is not None:
             try:
                 self._stream.stop()
@@ -829,6 +940,9 @@ class MicStream:
             except Exception:
                 pass
             self._stream = None
+
+    def __exit__(self, *exc: object) -> None:
+        self._close_stream_quiet()
 
     @property
     def device_name(self) -> str:
@@ -838,8 +952,21 @@ class MicStream:
     def device_index(self) -> int | None:
         return self._device_index
 
+    @property
+    def capture_rate(self) -> int:
+        return self._capture_rate
+
     def read_block(self) -> np.ndarray:
         assert self._stream is not None
+        # Serve buffered audio first. WDM-KS callbacks deliver large chunks
+        # (~3072 frames ≈ 70 ms at 44.1 kHz, several output blocks): reading
+        # more raw before draining the carry throttles capture to <0.5x
+        # realtime and the lag grows without bound, so live speech reaches
+        # VAD/ASR minutes late and wake phrases never match in practice.
+        if self._carry.size >= self.block:
+            out = self._carry[: self.block]
+            self._carry = self._carry[self.block :]
+            return float_to_pcm16(out)
         # Read enough raw frames so after resample we cover ~one output block
         need_out = self.block - self._carry.size
         if need_out < 1:
@@ -848,7 +975,12 @@ class MicStream:
             256,
             int(np.ceil(need_out * float(self._capture_rate) / float(self.sample_rate))),
         )
-        data = self._read_raw_interruptible(raw_n, timeout_s=_DEFAULT_READ_TIMEOUT_S)
+        if self._mode == "callback":
+            data = self._read_callback_raw(raw_n, timeout_s=_DEFAULT_READ_TIMEOUT_S)
+        else:
+            data = self._read_raw_interruptible(
+                raw_n, timeout_s=_DEFAULT_READ_TIMEOUT_S
+            )
         arr = downmix_to_mono_float(np.asarray(data, dtype=np.float32))
         if self._capture_rate != self.sample_rate:
             arr = resample_mono(arr, self._capture_rate, self.sample_rate)
@@ -863,6 +995,24 @@ class MicStream:
             out[: arr.size] = arr
             self._carry = np.zeros(0, dtype=np.float32)
         return float_to_pcm16(out)
+
+    def _read_callback_raw(self, raw_n: int, *, timeout_s: float) -> np.ndarray:
+        deadline = time.monotonic() + max(0.05, float(timeout_s))
+        parts: list[np.ndarray] = []
+        got = 0
+        while got < raw_n:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                chunk = self._q.get(timeout=min(0.05, remaining))
+            except queue.Empty:
+                continue
+            parts.append(np.asarray(chunk, dtype=np.float32).reshape(-1))
+            got += int(parts[-1].size)
+        if not parts:
+            return np.zeros(0, dtype=np.float32)
+        return np.concatenate(parts, axis=0)
 
     def _read_raw_interruptible(self, raw_n: int, *, timeout_s: float) -> np.ndarray:
         """Read via read_available; sleep in Python so Ctrl+C works."""
@@ -894,6 +1044,14 @@ class MicStream:
     def drain_available(self) -> None:
         """Discard buffered mic frames without blocking long (ASR keepalive)."""
         assert self._stream is not None
+        if self._mode == "callback":
+            while True:
+                try:
+                    self._q.get_nowait()
+                except queue.Empty:
+                    break
+            self._carry = np.zeros(0, dtype=np.float32)
+            return
         try:
             avail = int(getattr(self._stream, "read_available", 0) or 0)
         except Exception:
@@ -1003,6 +1161,10 @@ class LoopbackStream:
     def device_index(self) -> int | None:
         return self._device_index
 
+    @property
+    def capture_rate(self) -> int:
+        return self._capture_rate
+
     def drain_available(self) -> None:
         """Discard currently buffered loopback frames without blocking forever.
 
@@ -1060,6 +1222,12 @@ class LoopbackStream:
 
     def read_block(self) -> np.ndarray:
         assert self._stream is not None
+        # Same carry-first rule as MicStream: never read more raw while a
+        # full output block is already buffered (avoids unbounded lag).
+        if self._carry.size >= self.block:
+            out = self._carry[: self.block]
+            self._carry = self._carry[self.block :]
+            return float_to_pcm16(out)
         need_out = self.block - self._carry.size
         if need_out < 1:
             need_out = self.block

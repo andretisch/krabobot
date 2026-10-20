@@ -9,6 +9,10 @@ packaging/*~
 # Working config lives next to the app (copied from config.example.yaml)
 /config.yaml
 /config.yml
+# Pre-build / recovery copies (may contain tokens; outside build/ wipe)
+/config.yaml*.bak
+/config.yaml.portable-build.bak
+/config.yaml.runtime-good.bak
 # Local / build-time model copies (portable bundles into build/*/models/)
 /models/
 # Meeting WAV / runtime recordings next to the app

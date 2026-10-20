@@ -36,6 +36,8 @@
   const sidebarExpand = document.getElementById("kb-sidebar-expand");
 
   const SIDEBAR_COLLAPSED_KEY = "krabobot_web_sidebar_collapsed";
+  let kbIsAdmin = true;
+  let kbLdapEnabled = false;
 
   function getAuthToken() {
     try {
@@ -274,6 +276,17 @@
     anonymize: "Анонимизация PII перед отправкой в LLM",
     shortMemory: "Краткая память (только отмеченные факты)",
     autoUpdate: "Автообновление из git",
+    bindDn: "DN служебной учётной записи",
+    bindPassword: "Пароль служебной учётной записи",
+    baseDn: "Base DN поиска пользователей",
+    userFilter: "Фильтр; %{username} — имя входа",
+    usernameAttribute: "Атрибут логина (sAMAccountName)",
+    displayNameAttribute: "Атрибут отображаемого имени",
+    emailAttribute: "Атрибут почты",
+    autoCreate: "Создавать пользователя после успешного LDAP-входа",
+    useSsl: "LDAPS (SSL)",
+    startTls: "StartTLS",
+    verifyCertificates: "Проверять TLS-сертификат",
   };
 
   /** Secondary notes under specific config fields */
@@ -290,6 +303,7 @@
     tools: "Инструменты агента",
     tts: "Синтез речи (TTS)",
     stt: "Распознавание речи (STT)",
+    ldap: "Каталог LDAP / Active Directory",
   };
 
   /** @type {Record<string,string>} */
@@ -965,7 +979,7 @@
   function kbCfgRenderOther(container, payload) {
     container.innerHTML = "";
     const other = payload.other || {};
-    const order = ["api", "gateway", "tools", "tts", "stt"];
+    const order = ["api", "gateway", "tools", "tts", "stt", "ldap"];
     let any = false;
     for (const key of order) {
       if (!(key in other)) {
@@ -1132,7 +1146,32 @@
     }
   }
 
+  function applyRoleChrome(isAdmin) {
+    kbIsAdmin = !!isAdmin;
+    if (navSettings) {
+      navSettings.hidden = !kbIsAdmin;
+    }
+    if (navAdmin) {
+      navAdmin.hidden = !kbIsAdmin;
+    }
+    if (!kbIsAdmin && viewSettings) {
+      viewSettings.classList.add("kb-view--hidden");
+      viewSettings.hidden = true;
+    }
+    if (!kbIsAdmin && viewAdmin) {
+      viewAdmin.classList.add("kb-view--hidden");
+      viewAdmin.hidden = true;
+    }
+    if (!kbIsAdmin && viewChat) {
+      viewChat.classList.remove("kb-view--hidden");
+    }
+  }
+
   function switchTab(which) {
+    if (!kbIsAdmin && which !== "chat") {
+      closeMenu();
+      return;
+    }
     const isChat = which === "chat";
     const isSettings = which === "settings";
     const isAdmin = which === "admin";
@@ -2113,6 +2152,21 @@
     });
   }
 
+  function applyLdapLoginFields(enabled) {
+    kbLdapEnabled = !!enabled;
+    const userLabel = document.getElementById("kb-auth-user-label");
+    const userInput = document.getElementById("kb-auth-username");
+    if (userLabel) {
+      userLabel.hidden = !kbLdapEnabled;
+    }
+    if (userInput) {
+      userInput.hidden = !kbLdapEnabled;
+      if (!kbLdapEnabled) {
+        userInput.value = "";
+      }
+    }
+  }
+
   function showAuthGate(setupMode) {
     if (authGate) {
       authGate.hidden = false;
@@ -2120,18 +2174,20 @@
     if (layoutElRoot) {
       layoutElRoot.hidden = true;
     }
+    applyLdapLoginFields(kbLdapEnabled);
     const lead = document.getElementById("kb-auth-lead");
     const submit = document.getElementById("kb-auth-submit");
     const tokenLabel = document.querySelector(".kb-auth-token-label");
     const tokenInput = document.getElementById("kb-auth-token");
     if (setupMode) {
       if (lead) {
-        lead.textContent =
-          "Первый запуск: задайте пароль администратора (минимум 6 символов). " +
-          "Он сохранится в config.json как api.auth.passwordHash.";
+        lead.textContent = kbLdapEnabled
+          ? "Задайте пароль администратора (минимум 6 символов) или войдите доменной учётной записью."
+          : "Первый запуск: задайте пароль администратора (минимум 6 символов). " +
+            "Он сохранится в config.json как api.auth.passwordHash.";
       }
       if (submit) {
-        submit.textContent = "Задать пароль";
+        submit.textContent = kbLdapEnabled ? "Продолжить" : "Задать пароль";
       }
       if (tokenLabel) {
         tokenLabel.hidden = true;
@@ -2141,7 +2197,9 @@
       }
     } else {
       if (lead) {
-        lead.textContent = "Для веб-интерфейса нужен пароль или API-ключ администратора.";
+        lead.textContent = kbLdapEnabled
+          ? "Доменная учётная запись или пароль / API-ключ администратора."
+          : "Для веб-интерфейса нужен пароль или API-ключ администратора.";
       }
       if (submit) {
         submit.textContent = "Войти";
@@ -2155,7 +2213,8 @@
     }
   }
 
-  function showAppShell() {
+  function showAppShell(isAdmin) {
+    applyRoleChrome(isAdmin !== false);
     if (authGate) {
       authGate.hidden = true;
     }
@@ -2185,6 +2244,7 @@
       /* ignore */
     }
     setAuthToken("");
+    kbIsAdmin = true;
     showAuthGate(false);
   }
 
@@ -2201,8 +2261,9 @@
       showAuthGate(false);
       return false;
     }
-    if (status.configured && status.authenticated) {
-      showAppShell();
+    kbLdapEnabled = !!status.ldap_enabled;
+    if ((status.configured || status.ldap_enabled) && status.authenticated) {
+      showAppShell(status.is_admin !== false);
       return true;
     }
     if (!status.configured) {
@@ -2215,7 +2276,8 @@
         const r2 = await kbApiFetch("/v1/web/auth/status");
         const s2 = await r2.json();
         if (s2.authenticated) {
-          showAppShell();
+          kbLdapEnabled = !!s2.ldap_enabled;
+          showAppShell(s2.is_admin !== false);
           return true;
         }
       } catch (_e) {
@@ -2233,22 +2295,33 @@
       setAuthError("");
       const passwordEl = document.getElementById("kb-auth-password");
       const tokenEl = document.getElementById("kb-auth-token");
+      const userEl = document.getElementById("kb-auth-username");
       const password = passwordEl ? passwordEl.value : "";
       const token = tokenEl && !tokenEl.hidden ? tokenEl.value.trim() : "";
+      const username = userEl && !userEl.hidden ? userEl.value.trim() : "";
       let setupMode = false;
       try {
         const st = await fetch("/v1/web/auth/status", { credentials: "include" });
         const sj = await st.json();
         setupMode = !sj.configured;
+        kbLdapEnabled = !!sj.ldap_enabled;
       } catch (_e) {
         /* assume login */
       }
-      const url = setupMode ? "/v1/web/auth/setup" : "/v1/web/auth/login";
-      const body = setupMode
-        ? { password: password }
-        : token
-          ? { token: token }
-          : { password: password };
+      if (username) {
+        /* domain login, including before the local admin password exists */
+      } else if (setupMode && password.length < 6) {
+        setAuthError("Пароль должен быть не короче 6 символов.");
+        return;
+      }
+      const url = username || !setupMode ? "/v1/web/auth/login" : "/v1/web/auth/setup";
+      const body = username
+        ? { username: username, password: password }
+        : setupMode
+          ? { password: password }
+          : token
+            ? { token: token }
+            : { password: password };
       try {
         const r = await fetch(url, {
           method: "POST",
@@ -2266,12 +2339,14 @@
         if (data.token) {
           setAuthToken(data.token);
         }
-        showAppShell();
+        showAppShell(data.is_admin !== false);
         setAuthError("");
         try {
           modelId = await fetchModel();
           setStatus("Модель: " + modelId);
-          await refreshSettingsPanel();
+          if (kbIsAdmin) {
+            await refreshSettingsPanel();
+          }
           await refreshSessions();
           await loadHistoryForSession(getSessionId());
           startSessionPoll();
@@ -2512,6 +2587,87 @@
     addRow.appendChild(sidIn);
     addRow.appendChild(addBtn);
     card.appendChild(addRow);
+
+    const ldapTitle = document.createElement("p");
+    ldapTitle.className = "kb-settings-p";
+    ldapTitle.style.marginTop = "0.5rem";
+    ldapTitle.textContent = "Доменная учётная запись (AD / LDAP):";
+    card.appendChild(ldapTitle);
+    const ldapUl = document.createElement("ul");
+    ldapUl.className = "kb-admin-links";
+    const ldapNames = Array.isArray(u.ldap_usernames) ? u.ldap_usernames : [];
+    ldapNames.forEach((name) => {
+      const li = document.createElement("li");
+      li.className = "kb-admin-link-row";
+      const span = document.createElement("span");
+      span.className = "kb-admin-link-text";
+      const label = document.createElement("strong");
+      label.textContent = "LDAP";
+      span.appendChild(label);
+      span.appendChild(document.createTextNode(" · "));
+      const code = document.createElement("code");
+      code.textContent = name;
+      span.appendChild(code);
+      li.appendChild(span);
+      const rm = document.createElement("button");
+      rm.type = "button";
+      rm.className = "kb-btn kb-btn-secondary";
+      rm.textContent = "Удалить";
+      rm.addEventListener("click", async () => {
+        const r = await kbApiFetch(
+          "/v1/web/users/" + encodeURIComponent(u.user_id) + "/ldap",
+          {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username: name }),
+          }
+        );
+        if (!r.ok) {
+          const d = await r.json().catch(() => ({}));
+          setAdminBanner("", (d.error && d.error.message) || "Не удалось удалить доменную связь");
+          return;
+        }
+        refreshAdminUsers();
+      });
+      li.appendChild(rm);
+      ldapUl.appendChild(li);
+    });
+    card.appendChild(ldapUl);
+    const ldapRow = document.createElement("div");
+    ldapRow.className = "kb-admin-link-add";
+    const ldapIn = document.createElement("input");
+    ldapIn.type = "text";
+    ldapIn.className = "kb-input";
+    ldapIn.placeholder = "sAMAccountName";
+    ldapIn.setAttribute("aria-label", "Доменное имя");
+    const ldapBtn = document.createElement("button");
+    ldapBtn.type = "button";
+    ldapBtn.className = "kb-btn kb-btn-secondary";
+    ldapBtn.textContent = "Привязать домен";
+    ldapBtn.addEventListener("click", async () => {
+      const username = ldapIn.value.trim();
+      if (!username) {
+        setAdminBanner("", "Укажите доменное имя (sAMAccountName)");
+        return;
+      }
+      const r = await kbApiFetch(
+        "/v1/web/users/" + encodeURIComponent(u.user_id) + "/ldap",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: username }),
+        }
+      );
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        setAdminBanner("", (d.error && d.error.message) || "Не удалось привязать доменную учётную запись");
+        return;
+      }
+      refreshAdminUsers();
+    });
+    ldapRow.appendChild(ldapIn);
+    ldapRow.appendChild(ldapBtn);
+    card.appendChild(ldapRow);
 
     const actions = document.createElement("div");
     actions.className = "kb-admin-user-actions";
@@ -2847,7 +3003,9 @@
     try {
       modelId = await fetchModel();
       setStatus("Модель: " + modelId);
-      await refreshSettingsPanel();
+      if (kbIsAdmin) {
+        await refreshSettingsPanel();
+      }
       await refreshSessions();
       await loadHistoryForSession(getSessionId());
       startSessionPoll();

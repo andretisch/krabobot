@@ -23,6 +23,17 @@
         Для веб-интерфейса нужен пароль администратора.
       </p>
       <form id="kb-auth-form" class="kb-auth-form">
+        <label class="kb-auth-user-label" id="kb-auth-user-label" for="kb-auth-username" hidden>
+          Доменное имя (LDAP / AD)
+        </label>
+        <input
+          type="text"
+          id="kb-auth-username"
+          class="kb-input kb-auth-input"
+          autocomplete="username"
+          placeholder="sAMAccountName"
+          hidden
+        />
         <label class="kb-sr" for="kb-auth-password">Пароль</label>
         <input
           type="password"
@@ -31,7 +42,6 @@
           autocomplete="current-password"
           placeholder="Пароль"
           required
-          minlength="6"
         />
         <label class="kb-auth-token-label" for="kb-auth-token"
           >Или API-ключ (<code>api.auth.adminToken</code>)</label

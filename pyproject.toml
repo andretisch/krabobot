@@ -53,6 +53,8 @@ dependencies = [
 [project.optional-dependencies]
 api = [
     "aiohttp>=3.9.0,<4.0.0",
+    # Pure-Python LDAP/AD for web sign-in. No system libldap.
+    "ldap3>=2.9.1,<3.0.0",
 ]
 langsmith = [
     "langsmith>=0.1.0",

@@ -471,7 +471,9 @@ class AgentLoop:
         if msg.channel == "system":
             return
         if msg.user_id:
-            await self.user_resolver.ensure_owner(msg.user_id)
+            # Web LDAP sessions already name the user. Do not claim ownership.
+            if not (msg.metadata or {}).get("_preserve_owner"):
+                await self.user_resolver.ensure_owner(msg.user_id)
             return
         existing = await self.user_resolver.lookup(msg.channel, msg.sender_id)
         if existing:
@@ -800,11 +802,29 @@ class AgentLoop:
             return "\n".join(parts)
         return ""
 
-    async def session_manager_for_api(self, session_id: str | None = None) -> SessionManager:
-        """Session store used for HTTP API / web UI (owner workspace)."""
+    async def session_manager_for_api(
+        self,
+        session_id: str | None = None,
+        *,
+        user_id: str | None = None,
+    ) -> SessionManager:
+        """Session store for HTTP API / web UI.
+
+        Without ``user_id`` this is the owner workspace (password / adminToken).
+        A scoped web user (LDAP) keeps chats in that user's workspace only.
+        """
         sid = str(session_id or "default")
-        msg = InboundMessage(channel="api", sender_id=sid, chat_id=sid, content="")
-        await self._ensure_identity(msg)
+        meta: dict[str, Any] = {}
+        if user_id:
+            meta["_preserve_owner"] = True
+        msg = InboundMessage(
+            channel="api",
+            sender_id=sid,
+            chat_id=sid,
+            content="",
+            user_id=user_id,
+            metadata=meta,
+        )
         runtime = await self._runtime_for_message(msg)
         return runtime.sessions
 
@@ -823,7 +843,7 @@ class AgentLoop:
         if msg.channel == "system":
             channel, chat_id = (msg.chat_id.split(":", 1) if ":" in msg.chat_id
                                 else ("cli", msg.chat_id))
-            logger.info("Processing system message from {}", msg.sender_id)
+            logger.info("Continuing dialogue from {}", msg.sender_id)
             key = f"{channel}:{chat_id}"
             session = runtime.sessions.get_or_create(key)
             await runtime.memory_consolidator.maybe_consolidate_by_tokens(session)
@@ -1237,11 +1257,17 @@ class AgentLoop:
         content = self._local_outbound_text(msg)
         if not content:
             return
+        user_id = (msg.metadata or {}).get("_user_id")
+        meta: dict[str, Any] = {}
+        if user_id:
+            meta["_preserve_owner"] = True
         stub = InboundMessage(
             channel=channel,
             sender_id=session_id,
             chat_id="default",
             content="",
+            user_id=user_id if isinstance(user_id, str) else None,
+            metadata=meta,
         )
         await self._ensure_identity(stub)
         runtime = await self._runtime_for_message(stub)
@@ -1274,19 +1300,28 @@ class AgentLoop:
         on_progress: Callable[[str], Awaitable[None]] | None = None,
         on_stream: Callable[[str], Awaitable[None]] | None = None,
         on_stream_end: Callable[..., Awaitable[None]] | None = None,
+        user_id: str | None = None,
     ) -> OutboundMessage | None:
         """Process a message directly and return the outbound payload.
 
         Uses the same per-session lock as ``run()``/``_dispatch`` so background
         exec / subagent system announces cannot race the active turn.
+
+        ``user_id`` scopes the turn to an existing user workspace (web LDAP)
+        without changing channel sender ids or claiming the owner role.
         """
         await self._connect_mcp()
+        meta: dict[str, Any] = {}
+        if user_id:
+            meta["_preserve_owner"] = True
         msg = InboundMessage(
             channel=channel,
             sender_id=sender_id,
             chat_id=chat_id,
             content=content,
             media=list(media) if media else [],
+            user_id=user_id,
+            metadata=meta,
         )
         runtime = await self._runtime_for_message(msg)
         dispatch_key = msg.dispatch_key

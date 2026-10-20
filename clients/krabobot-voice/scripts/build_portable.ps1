@@ -121,13 +121,14 @@ if (-not $pyi) {
 New-Item -ItemType Directory -Force -Path $WorkPath | Out-Null
 New-Item -ItemType Directory -Force -Path $DistPath | Out-Null
 
-# PyInstaller --noconfirm replaces build\krabobot-voice. Keep config.yaml across that wipe.
+# PyInstaller COLLECT --noconfirm wipes build\krabobot-voice. Keep config.yaml
+# outside that tree (client root, gitignored) so the wipe cannot delete it.
 $preservedCfg = $null
 $existingCfg = Join-Path $OutDir "config.yaml"
 if (Test-Path -LiteralPath $existingCfg) {
-    $preservedCfg = Join-Path $env:TEMP ("krabobot-voice-config-{0}.yaml" -f [guid]::NewGuid().ToString("N"))
+    $preservedCfg = Join-Path $ClientRoot "config.yaml.portable-build.bak"
     Copy-Item -LiteralPath $existingCfg -Destination $preservedCfg -Force
-    Write-Host "==> Preserving existing config.yaml"
+    Write-Host "==> Backed up config.yaml -> $preservedCfg"
 }
 
 try {
@@ -175,8 +176,7 @@ try {
     if ($preservedCfg -and (Test-Path -LiteralPath $preservedCfg)) {
         if (Test-Path -LiteralPath $OutDir) {
             Copy-Item -LiteralPath $preservedCfg -Destination (Join-Path $OutDir "config.yaml") -Force
-            Remove-Item -LiteralPath $preservedCfg -Force -ErrorAction SilentlyContinue
-            Write-Host "==> Restored existing config.yaml"
+            Write-Host "==> Restored config.yaml from $preservedCfg"
         } else {
             Write-Host "==> Output dir missing; kept config.yaml at $preservedCfg"
         }

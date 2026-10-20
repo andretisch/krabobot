@@ -147,12 +147,17 @@ def _match_cfg_command(text: str, *, cfg: VoiceClientConfig) -> object | None:
 
 
 def _log_asr_text(text: str, *, tag: str, matched: bool) -> None:
-    """Print wake/meeting/local ASR lines only on match (or KRABOBOT_VOICE_DEBUG)."""
+    """Always show what local ASR heard, matched or not.
+
+    Showing only matches made wake misses invisible: the user saw VAD
+    ``speaking`` cycles but never a transcript, and could not tell whether
+    ASR heard nothing, heard garbage, or nearly matched the wake phrase.
+    ``matched`` is kept for callers/tests; the line is logged regardless.
+    """
     cleaned = (text or "").strip()
     if not cleaned:
         return
-    if matched or _debug_enabled():
-        _log(f"  [{tag}] {cleaned}")
+    _log(f"  [{tag}] {cleaned}")
 
 
 def effective_wake_energy(threshold: float, *, listen_source: str) -> float:
@@ -1230,6 +1235,11 @@ class _Driver:
                 _log_asr_text(text, tag=tag, matched=matched)
             elif for_wake and self.cfg.wake_mode == "kws":
                 continue
+            else:
+                _log(
+                    f"  [{'wake-asr' if for_wake else 'local-asr'}] "
+                    "(речь не распознана)"
+                )
 
             self._pending_pcm = pcm
             self._apply(
@@ -1769,6 +1779,11 @@ def run_loop(
                 loopback_device=cfg.meeting_loopback_device or None,
                 output_device=cfg.audio_output_device or None,
             ) as mic:
+                _log(
+                    f"mic opened: {getattr(mic, 'device_name', '')} "
+                    f"idx {getattr(mic, 'device_index', None)} "
+                    f"rate {getattr(mic, 'capture_rate', cfg.sample_rate)}"
+                )
                 driver.run_talk_loop(mic)
     except KeyboardInterrupt:
         _log("stopped.")

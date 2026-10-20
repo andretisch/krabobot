@@ -34,6 +34,7 @@ from krabobot.api.web_auth import (
     handle_auth_logout,
     handle_auth_setup,
     handle_auth_status,
+    web_chat_user_id,
 )
 from krabobot.api.web_config import (
     build_web_config_payload,
@@ -48,6 +49,8 @@ from krabobot.api.web_users import (
     handle_registrations_list,
     handle_user_delete,
     handle_user_get,
+    handle_user_ldap_add,
+    handle_user_ldap_remove,
     handle_user_link_add,
     handle_user_link_remove,
     handle_user_patch,
@@ -599,8 +602,10 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
 
     sid = str(body.get("session_id") or "default")
     session_key = f"api:{body['session_id']}" if body.get("session_id") else API_SESSION_KEY
+    chat_user_id = web_chat_user_id(request)
+    lock_key = f"{chat_user_id}:{session_key}" if chat_user_id else session_key
     session_locks: dict[str, asyncio.Lock] = request.app["session_locks"]
-    session_lock = session_locks.setdefault(session_key, asyncio.Lock())
+    session_lock = session_locks.setdefault(lock_key, asyncio.Lock())
 
     logger.info("API request session_key={} content={}", session_key, _content_preview_for_log(raw_content))
 
@@ -609,7 +614,7 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
     try:
         async with session_lock:
             try:
-                sm = await agent_loop.session_manager_for_api(sid)
+                sm = await agent_loop.session_manager_for_api(sid, user_id=chat_user_id)
                 final_content, media_paths = _persist_web_uploads(sm.workspace, sid, coerced_content)
                 response = await asyncio.wait_for(
                     agent_loop.process_direct(
@@ -619,6 +624,7 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
                         channel="api",
                         chat_id=sid,
                         sender_id=sid,
+                        user_id=chat_user_id,
                     ),
                     timeout=timeout_s,
                 )
@@ -637,6 +643,7 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
                             channel="api",
                             chat_id=sid,
                             sender_id=sid,
+                            user_id=chat_user_id,
                         ),
                         timeout=timeout_s,
                     )
@@ -712,7 +719,9 @@ async def handle_web_uploads(request: web.Request) -> web.Response:
     async def _bind_session(sid: str) -> web.Response | None:
         nonlocal upload_dir, ws
         try:
-            sm = await agent_loop.session_manager_for_api(sid)
+            sm = await agent_loop.session_manager_for_api(
+                sid, user_id=web_chat_user_id(request)
+            )
         except Exception:
             logger.exception("Failed to resolve session for upload sid={}", sid)
             return _error_json(500, "Internal server error", err_type="server_error")
@@ -809,7 +818,9 @@ async def handle_web_sessions_list(request: web.Request) -> web.Response:
     """GET /v1/web/sessions — list saved api:* chat sessions for the web UI."""
     agent_loop = request.app["agent_loop"]
     try:
-        sm = await agent_loop.session_manager_for_api("default")
+        sm = await agent_loop.session_manager_for_api(
+            "default", user_id=web_chat_user_id(request)
+        )
     except Exception:
         logger.exception("Failed to resolve API session manager")
         return _error_json(500, "Internal server error", err_type="server_error")
@@ -862,7 +873,9 @@ async def handle_web_sessions_patch(request: web.Request) -> web.Response:
     key = f"api:{session_id}"
     agent_loop = request.app["agent_loop"]
     try:
-        sm = await agent_loop.session_manager_for_api(session_id)
+        sm = await agent_loop.session_manager_for_api(
+            session_id, user_id=web_chat_user_id(request)
+        )
     except Exception:
         logger.exception("Failed to resolve API session manager for patch")
         return _error_json(500, "Internal server error", err_type="server_error")
@@ -892,13 +905,18 @@ async def handle_web_sessions_delete(request: web.Request) -> web.Response:
     key = f"api:{session_id}"
     agent_loop = request.app["agent_loop"]
     try:
-        sm = await agent_loop.session_manager_for_api(session_id)
+        sm = await agent_loop.session_manager_for_api(
+            session_id, user_id=web_chat_user_id(request)
+        )
     except Exception:
         logger.exception("Failed to resolve API session manager for delete")
         return _error_json(500, "Internal server error", err_type="server_error")
     ok = sm.delete_session(key)
     locks: dict[str, asyncio.Lock] = request.app["session_locks"]
     locks.pop(key, None)
+    scoped = web_chat_user_id(request)
+    if scoped:
+        locks.pop(f"{scoped}:{key}", None)
     if not ok:
         return _error_json(404, "Session not found")
     try:
@@ -917,7 +935,9 @@ async def handle_web_session_messages(request: web.Request) -> web.Response:
     key = f"api:{session_id}"
     agent_loop = request.app["agent_loop"]
     try:
-        sm = await agent_loop.session_manager_for_api(session_id)
+        sm = await agent_loop.session_manager_for_api(
+            session_id, user_id=web_chat_user_id(request)
+        )
     except Exception:
         logger.exception("Failed to resolve API session manager for messages")
         return _error_json(500, "Internal server error", err_type="server_error")
@@ -1442,7 +1462,7 @@ def create_app(
     app["model_name"] = model_name
     app["request_timeout"] = request_timeout
     app["session_locks"] = {}  # per-user locks, keyed by session_key
-    app["web_sessions"] = {}  # auth session token -> expiry unix ts
+    app["web_sessions"] = {}  # auth session token -> WebPrincipal
     app["max_upload_mb"] = hard_mb
     app["max_upload_bytes"] = hard_bytes
     app["max_upload_soft_bytes"] = MAX_UPLOAD_SOFT_BYTES
@@ -1478,6 +1498,8 @@ def create_app(
     app.router.add_delete("/v1/web/users/{user_id}", handle_user_delete)
     app.router.add_post("/v1/web/users/{user_id}/links", handle_user_link_add)
     app.router.add_delete("/v1/web/users/{user_id}/links", handle_user_link_remove)
+    app.router.add_post("/v1/web/users/{user_id}/ldap", handle_user_ldap_add)
+    app.router.add_delete("/v1/web/users/{user_id}/ldap", handle_user_ldap_remove)
     app.router.add_get("/v1/web/registrations", handle_registrations_list)
     app.router.add_post(
         "/v1/web/registrations/{request_id}/approve",

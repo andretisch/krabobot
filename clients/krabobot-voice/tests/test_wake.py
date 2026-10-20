@@ -393,8 +393,8 @@ def test_command_after_wake_custom_phrase() -> None:
     )
 
 
-def test_asr_miss_stays_quiet_without_debug(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Random speech ASR text must not print [wake-asr]/[meeting-asr] unless debug."""
+def test_asr_miss_is_logged_for_user_visibility(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Heard-but-unmatched ASR text must be visible (user: «нет расшифровки»)."""
     from krabobot_voice import app as voice_app
     from krabobot_voice.config import VoiceClientConfig
 
@@ -409,7 +409,8 @@ def test_asr_miss_stays_quiet_without_debug(monkeypatch: pytest.MonkeyPatch) -> 
     voice_app._log_asr_text(miss, tag="wake-asr", matched=False)
     voice_app._log_asr_text(miss, tag="meeting-asr", matched=False)
     voice_app._log_asr_text(miss, tag="local-asr", matched=False)
-    assert lines == []
+    assert len(lines) == 3
+    assert all(miss in line for line in lines)
 
 
 def test_asr_match_still_logs(monkeypatch: pytest.MonkeyPatch) -> None:

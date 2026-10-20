@@ -3,6 +3,19 @@ import json
 from krabobot.config.loader import load_config, save_config
 
 
+def test_config_without_ldap_block_still_loads(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({"agents": {"defaults": {"model": "x"}}, "ldap": None}),
+        encoding="utf-8",
+    )
+    config = load_config(config_path)
+    assert config.ldap.enabled is False
+    assert config.ldap.auto_create is True
+    assert config.ldap.user_filter == "(sAMAccountName=%{username})"
+    assert config.agents.defaults.model == "x"
+
+
 def test_load_config_keeps_max_tokens_and_ignores_legacy_memory_window(tmp_path) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
@@ -97,7 +110,9 @@ def test_onboard_does_not_crash_with_legacy_memory_window(tmp_path, monkeypatch)
     monkeypatch.setattr("krabobot.cli.commands.get_workspace_path", lambda _workspace=None: workspace)
 
     from typer.testing import CliRunner
+
     from krabobot.cli.commands import app
+
     runner = CliRunner()
     result = runner.invoke(app, ["onboard"], input="n\n")
 
@@ -143,7 +158,9 @@ def test_onboard_refresh_backfills_missing_channel_fields(tmp_path, monkeypatch)
     )
 
     from typer.testing import CliRunner
+
     from krabobot.cli.commands import app
+
     runner = CliRunner()
     result = runner.invoke(app, ["onboard"], input="n\n")
 
