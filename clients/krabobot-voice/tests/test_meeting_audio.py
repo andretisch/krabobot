@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import time
@@ -639,6 +640,150 @@ def test_loopback_open_tries_fallback_rates(monkeypatch: pytest.MonkeyPatch) -> 
     assert any(c.get("frames_per_buffer") == 1024 for c in pa.calls)
     assert fmt in ("int16", "float32")
     assert ch in (1, 2)
+
+
+def test_resolve_loopback_exclude_pid_priority(monkeypatch: pytest.MonkeyPatch) -> None:
+    from krabobot_voice import audio_io
+
+    monkeypatch.setenv("KRABOBOT_VOICE_LOOPBACK_EXCLUDE_PID", "4242")
+    assert audio_io.resolve_loopback_exclude_pid(111) == 111
+    assert audio_io.resolve_loopback_exclude_pid() == 4242
+    assert audio_io.resolve_loopback_exclude_pid(None) == 4242
+    monkeypatch.delenv("KRABOBOT_VOICE_LOOPBACK_EXCLUDE_PID")
+    assert audio_io.resolve_loopback_exclude_pid() == os.getpid()
+    monkeypatch.setenv("KRABOBOT_VOICE_LOOPBACK_EXCLUDE_PID", "bogus")
+    assert audio_io.resolve_loopback_exclude_pid() == os.getpid()
+
+
+def test_loopback_construction_does_not_require_pyaudiowpatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Process backend must be constructible even if the device fallback is absent."""
+    from krabobot_voice import audio_io
+
+    monkeypatch.setattr(audio_io, "pyaudio", None)
+    lb = audio_io.LoopbackStream(backend="process", exclude_pid=777)
+    assert lb.exclude_pid == 777
+    assert lb.backend == ""
+
+
+class _FakeProcessCapture:
+    instances: list[_FakeProcessCapture] = []
+    capture_rate = 48000
+    channels = 2
+
+    def __init__(self, *, exclude_pid: int) -> None:
+        self.exclude_pid = exclude_pid
+        self.device_name = f"Process Loopback (exclude pid {exclude_pid})"
+        self.closed = False
+        _FakeProcessCapture.instances.append(self)
+
+    def open(self) -> None:
+        return None
+
+    def read_raw(self, raw_n: int, *, timeout_s: float) -> bytes:  # noqa: ARG002
+        # float32 stereo silence, exactly raw_n frames.
+        return b"\x00" * (raw_n * self.channels * 4)
+
+    def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_loopback_prefers_process_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    from krabobot_voice import audio_io
+
+    _FakeProcessCapture.instances = []
+    monkeypatch.setattr(audio_io, "_ProcessLoopbackCapture", _FakeProcessCapture)
+
+    def _boom_device(self):  # noqa: ANN001, ANN202
+        raise AssertionError("device fallback must not run when process opens")
+
+    monkeypatch.setattr(audio_io.LoopbackStream, "_open_device_loopback", _boom_device)
+    with audio_io.LoopbackStream(sample_rate=16000, exclude_pid=4321) as lb:
+        assert lb.backend == "process-loopback"
+        assert lb.capture_rate == 48000
+        block = lb.read_block()
+        assert block.shape == (480,)
+        assert block.dtype == np.int16
+    assert _FakeProcessCapture.instances[0].exclude_pid == 4321
+    assert _FakeProcessCapture.instances[0].closed is True
+
+
+def test_loopback_falls_back_to_device_when_process_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from krabobot_voice import audio_io
+
+    class BoomCapture:
+        def __init__(self, *, exclude_pid: int) -> None:  # noqa: ARG002
+            pass
+
+        def open(self) -> None:
+            raise RuntimeError("no process loopback")
+
+    monkeypatch.setattr(audio_io, "_ProcessLoopbackCapture", BoomCapture)
+
+    def _fake_device(self):  # noqa: ANN001, ANN202
+        self._stream = object()
+        self._backend = "device"
+        self._capture_rate = 44100
+        return self
+
+    monkeypatch.setattr(audio_io.LoopbackStream, "_open_device_loopback", _fake_device)
+    with audio_io.LoopbackStream(sample_rate=16000, exclude_pid=99) as lb:
+        assert lb.backend == "device"
+        assert lb.capture_rate == 44100
+
+
+def test_loopback_process_only_does_not_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    from krabobot_voice import audio_io
+
+    class BoomCapture:
+        def __init__(self, *, exclude_pid: int) -> None:  # noqa: ARG002
+            pass
+
+        def open(self) -> None:
+            raise RuntimeError("activation denied")
+
+    monkeypatch.setattr(audio_io, "_ProcessLoopbackCapture", BoomCapture)
+    called = {"device": False}
+
+    def _fake_device(self):  # noqa: ANN001, ANN202
+        called["device"] = True
+        return self
+
+    monkeypatch.setattr(audio_io.LoopbackStream, "_open_device_loopback", _fake_device)
+    with pytest.raises(RuntimeError, match="Process Loopback"):
+        with audio_io.LoopbackStream(sample_rate=16000, backend="process"):
+            pass
+    assert called["device"] is False
+
+
+def test_meeting_recorder_stamps_main_pid_as_exclude_pid(tmp_path: Path) -> None:
+    rec = MeetingRecorder(
+        MeetingCaptureConfig(capture="mix", sample_rate=16000),
+        save_dir=tmp_path,
+        use_process=False,
+    )
+    assert rec.cfg.loopback_exclude_pid == os.getpid()
+    explicit = MeetingRecorder(
+        MeetingCaptureConfig(capture="mix", sample_rate=16000, loopback_exclude_pid=999),
+        save_dir=tmp_path,
+        use_process=False,
+    )
+    assert explicit.cfg.loopback_exclude_pid == 999
+
+
+def test_meeting_worker_parses_exclude_pid() -> None:
+    from krabobot_voice import meeting_worker
+
+    args = meeting_worker._parse(
+        ["--out", "o.wav", "--stop-file", "s.flag", "--exclude-pid", "1234"]
+    )
+    assert args.exclude_pid == 1234
 
 
 def test_frozen_defaults_to_thread_meeting_worker(monkeypatch: pytest.MonkeyPatch) -> None:

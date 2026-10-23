@@ -68,6 +68,8 @@ class MeetingCaptureConfig:
     output_device: str = ""
     loopback_device: str = ""
     max_s: float = 7200.0
+    # Top krabobot PID to exclude via Process Loopback; 0 = resolve in recorder.
+    loopback_exclude_pid: int = 0
 
 
 @dataclass
@@ -248,6 +250,7 @@ def run_meeting_capture(
                     block_ms=cfg.block_ms,
                     device=cfg.loopback_device or None,
                     output_device=cfg.output_device or None,
+                    exclude_pid=cfg.loopback_exclude_pid or None,
                 ) as lb:
                     signal_ready({"capture": "loopback"})
                     error_phase = "record"
@@ -262,6 +265,7 @@ def run_meeting_capture(
                     block_ms=cfg.block_ms,
                     device=cfg.loopback_device or None,
                     output_device=cfg.output_device or None,
+                    exclude_pid=cfg.loopback_exclude_pid or None,
                 )
                 lb = None
                 lb_err: Exception | None = None
@@ -429,6 +433,10 @@ class MeetingRecorder:
             output_device=str(cfg.output_device or ""),
             loopback_device=str(cfg.loopback_device or ""),
             max_s=float(cfg.max_s),
+            # Stamp the main app PID here (in the parent, before any worker
+            # spawn): EXCLUDE_TARGET_PROCESS_TREE on it excludes main+worker,
+            # so our own TTS/beeps are never recorded, whoever plays them.
+            loopback_exclude_pid=int(cfg.loopback_exclude_pid or os.getpid()),
         )
         self.save_dir = Path(save_dir) if save_dir else default_meetings_dir()
         self.use_process = (

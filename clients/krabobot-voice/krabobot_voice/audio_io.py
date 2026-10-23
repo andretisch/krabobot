@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import ctypes
 import io
+import os
 import queue
+import struct
 import sys
 import tempfile
 import threading
@@ -761,6 +764,423 @@ def _try_open_pyaudio_loopback(
 DEFAULT_LOOPBACK_GAIN = 2.5
 
 
+def resolve_loopback_exclude_pid(explicit: int | None = None) -> int:
+    """PID whose process tree Process Loopback must exclude (krabobot itself).
+
+    Priority: explicit arg → ``KRABOBOT_VOICE_LOOPBACK_EXCLUDE_PID`` → own PID.
+    MeetingRecorder stamps the *main app* PID into the capture config before
+    spawning a worker, so EXCLUDE_TARGET_PROCESS_TREE on that PID excludes the
+    whole krabobot tree (main + worker children) while capturing every other app.
+    """
+    if explicit:
+        return int(explicit)
+    raw = (os.environ.get("KRABOBOT_VOICE_LOOPBACK_EXCLUDE_PID") or "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    return int(os.getpid())
+
+
+# --- Windows Process Loopback (ActivateAudioInterfaceAsync, pure ctypes) -----
+# Device WASAPI loopback is broken on some machines (Initialize SHARED+LOOPBACK
+# -> E_INVALIDARG), while the virtual ``VAD\Process_Loopback`` endpoint works.
+# GetMixFormat on that endpoint returns E_NOTIMPL by design: supply our own
+# float32/48kHz/stereo WAVEFORMATEX and Initialize SHARED|LOOPBACK (never exclusive).
+
+_PROCESS_LOOPBACK_RATE = 48000
+_PROCESS_LOOPBACK_CHANNELS = 2
+_AUDCLNT_STREAMFLAGS_LOOPBACK = 0x20000
+_ACTIVATION_TYPE_PROCESS_LOOPBACK = 1
+_PROCESS_LOOPBACK_MODE_EXCLUDE = 1  # EXCLUDE_TARGET_PROCESS_TREE
+
+
+class _Guid(ctypes.Structure):
+    _fields_ = [
+        ("data1", ctypes.c_uint32),
+        ("data2", ctypes.c_uint16),
+        ("data3", ctypes.c_uint16),
+        ("data4", ctypes.c_ubyte * 8),
+    ]
+
+    @classmethod
+    def from_string(cls, text: str) -> _Guid:
+        import uuid
+
+        return cls.from_buffer_copy(uuid.UUID(text.strip("{}")).bytes_le)
+
+
+def _guid_eq(ptr: int, text: str) -> bool:
+    if not ptr:
+        return False
+    got = ctypes.cast(ptr, ctypes.POINTER(_Guid)).contents
+    want = _Guid.from_string(text)
+    return bytes(got) == bytes(want)
+
+
+def _vtable_fn(ptr: int, index: int, prototype: Any) -> Any:
+    vtable = ctypes.cast(ptr, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+    return ctypes.cast(vtable[index], prototype)
+
+
+_IUNKNOWN_QI = ctypes.CFUNCTYPE(
+    ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)
+)
+_IUNKNOWN_COUNT = ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_void_p)
+_RELEASE = _IUNKNOWN_COUNT
+
+_IID_IUNKNOWN = "00000000-0000-0000-C000-000000000046"
+_IID_IACTIVATE_HANDLER = "41D949AB-9862-444A-80F6-C261334DA5EB"
+_IID_IAGILE_OBJECT = "94EA2B94-E9CC-49E0-C0FF-EE64CA8F5B90"
+_IID_IAUDIO_CLIENT = "1CB9AD4C-DBFA-4C32-B178-C2F568A703B2"
+_IID_IAUDIO_CAPTURE_CLIENT = "C8ADBD64-E71E-48A0-A4DE-185C395CD317"
+
+
+class _ActivationHandler:
+    """IActivateAudioInterfaceCompletionHandler (+ IAgileObject) via raw vtable."""
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.async_op: int = 0
+        self._refcount = 1
+
+        def query_interface(this: int, riid: int, ppv: Any) -> int:
+            if _guid_eq(riid, _IID_IUNKNOWN) or _guid_eq(riid, _IID_IACTIVATE_HANDLER) or _guid_eq(
+                riid, _IID_IAGILE_OBJECT
+            ):
+                ppv[0] = ctypes.c_void_p(this)
+                self._refcount += 1
+                return 0
+            ppv[0] = None
+            return -2147467262  # E_NOINTERFACE
+
+        def add_ref(this: int) -> int:  # noqa: ARG001
+            self._refcount += 1
+            return self._refcount
+
+        def release(this: int) -> int:  # noqa: ARG001
+            self._refcount = max(0, self._refcount - 1)
+            return self._refcount
+
+        def activate_completed(this: int, op: int) -> int:  # noqa: ARG001
+            self.async_op = int(op or 0)
+            if self.async_op:
+                # Keep the async operation alive until GetActivateResult.
+                addref = _vtable_fn(self.async_op, 1, _IUNKNOWN_COUNT)
+                addref(ctypes.c_void_p(self.async_op))
+            self.done.set()
+            return 0
+
+        self._cb_qi = _IUNKNOWN_QI(query_interface)
+        self._cb_addref = _IUNKNOWN_COUNT(add_ref)
+        self._cb_release = _IUNKNOWN_COUNT(release)
+        self._cb_completed = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)(
+            activate_completed
+        )
+        self._vtable = (ctypes.c_void_p * 4)(
+            ctypes.cast(self._cb_qi, ctypes.c_void_p),
+            ctypes.cast(self._cb_addref, ctypes.c_void_p),
+            ctypes.cast(self._cb_release, ctypes.c_void_p),
+            ctypes.cast(self._cb_completed, ctypes.c_void_p),
+        )
+
+        class _Obj(ctypes.Structure):
+            _fields_ = [("lp_vtbl", ctypes.POINTER(ctypes.c_void_p))]
+
+        self._obj = _Obj(ctypes.cast(self._vtable, ctypes.POINTER(ctypes.c_void_p)))
+        self.ptr = ctypes.addressof(self._obj)
+
+
+def _com_release(ptr: int) -> None:
+    if ptr:
+        try:
+            _vtable_fn(ptr, 2, _RELEASE)(ctypes.c_void_p(ptr))
+        except Exception:
+            pass
+
+
+class _ProcessLoopbackCapture:
+    """WASAPI Process Loopback capture: float32 48 kHz stereo, polling GetBuffer."""
+
+    capture_rate = _PROCESS_LOOPBACK_RATE
+    channels = _PROCESS_LOOPBACK_CHANNELS
+
+    def __init__(self, *, exclude_pid: int) -> None:
+        self.exclude_pid = int(exclude_pid)
+        self.device_name = f"Process Loopback (exclude pid {self.exclude_pid})"
+        self._audio_client: int = 0
+        self._capture_client: int = 0
+        self._async_op: int = 0
+        self._co_initialized = False
+        self._started = False
+
+    def open(self) -> None:
+        if sys.platform != "win32":
+            raise RuntimeError("Process Loopback is Windows-only")
+        ole32 = ctypes.windll.ole32  # type: ignore[attr-defined]
+        # COINIT_MULTITHREADED; RPC_E_CHANGED_MODE (already STA/MTA) is usable too.
+        hr = int(ole32.CoInitializeEx(None, 0))
+        self._co_initialized = hr in (0, 1)
+        if hr not in (0, 1, -2147417850):  # S_OK, S_FALSE, RPC_E_CHANGED_MODE
+            raise RuntimeError(f"CoInitializeEx failed: 0x{hr & 0xFFFFFFFF:08X}")
+        try:
+            self._activate_and_initialize()
+        except Exception:
+            self.close()
+            raise
+
+    def _activate_and_initialize(self) -> None:
+        # AUDIOCLIENT_ACTIVATION_PARAMS: type, {TargetProcessId, ProcessLoopbackMode}
+        params = struct.pack(
+            "<iIi",
+            _ACTIVATION_TYPE_PROCESS_LOOPBACK,
+            int(self.exclude_pid),
+            _PROCESS_LOOPBACK_MODE_EXCLUDE,
+        )
+        params_buf = ctypes.create_string_buffer(params, len(params))
+        # PROPVARIANT VT_BLOB(65): vt@0, cbSize@8, pBlobData@16 (24 bytes total).
+        propvar = ctypes.create_string_buffer(24)
+        struct.pack_into("<H", propvar, 0, 65)
+        struct.pack_into("<I", propvar, 8, len(params))
+        struct.pack_into("<Q", propvar, 16, ctypes.addressof(params_buf))
+
+        handler = _ActivationHandler()
+        self._handler = handler  # keep callbacks alive through the async call
+        iid_client = _Guid.from_string(_IID_IAUDIO_CLIENT)
+        async_op = ctypes.c_void_p(0)
+        mmdevapi = ctypes.windll.Mmdevapi  # type: ignore[attr-defined]
+        activate = mmdevapi.ActivateAudioInterfaceAsync
+        activate.restype = ctypes.c_long
+        activate.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.POINTER(_Guid),
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        hr = int(
+            activate(
+                "VAD\\Process_Loopback",
+                ctypes.byref(iid_client),
+                ctypes.addressof(propvar),
+                handler.ptr,
+                ctypes.byref(async_op),
+            )
+        )
+        if hr != 0:
+            raise RuntimeError(f"ActivateAudioInterfaceAsync failed: 0x{hr & 0xFFFFFFFF:08X}")
+        self._async_op = int(async_op.value or handler.async_op or 0)
+        if not handler.done.wait(timeout=5.0):
+            raise RuntimeError("ActivateAudioInterfaceAsync timed out (5s)")
+        op_ptr = int(handler.async_op or async_op.value or 0)
+        self._async_op = op_ptr
+        if not op_ptr:
+            raise RuntimeError("Process Loopback activation returned no async operation")
+
+        get_result = _vtable_fn(
+            op_ptr,
+            3,
+            ctypes.CFUNCTYPE(
+                ctypes.c_long,
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_long),
+                ctypes.POINTER(ctypes.c_void_p),
+            ),
+        )
+        activate_hr = ctypes.c_long(0)
+        iface = ctypes.c_void_p(0)
+        hr = int(get_result(ctypes.c_void_p(op_ptr), ctypes.byref(activate_hr), ctypes.byref(iface)))
+        if hr != 0 or int(activate_hr.value) != 0 or not iface.value:
+            bad = int(activate_hr.value) if hr == 0 else hr
+            raise RuntimeError(f"Process Loopback GetActivateResult failed: 0x{bad & 0xFFFFFFFF:08X}")
+        self._audio_client = int(iface.value)
+
+        # Own format (GetMixFormat is E_NOTIMPL here): float32 / 48 kHz / stereo.
+        fmt = struct.pack("<HHIIHHH", 3, 2, _PROCESS_LOOPBACK_RATE, _PROCESS_LOOPBACK_RATE * 8, 8, 32, 0)
+        fmt_buf = ctypes.create_string_buffer(fmt, len(fmt))
+        initialize = _vtable_fn(
+            self._audio_client,
+            3,
+            ctypes.CFUNCTYPE(
+                ctypes.c_long,
+                ctypes.c_void_p,
+                ctypes.c_int,
+                ctypes.c_uint32,
+                ctypes.c_int64,
+                ctypes.c_int64,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+            ),
+        )
+        # SHARED (0) + LOOPBACK, 200 ms buffer (in 100 ns units). Never exclusive.
+        hr = int(
+            initialize(
+                ctypes.c_void_p(self._audio_client),
+                0,
+                _AUDCLNT_STREAMFLAGS_LOOPBACK,
+                2_000_000,
+                0,
+                ctypes.addressof(fmt_buf),
+                None,
+            )
+        )
+        if hr != 0:
+            raise RuntimeError(f"Process Loopback Initialize failed: 0x{hr & 0xFFFFFFFF:08X}")
+
+        iid_capture = _Guid.from_string(_IID_IAUDIO_CAPTURE_CLIENT)
+        capture = ctypes.c_void_p(0)
+        get_service = _vtable_fn(
+            self._audio_client,
+            14,
+            ctypes.CFUNCTYPE(
+                ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(_Guid), ctypes.POINTER(ctypes.c_void_p)
+            ),
+        )
+        hr = int(
+            get_service(ctypes.c_void_p(self._audio_client), ctypes.byref(iid_capture), ctypes.byref(capture))
+        )
+        if hr != 0 or not capture.value:
+            raise RuntimeError(f"Process Loopback GetService(capture) failed: 0x{hr & 0xFFFFFFFF:08X}")
+        self._capture_client = int(capture.value)
+
+        start = _vtable_fn(self._audio_client, 10, ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_void_p))
+        hr = int(start(ctypes.c_void_p(self._audio_client)))
+        if hr != 0:
+            raise RuntimeError(f"Process Loopback Start failed: 0x{hr & 0xFFFFFFFF:08X}")
+        self._started = True
+
+    def _next_packet_size(self) -> int:
+        fn = _vtable_fn(
+            self._capture_client,
+            5,
+            ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)),
+        )
+        frames = ctypes.c_uint32(0)
+        if int(fn(ctypes.c_void_p(self._capture_client), ctypes.byref(frames))) != 0:
+            return 0
+        return int(frames.value)
+
+    def read_raw(self, raw_n: int, *, timeout_s: float) -> bytes:
+        """Poll GetBuffer until ``raw_n`` frames arrive or timeout; returns float32 bytes."""
+        deadline = time.monotonic() + max(0.05, float(timeout_s))
+        chunks: list[bytes] = []
+        got = 0
+        frame_bytes = 4 * self.channels
+        get_buffer = _vtable_fn(
+            self._capture_client,
+            3,
+            ctypes.CFUNCTYPE(
+                ctypes.c_long,
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_void_p),
+                ctypes.POINTER(ctypes.c_uint32),
+                ctypes.POINTER(ctypes.c_uint32),
+                ctypes.POINTER(ctypes.c_uint64),
+                ctypes.POINTER(ctypes.c_uint64),
+            ),
+        )
+        release_buffer = _vtable_fn(
+            self._capture_client,
+            4,
+            ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_uint32),
+        )
+        while got < raw_n:
+            if self._next_packet_size() <= 0:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.005)
+                continue
+            data = ctypes.c_void_p(0)
+            frames = ctypes.c_uint32(0)
+            flags = ctypes.c_uint32(0)
+            dev_pos = ctypes.c_uint64(0)
+            qpc_pos = ctypes.c_uint64(0)
+            hr = int(
+                get_buffer(
+                    ctypes.c_void_p(self._capture_client),
+                    ctypes.byref(data),
+                    ctypes.byref(frames),
+                    ctypes.byref(flags),
+                    ctypes.byref(dev_pos),
+                    ctypes.byref(qpc_pos),
+                )
+            )
+            if hr != 0:
+                break
+            n = int(frames.value)
+            try:
+                if n:
+                    if flags.value & 0x2:  # AUDCLNT_BUFFERFLAGS_SILENT
+                        chunks.append(b"\x00" * (n * frame_bytes))
+                    elif data.value:
+                        chunks.append(ctypes.string_at(data.value, n * frame_bytes))
+                    got += n
+            finally:
+                release_buffer(ctypes.c_void_p(self._capture_client), n)
+        return b"".join(chunks)
+
+    def drain(self) -> None:
+        """Discard all currently buffered packets without copying."""
+        release_buffer = _vtable_fn(
+            self._capture_client,
+            4,
+            ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_uint32),
+        )
+        get_buffer = _vtable_fn(
+            self._capture_client,
+            3,
+            ctypes.CFUNCTYPE(
+                ctypes.c_long,
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_void_p),
+                ctypes.POINTER(ctypes.c_uint32),
+                ctypes.POINTER(ctypes.c_uint32),
+                ctypes.POINTER(ctypes.c_uint64),
+                ctypes.POINTER(ctypes.c_uint64),
+            ),
+        )
+        while self._next_packet_size() > 0:
+            data = ctypes.c_void_p(0)
+            frames = ctypes.c_uint32(0)
+            flags = ctypes.c_uint32(0)
+            dev_pos = ctypes.c_uint64(0)
+            qpc_pos = ctypes.c_uint64(0)
+            hr = int(
+                get_buffer(
+                    ctypes.c_void_p(self._capture_client),
+                    ctypes.byref(data),
+                    ctypes.byref(frames),
+                    ctypes.byref(flags),
+                    ctypes.byref(dev_pos),
+                    ctypes.byref(qpc_pos),
+                )
+            )
+            if hr != 0:
+                break
+            release_buffer(ctypes.c_void_p(self._capture_client), int(frames.value))
+
+    def close(self) -> None:
+        if self._started and self._audio_client:
+            try:
+                stop = _vtable_fn(
+                    self._audio_client, 11, ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_void_p)
+                )
+                stop(ctypes.c_void_p(self._audio_client))
+            except Exception:
+                pass
+            self._started = False
+        _com_release(self._capture_client)
+        self._capture_client = 0
+        _com_release(self._audio_client)
+        self._audio_client = 0
+        _com_release(self._async_op)
+        self._async_op = 0
+        if self._co_initialized:
+            try:
+                ctypes.windll.ole32.CoUninitialize()  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            self._co_initialized = False
+
+
 class MicStream:
     """Blocking mic reader producing int16 mono @ target sample_rate.
 
@@ -1067,10 +1487,13 @@ class MicStream:
 
 
 class LoopbackStream:
-    """WASAPI loopback reader (system / Teams playback) → int16 mono @ sample_rate.
+    """Loopback reader (any app's playback except krabobot) → int16 mono @ sample_rate.
 
-    Uses PyAudioWPatch; stock sounddevice PortAudio wheels lack loopback.
-    Same capture path as ``meeting.capture=loopback|mix``.
+    Primary backend: Windows Process Loopback (``VAD\\Process_Loopback``,
+    EXCLUDE_TARGET_PROCESS_TREE on the krabobot PID) — captures Teams/Zoom/
+    browser/any other app while excluding our own TTS/beeps. Fallback: device
+    WASAPI loopback via PyAudioWPatch for systems where that still works.
+    Same ``read_block`` contract as ``MicStream``.
     """
 
     def __init__(
@@ -1081,15 +1504,21 @@ class LoopbackStream:
         device: str | int | None = None,
         output_device: str | int | None = None,
         gain: float = DEFAULT_LOOPBACK_GAIN,
+        exclude_pid: int | None = None,
+        backend: str = "auto",
     ) -> None:
-        require_pyaudiowpatch()
         self.sample_rate = sample_rate
         self.block = max(1, int(sample_rate * block_ms / 1000))
         self._device_pref = device
         self._output_pref = output_device
         self._gain = float(gain) if gain and gain > 0 else 1.0
+        self._exclude_pid = int(exclude_pid) if exclude_pid else None
+        mode = (backend or "auto").strip().lower()
+        self._backend_pref = mode if mode in {"auto", "process", "device"} else "auto"
         self._pa = None
         self._stream = None
+        self._process_capture: _ProcessLoopbackCapture | None = None
+        self._backend = ""
         self._capture_rate = sample_rate
         self._channels = 1
         self._carry = np.zeros(0, dtype=np.float32)
@@ -1097,7 +1526,59 @@ class LoopbackStream:
         self._device_index: int | None = None
         self._fmt = "int16"
 
+    @property
+    def backend(self) -> str:
+        return self._backend
+
+    @property
+    def exclude_pid(self) -> int:
+        return resolve_loopback_exclude_pid(self._exclude_pid)
+
     def __enter__(self) -> LoopbackStream:
+        process_err: Exception | None = None
+        if self._backend_pref in {"auto", "process"} and sys.platform == "win32":
+            try:
+                return self._open_process_loopback()
+            except Exception as e:
+                process_err = e
+                if self._backend_pref == "process":
+                    raise RuntimeError(
+                        f"Не удалось открыть Process Loopback: {e}"
+                    ) from e
+        elif self._backend_pref == "process":
+            raise RuntimeError("Process Loopback is Windows-only")
+        try:
+            return self._open_device_loopback()
+        except Exception as device_err:
+            if process_err is not None:
+                raise RuntimeError(
+                    f"Process Loopback failed ({process_err}); "
+                    f"device WASAPI loopback failed ({device_err})"
+                ) from device_err
+            raise
+
+    def _open_process_loopback(self) -> LoopbackStream:
+        exclude_pid = resolve_loopback_exclude_pid(self._exclude_pid)
+        capture = _ProcessLoopbackCapture(exclude_pid=exclude_pid)
+        capture.open()
+        self._process_capture = capture
+        self._stream = capture  # non-None sentinel for read/drain asserts
+        self._fmt = "float32"
+        self._channels = int(capture.channels)
+        self._capture_rate = int(capture.capture_rate)
+        self._device_name = str(capture.device_name)
+        self._device_index = None
+        self._backend = "process-loopback"
+        print(
+            "loopback opened: process-loopback (exclude self) "
+            f"pid={exclude_pid} rate={self._capture_rate} ch={self._channels} "
+            f"fmt=float32 -> {self.sample_rate}",
+            flush=True,
+        )
+        return self
+
+    def _open_device_loopback(self) -> LoopbackStream:
+        require_pyaudiowpatch()
         assert pyaudio is not None
         candidates = _loopback_open_candidates(
             device=self._device_pref,
@@ -1123,6 +1604,13 @@ class LoopbackStream:
             self._capture_rate = rate
             self._device_name = name
             self._device_index = idx
+            self._backend = "device"
+            print(
+                "loopback opened: device "
+                f"idx={idx} name={name!r} rate={rate} ch={ch} "
+                f"fmt={fmt_name} -> {self.sample_rate}",
+                flush=True,
+            )
             return self
         # Close unused PyAudio if every candidate failed.
         try:
@@ -1139,7 +1627,14 @@ class LoopbackStream:
         ) from last_err
 
     def __exit__(self, *exc: object) -> None:
-        if self._stream is not None:
+        if self._process_capture is not None:
+            try:
+                self._process_capture.close()
+            except Exception:
+                pass
+            self._process_capture = None
+            self._stream = None
+        elif self._stream is not None:
             try:
                 self._stream.stop_stream()
                 self._stream.close()
@@ -1172,6 +1667,13 @@ class LoopbackStream:
         next talk ``read`` does not hang after an overflow.
         """
         assert self._stream is not None
+        if self._process_capture is not None:
+            try:
+                self._process_capture.drain()
+            except Exception:
+                pass
+            self._carry = np.zeros(0, dtype=np.float32)
+            return
         try:
             avail = int(self._stream.get_read_available())
         except Exception:
@@ -1193,6 +1695,8 @@ class LoopbackStream:
         returns whatever was collected (caller pads with silence).
         """
         assert self._stream is not None
+        if self._process_capture is not None:
+            return self._process_capture.read_raw(raw_n, timeout_s=timeout_s)
         deadline = time.monotonic() + max(0.05, float(timeout_s))
         chunks: list[bytes] = []
         got = 0
@@ -1295,6 +1799,7 @@ def probe_capture_rms(
     mean = (sum(rmss) / len(rmss)) if rmss else 0.0
     return {
         "source": (source or "mic").strip().lower(),
+        "backend": str(getattr(stream, "backend", "") or ""),
         "device_name": name,
         "device_index": idx,
         "blocks": len(rmss),
@@ -1317,7 +1822,7 @@ def open_capture_stream(
     """Open mic or WASAPI loopback with the same ``read_block`` contract.
 
     ``source``: ``mic`` (default) | ``loopback``.
-    Loopback reuses the same PyAudioWPatch path as meeting capture.
+    Loopback prefers Process Loopback (exclude-self) with device fallback.
     """
     mode = (source or "mic").strip().lower()
     if mode == "loopback":

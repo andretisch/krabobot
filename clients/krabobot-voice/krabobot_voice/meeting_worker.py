@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -36,6 +37,9 @@ def main(argv: list[str] | None = None) -> int:
         output_device=args.output_device or "",
         loopback_device=args.loopback_device or "",
         max_s=float(args.max_s),
+        # Standalone worker: exclude the launcher (parent) tree, which
+        # includes this worker; MeetingRecorder passes its main PID instead.
+        loopback_exclude_pid=int(args.exclude_pid or os.getppid()),
     )
 
     class _FileStop:
@@ -103,6 +107,7 @@ def _parse(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--input-device", default="")
     p.add_argument("--output-device", default="")
     p.add_argument("--loopback-device", default="")
+    p.add_argument("--exclude-pid", type=int, default=0, help="PID tree to exclude from Process Loopback")
     p.add_argument("--max-s", type=float, default=7200.0)
     return p.parse_args(argv)
 
