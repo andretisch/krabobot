@@ -36,8 +36,106 @@
   const sidebarExpand = document.getElementById("kb-sidebar-expand");
 
   const SIDEBAR_COLLAPSED_KEY = "krabobot_web_sidebar_collapsed";
+  const THEME_KEY = "krabobot_web_theme";
+  const PALETTE_KEY = "krabobot_web_palette";
   let kbIsAdmin = true;
   let kbLdapEnabled = false;
+
+  function kbSetTheme(theme) {
+    const t = theme === "dark" ? "dark" : "light";
+    document.documentElement.setAttribute("data-bs-theme", t);
+    try {
+      localStorage.setItem(THEME_KEY, t);
+    } catch (_e) {
+      /* ignore */
+    }
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) {
+      meta.setAttribute("content", t === "dark" ? "#071525" : "#003366");
+    }
+    const sel = document.getElementById("kb-ui-theme");
+    if (sel && sel.value !== t) {
+      sel.value = t;
+    }
+  }
+
+  function kbSetPalette(palette) {
+    const p = palette === "taxi" ? "taxi" : "krabobot";
+    document.documentElement.setAttribute("data-palette", p);
+    try {
+      localStorage.setItem(PALETTE_KEY, p);
+    } catch (_e) {
+      /* ignore */
+    }
+    const sel = document.getElementById("kb-ui-palette");
+    if (sel && sel.value !== p) {
+      sel.value = p;
+    }
+  }
+
+  function kbInitAppearanceControls() {
+    let theme = "light";
+    let palette = "krabobot";
+    try {
+      theme = localStorage.getItem(THEME_KEY) || "light";
+      palette = localStorage.getItem(PALETTE_KEY) || "krabobot";
+    } catch (_e) {
+      /* ignore */
+    }
+    kbSetTheme(theme);
+    kbSetPalette(palette);
+    const themeSel = document.getElementById("kb-ui-theme");
+    const paletteSel = document.getElementById("kb-ui-palette");
+    if (themeSel) {
+      themeSel.value = theme === "dark" ? "dark" : "light";
+      themeSel.addEventListener("change", () => kbSetTheme(themeSel.value));
+    }
+    if (paletteSel) {
+      paletteSel.value = palette === "taxi" ? "taxi" : "krabobot";
+      paletteSel.addEventListener("change", () => kbSetPalette(paletteSel.value));
+    }
+  }
+
+  function kbShowEmptyState() {
+    if (!logEl) {
+      return;
+    }
+    logEl.innerHTML =
+      '<div class="kb-empty-state">' +
+      "<h2>крабобот</h2>" +
+      '<p class="kb-empty-lead">Локальный AI-ассистент</p>' +
+      "<p>Напишите сообщение или выберите диалог слева. Команды бота — в меню ⋮ у поля ввода.</p>" +
+      "</div>";
+  }
+
+  function kbClearEmptyState() {
+    if (!logEl) {
+      return;
+    }
+    const empty = logEl.querySelector(".kb-empty-state");
+    if (empty) {
+      empty.remove();
+    }
+  }
+
+  function kbAutosizeInput() {
+    if (!inputEl) {
+      return;
+    }
+    inputEl.style.height = "auto";
+    const next = Math.min(160, Math.max(28, inputEl.scrollHeight));
+    inputEl.style.height = next + "px";
+  }
+
+  function closeSessionMenus() {
+    document.querySelectorAll(".kb-sess-dropdown:not([hidden])").forEach((el) => {
+      el.hidden = true;
+      const btn = el.parentElement && el.parentElement.querySelector(".kb-sess-menu-btn");
+      if (btn) {
+        btn.setAttribute("aria-expanded", "false");
+      }
+    });
+  }
 
   function getAuthToken() {
     try {
@@ -1235,6 +1333,7 @@
   }
 
   function appendMessage(role, text, kind) {
+    kbClearEmptyState();
     const wrap = document.createElement("div");
     wrap.className =
       "kb-msg " +
@@ -1755,6 +1854,13 @@
 
   function renderSessionList(rows, currentId) {
     sessionListEl.innerHTML = "";
+    if (!rows.length) {
+      const empty = document.createElement("li");
+      empty.className = "kb-sessions-empty";
+      empty.textContent = "Пока нет сохранённых диалогов.";
+      sessionListEl.appendChild(empty);
+      return;
+    }
     for (const row of rows) {
       const id = row.id;
       const li = document.createElement("li");
@@ -1774,9 +1880,28 @@
         await refreshSessions();
         await loadHistoryForSession(id);
       });
-      btn.addEventListener("dblclick", async (e) => {
-        e.preventDefault();
+      const menuWrap = document.createElement("div");
+      menuWrap.className = "kb-sess-menu-wrap";
+      const menuBtn = document.createElement("button");
+      menuBtn.type = "button";
+      menuBtn.className = "kb-sess-menu-btn";
+      menuBtn.textContent = "⋯";
+      menuBtn.title = "Действия с диалогом";
+      menuBtn.setAttribute("aria-label", "Действия с диалогом");
+      menuBtn.setAttribute("aria-haspopup", "true");
+      menuBtn.setAttribute("aria-expanded", "false");
+      const menu = document.createElement("div");
+      menu.className = "kb-sess-dropdown";
+      menu.setAttribute("role", "menu");
+      menu.hidden = true;
+      const renameItem = document.createElement("button");
+      renameItem.type = "button";
+      renameItem.className = "kb-dropdown-item";
+      renameItem.setAttribute("role", "menuitem");
+      renameItem.textContent = "Переименовать";
+      renameItem.addEventListener("click", async (e) => {
         e.stopPropagation();
+        closeSessionMenus();
         const current = String(row.title || label || "").trim();
         const next = window.prompt("Название диалога:", current);
         if (next === null) {
@@ -1791,13 +1916,14 @@
         }
         setTimeout(() => setStatus(""), 2000);
       });
-      const del = document.createElement("button");
-      del.type = "button";
-      del.className = "kb-sess-del";
-      del.textContent = "×";
-      del.title = "Удалить диалог";
-      del.addEventListener("click", async (e) => {
+      const delItem = document.createElement("button");
+      delItem.type = "button";
+      delItem.className = "kb-dropdown-item kb-dropdown-item--danger";
+      delItem.setAttribute("role", "menuitem");
+      delItem.textContent = "Удалить";
+      delItem.addEventListener("click", async (e) => {
         e.stopPropagation();
+        closeSessionMenus();
         if (!window.confirm("Удалить этот диалог с сервера?")) {
           return;
         }
@@ -1806,7 +1932,7 @@
           if (getSessionId() === id) {
             const nid = kbRandomUuid();
             setSessionId(nid);
-            logEl.innerHTML = "";
+            kbShowEmptyState();
           }
           await refreshSessions();
           setStatus("Удалено");
@@ -1815,8 +1941,22 @@
         }
         setTimeout(() => setStatus(""), 2000);
       });
+      menu.appendChild(renameItem);
+      menu.appendChild(delItem);
+      menuBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const open = menu.hidden;
+        closeSessionMenus();
+        if (open) {
+          menu.hidden = false;
+          menuBtn.setAttribute("aria-expanded", "true");
+        }
+      });
+      menu.addEventListener("click", (e) => e.stopPropagation());
+      menuWrap.appendChild(menuBtn);
+      menuWrap.appendChild(menu);
       li.appendChild(btn);
-      li.appendChild(del);
+      li.appendChild(menuWrap);
       sessionListEl.appendChild(li);
     }
   }
@@ -1870,8 +2010,12 @@
       if (getSessionId() !== id) {
         return;
       }
-      for (const m of msgs) {
-        appendVisibleMessage(m);
+      if (!msgs.length) {
+        kbShowEmptyState();
+      } else {
+        for (const m of msgs) {
+          appendVisibleMessage(m);
+        }
       }
       syncedVisibleCount = msgs.length;
       setStatus("");
@@ -2080,19 +2224,25 @@
         ? "\n" + filesSnapshot.map((f) => "📎 " + attachDisplayName(f)).join("\n")
         : "");
     inputEl.value = "";
+    kbAutosizeInput();
     await postChatTurn(userVisible || "(вложения)", text, filesSnapshot);
   });
 
   newSessionBtn.addEventListener("click", async () => {
     const nid = kbRandomUuid();
     setSessionId(nid);
-    logEl.innerHTML = "";
+    kbShowEmptyState();
     setStatus("Новый диалог");
     await refreshSessions();
     setTimeout(() => setStatus(""), 2000);
   });
 
   refreshSessionsBtn.addEventListener("click", () => refreshSessions());
+
+  if (inputEl) {
+    inputEl.addEventListener("input", kbAutosizeInput);
+    kbAutosizeInput();
+  }
 
   if (menuBtn) {
     menuBtn.addEventListener("click", (e) => {
@@ -2104,6 +2254,7 @@
   document.addEventListener("click", () => {
     closeMenu();
     closeCmdMenu();
+    closeSessionMenus();
   });
 
   if (menuDropdown) {
@@ -2128,6 +2279,7 @@
     if (e.key === "Escape") {
       closeMenu();
       closeCmdMenu();
+      closeSessionMenus();
       return;
     }
     if (e.key === "Enter" && !e.shiftKey && e.target === inputEl) {
@@ -2994,6 +3146,8 @@
       bar.appendChild(tag);
     });
   }
+
+  kbInitAppearanceControls();
 
   (async function init() {
     const ok = await ensureAuthenticated();
