@@ -30,6 +30,3 @@ AGENTS.md
 
 # Local blog drafts
 blog/
-
-# Local voice client runtime log
-.voice-client.log

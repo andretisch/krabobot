@@ -29,8 +29,8 @@
     },
     {
       icon: "🎧",
-      title: "Голосовой клиент",
-      text: "krabobot-voice на Windows: окно и tray, wake/PTT/совещания, настройки с Apply & restart; есть portable-сборка.",
+      title: "Голос и совещания по API",
+      text: "Серверные эндпоинты /v1/voice/turn и /v1/voice/meeting — сторонний клиент или плагин на любой платформе.",
     },
     {
       icon: "🌐",
@@ -72,21 +72,19 @@
     },
     {
       name: "Voice",
-      text: "Локальный клиент krabobot-voice: wake-фраза, PTT и запись совещаний рядом с gateway/serve.",
-      tag: "Windows · portable",
+      text: "Канал voice и HTTP API для подключения стороннего голосового клиента или плагина (turn, meeting upload).",
+      tag: "API · plugin",
     },
   ];
 
   const NEWS = [
     {
-      date: "30 сентября 2026",
-      title: "Окно и tray у krabobot-voice",
+      date: "12 ноября 2026",
+      title: "Голос и совещания через API",
       text:
-        "На Windows у голосового клиента появился UI: окно и иконка в tray со статусом " +
-        "(idle, listen, meeting и др.), кнопками Meeting и PTT, логом. В настройках — wake, " +
-        "устройства и hotkeys; Apply & restart сохраняет YAML и перезапускает цикл. Можно " +
-        "стартовать свёрнутым в tray (config или CLI). Иконка краба — в окне, tray и на панели задач. " +
-        "Portable-сборка по-прежнему собирается скриптом в clients/krabobot-voice.",
+        "Встроенный Windows-клиент убран из репозитория. Голосовые turn и загрузка " +
+        "совещаний остаются на сервере (POST /v1/voice/turn, /v1/voice/meeting) — " +
+        "подключайте сторонний клиент, плагин или клиент другой платформы.",
     },
   ];
 
