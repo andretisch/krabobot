@@ -184,7 +184,7 @@ krabobot gateway`;
       toggle.setAttribute("aria-expanded", String(open));
     });
 
-    nav.querySelectorAll("a[href^='#']").forEach((link) => {
+    nav.querySelectorAll("a").forEach((link) => {
       link.addEventListener("click", () => {
         nav.classList.remove("is-open");
         toggle.setAttribute("aria-expanded", "false");

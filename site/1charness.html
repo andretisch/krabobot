@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="1CHarness — чат-агент для 1С:Предприятие: вопросы по данным базы, инструменты сеанса и LLM через OpenAI-compatible API." />
+  <meta name="theme-color" content="#1a1a1a" />
+  <title>1CHarness — чат-агент для 1С:Предприятие</title>
+  <link rel="icon" type="image/png" href="assets/favicon.png" sizes="any" />
+  <link rel="apple-touch-icon" href="assets/favicon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body class="page-1charness">
+  <header class="site-header" id="top">
+    <div class="site-wrap site-header__inner">
+      <a class="site-brand" href="index.html" aria-label="Крабобот — на главную">
+        <img src="assets/krabobot-logo.png" alt="" class="site-brand__logo" width="428" height="96" />
+      </a>
+      <button type="button" class="site-nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="site-nav">
+        <span class="site-nav-toggle__bar"></span>
+        <span class="site-nav-toggle__bar"></span>
+        <span class="site-nav-toggle__bar"></span>
+        <span class="visually-hidden">Меню</span>
+      </button>
+      <nav class="site-nav" id="site-nav" aria-label="Основная навигация">
+        <a href="index.html#features">Возможности</a>
+        <a href="index.html#channels">Каналы</a>
+        <a href="index.html#news">Новости</a>
+        <a href="index.html#start">Старт</a>
+        <a href="1charness.html" aria-current="page">1CHarness</a>
+        <a class="site-nav__cta" href="https://github.com/andretisch/1CHarness" target="_blank" rel="noopener noreferrer">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="h1c-hero">
+      <div class="h1c-hero__atmosphere" aria-hidden="true"></div>
+      <div class="site-wrap h1c-hero__inner">
+        <p class="h1c-hero__eyebrow">Отдельный проект · обработка для 1С</p>
+        <h1 class="h1c-hero__brand">1CHarness</h1>
+        <p class="h1c-hero__tagline">
+          Чат-агент для <strong>1С:Предприятие</strong>: спрашивайте базу на русском —
+          субагент сам разбирает метаданные и запросы, в чат возвращает краткий ответ.
+        </p>
+        <div class="h1c-hero__actions">
+          <a
+            class="btn btn--h1c"
+            href="https://github.com/andretisch/1CHarness"
+            target="_blank"
+            rel="noopener noreferrer"
+          >Открыть на GitHub</a>
+          <a class="btn btn--h1c-ghost" href="#about">Как устроен</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="about">
+      <div class="site-wrap h1c-about">
+        <header class="section__head">
+          <h2>Что это</h2>
+          <p>
+            Внешняя обработка с UI чата внутри окна 1С. Диалог в духе крабобота,
+            инструменты сеанса — через DOM-мост обработки, LLM — любой OpenAI-compatible API
+            (по умолчанию Ollama Cloud).
+          </p>
+        </header>
+        <ul class="h1c-points">
+          <li>
+            <h3>explore_data</h3>
+            <p>
+              Главный сценарий для вопросов по данным: один вызов — субагент по карте
+              <code>data/map.md</code>, в чат только summary и trace.
+            </p>
+          </li>
+          <li>
+            <h3>Карта конфигурации</h3>
+            <p>
+              При первом диалоге база может сама собрать карту объектов и потоков —
+              дальше агент опирается на неё, а не на слепой перебор.
+            </p>
+          </li>
+          <li>
+            <h3>Графики и черновики</h3>
+            <p>
+              Интерактивные превью Chart.js в ответе, открытие формы документа без записи,
+              отчёты и запросы прямо из сеанса.
+            </p>
+          </li>
+          <li>
+            <h3>Анонимизация</h3>
+            <p>
+              ИНН, телефоны, почта и названия организаций можно подменять метками
+              перед отправкой в LLM и восстанавливать в ответе.
+            </p>
+          </li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="section section--alt" id="start-1c">
+      <div class="site-wrap start">
+        <header class="section__head">
+          <h2>Быстрый старт</h2>
+          <p>Откройте обработку в своей базе и настройте подключение к LLM.</p>
+        </header>
+        <ol class="h1c-steps">
+          <li>Скачайте <code>epf/1CHarness.epf</code> из репозитория и откройте в 1С (на предупреждении — «Да»).</li>
+          <li>Новый диалог: при отсутствии карты данных согласитесь построить её.</li>
+          <li>
+            Настройки → Подключение: например <code>https://ollama.com/v1</code>,
+            модель и API Key — пишутся в <code>workspace/config.json</code>.
+          </li>
+          <li>Enter — отправить; Shift+Enter — новая строка.</li>
+        </ol>
+        <div class="h1c-cta-row">
+          <a
+            class="btn btn--h1c"
+            href="https://github.com/andretisch/1CHarness"
+            target="_blank"
+            rel="noopener noreferrer"
+          >Репозиторий 1CHarness</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="relation">
+      <div class="site-wrap h1c-relation">
+        <h2>Связь с крабоботом</h2>
+        <p>
+          1CHarness — <strong>отдельный продукт</strong> для 1С, не канал и не плагин krabobot.
+          UI чата вдохновлён крабоботом (в том числе палитра «Крабобот» рядом с «1С Такси»),
+          но репозиторий, релизы и сценарии использования — свои.
+        </p>
+        <p>
+          <a href="index.html">← На главную крабобота</a>
+        </p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="site-wrap site-footer__inner">
+      <p>1CHarness · отдельный проект · <span id="year"></span></p>
+      <p>
+        <a href="https://github.com/andretisch/1CHarness" target="_blank" rel="noopener noreferrer">GitHub</a>
+        ·
+        <a href="index.html">krabobot</a>
+      </p>
+    </div>
+  </footer>
+
+  <script src="js/main.js" defer></script>
+</body>
+</html>
