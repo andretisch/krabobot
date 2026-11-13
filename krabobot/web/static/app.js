@@ -18,13 +18,16 @@
   const fileInputEl = document.getElementById("kb-files");
   const menuBtn = document.getElementById("kb-menu-btn");
   const menuDropdown = document.getElementById("kb-menu-dropdown");
-  const navChat = document.getElementById("kb-nav-chat");
   const navSettings = document.getElementById("kb-nav-settings");
-  const navAdmin = document.getElementById("kb-nav-admin");
   const navLogout = document.getElementById("kb-nav-logout");
   const viewChat = document.getElementById("kb-view-chat");
   const viewSettings = document.getElementById("kb-view-settings");
   const viewAdmin = document.getElementById("kb-view-admin");
+  const settingsModal = document.getElementById("kb-settings-modal");
+  const modalTabSettings = document.getElementById("kb-modal-tab-settings");
+  const modalTabAdmin = document.getElementById("kb-modal-tab-admin");
+  const modalPaneSettings = document.getElementById("kb-modal-pane-settings");
+  const modalPaneAdmin = document.getElementById("kb-modal-pane-admin");
   const authGate = document.getElementById("kb-auth-gate");
   const layoutElRoot = document.getElementById("kb-layout");
   const copySessionBtn = document.getElementById("kb-copy-session");
@@ -34,6 +37,9 @@
   const sidebarEl = document.getElementById("kb-sidebar");
   const sidebarToggle = document.getElementById("kb-sidebar-toggle");
   const sidebarExpand = document.getElementById("kb-sidebar-expand");
+  let settingsModalPrevFocus = null;
+  let settingsPrimaryTab = "settings";
+  let settingsSubTab = "main";
 
   const SIDEBAR_COLLAPSED_KEY = "krabobot_web_sidebar_collapsed";
   const THEME_KEY = "krabobot_web_theme";
@@ -1162,6 +1168,7 @@
         return {};
       });
       if (!r.ok) {
+        rootEl.removeAttribute("data-kb-loaded");
         rootEl.hidden = true;
         kbCfgLastLoaded = null;
         const msg =
@@ -1183,9 +1190,11 @@
       kbCfgRenderCore(mainEl, data);
       kbCfgRenderChannels(chEl, data);
       kbCfgRenderOther(otEl, data);
-      rootEl.hidden = false;
+      rootEl.setAttribute("data-kb-loaded", "1");
+      rootEl.hidden = settingsSubTab === "interface";
       await kbCfgRefreshBackupSelect();
     } catch (_e) {
+      rootEl.removeAttribute("data-kb-loaded");
       rootEl.hidden = true;
       errEl.textContent = "Ошибка сети при загрузке конфигурации.";
       errEl.hidden = false;
@@ -1249,58 +1258,123 @@
     if (navSettings) {
       navSettings.hidden = !kbIsAdmin;
     }
-    if (navAdmin) {
-      navAdmin.hidden = !kbIsAdmin;
+    if (modalTabAdmin) {
+      modalTabAdmin.hidden = !kbIsAdmin;
     }
-    if (!kbIsAdmin && viewSettings) {
-      viewSettings.classList.add("kb-view--hidden");
-      viewSettings.hidden = true;
-    }
-    if (!kbIsAdmin && viewAdmin) {
-      viewAdmin.classList.add("kb-view--hidden");
-      viewAdmin.hidden = true;
-    }
-    if (!kbIsAdmin && viewChat) {
-      viewChat.classList.remove("kb-view--hidden");
+    if (!kbIsAdmin && settingsModal && !settingsModal.hidden) {
+      closeSettingsModal();
     }
   }
 
-  function switchTab(which) {
-    if (!kbIsAdmin && which !== "chat") {
-      closeMenu();
-      return;
+  function setSettingsPrimaryTab(which) {
+    const wantAdmin = which === "admin" && kbIsAdmin;
+    settingsPrimaryTab = wantAdmin ? "admin" : "settings";
+    const isSettings = settingsPrimaryTab === "settings";
+    if (modalTabSettings) {
+      modalTabSettings.classList.toggle("kb-modal-tab--active", isSettings);
+      modalTabSettings.setAttribute("aria-selected", String(isSettings));
     }
-    const isChat = which === "chat";
-    const isSettings = which === "settings";
-    const isAdmin = which === "admin";
-    if (viewChat) {
-      viewChat.classList.toggle("kb-view--hidden", !isChat);
+    if (modalTabAdmin) {
+      modalTabAdmin.classList.toggle("kb-modal-tab--active", !isSettings);
+      modalTabAdmin.setAttribute("aria-selected", String(!isSettings));
+    }
+    if (modalPaneSettings) {
+      modalPaneSettings.hidden = !isSettings;
+    }
+    if (modalPaneAdmin) {
+      modalPaneAdmin.hidden = isSettings;
     }
     if (viewSettings) {
-      viewSettings.classList.toggle("kb-view--hidden", !isSettings);
       viewSettings.hidden = !isSettings;
     }
     if (viewAdmin) {
-      viewAdmin.classList.toggle("kb-view--hidden", !isAdmin);
-      viewAdmin.hidden = !isAdmin;
+      viewAdmin.hidden = isSettings;
     }
-    if (navChat) {
-      navChat.classList.toggle("kb-dropdown-item--active", isChat);
+  }
+
+  function setSettingsSubTab(which) {
+    const allowed = { main: 1, channels: 1, other: 1, interface: 1 };
+    settingsSubTab = allowed[which] ? which : "main";
+    document.querySelectorAll("[data-kb-settings-sub]").forEach((btn) => {
+      const active = btn.getAttribute("data-kb-settings-sub") === settingsSubTab;
+      btn.classList.toggle("kb-modal-subtab--active", active);
+      btn.setAttribute("aria-selected", String(active));
+    });
+    ["main", "channels", "other", "interface"].forEach((id) => {
+      const pane = document.getElementById("kb-settings-sub-" + id);
+      if (pane) {
+        pane.hidden = id !== settingsSubTab;
+      }
+    });
+    const showCfg = settingsSubTab !== "interface";
+    const toolbar = document.getElementById("kb-cfg-toolbar");
+    const note = document.getElementById("kb-cfg-note");
+    const root = document.getElementById("kb-cfg-root");
+    const okBanner = document.getElementById("kb-cfg-ok");
+    const errBanner = document.getElementById("kb-cfg-error");
+    if (toolbar) {
+      toolbar.hidden = !showCfg;
     }
-    if (navSettings) {
-      navSettings.classList.toggle("kb-dropdown-item--active", isSettings);
+    if (note) {
+      note.hidden = !showCfg;
     }
-    if (navAdmin) {
-      navAdmin.classList.toggle("kb-dropdown-item--active", isAdmin);
+    if (root) {
+      if (showCfg) {
+        if (root.getAttribute("data-kb-loaded") === "1") {
+          root.hidden = false;
+        }
+      } else {
+        root.hidden = true;
+      }
     }
-    if (isSettings) {
-      refreshSettingsPanel();
+    if (okBanner && !showCfg) {
+      okBanner.hidden = true;
     }
-    if (isAdmin) {
-      refreshAdminUsers();
+    if (errBanner && !showCfg) {
+      errBanner.hidden = true;
+    }
+  }
+
+  function openSettingsModal(primary) {
+    if (!kbIsAdmin || !settingsModal) {
+      closeMenu();
+      return;
     }
     closeMenu();
     closeCmdMenu();
+    closeSessionMenus();
+    settingsModalPrevFocus = document.activeElement;
+    setSettingsPrimaryTab(primary || "settings");
+    setSettingsSubTab(settingsSubTab || "main");
+    settingsModal.hidden = false;
+    document.body.classList.add("kb-modal-open");
+    if (settingsPrimaryTab === "admin") {
+      refreshAdminUsers();
+    } else {
+      refreshSettingsPanel();
+    }
+    const focusTarget =
+      settingsPrimaryTab === "admin" ? modalTabAdmin : modalTabSettings;
+    if (focusTarget && typeof focusTarget.focus === "function") {
+      focusTarget.focus();
+    }
+  }
+
+  function closeSettingsModal() {
+    if (!settingsModal || settingsModal.hidden) {
+      return;
+    }
+    settingsModal.hidden = true;
+    document.body.classList.remove("kb-modal-open");
+    const prev = settingsModalPrevFocus;
+    settingsModalPrevFocus = null;
+    if (prev && typeof prev.focus === "function" && document.contains(prev)) {
+      prev.focus();
+    }
+  }
+
+  function settingsModalIsOpen() {
+    return !!(settingsModal && !settingsModal.hidden);
   }
 
   async function refreshSettingsPanel() {
@@ -1916,6 +1990,38 @@
         }
         setTimeout(() => setStatus(""), 2000);
       });
+      const exportMdItem = document.createElement("button");
+      exportMdItem.type = "button";
+      exportMdItem.className = "kb-dropdown-item";
+      exportMdItem.setAttribute("role", "menuitem");
+      exportMdItem.textContent = "Выгрузить Markdown";
+      exportMdItem.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        closeSessionMenus();
+        try {
+          await exportSessionChat(id, row, "md");
+          setStatus("Чат выгружен (.md)");
+        } catch (err) {
+          appendMessage("assistant", String(err.message || err), "error");
+        }
+        setTimeout(() => setStatus(""), 2500);
+      });
+      const exportJsonItem = document.createElement("button");
+      exportJsonItem.type = "button";
+      exportJsonItem.className = "kb-dropdown-item";
+      exportJsonItem.setAttribute("role", "menuitem");
+      exportJsonItem.textContent = "Выгрузить JSON";
+      exportJsonItem.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        closeSessionMenus();
+        try {
+          await exportSessionChat(id, row, "json");
+          setStatus("Чат выгружен (.json)");
+        } catch (err) {
+          appendMessage("assistant", String(err.message || err), "error");
+        }
+        setTimeout(() => setStatus(""), 2500);
+      });
       const delItem = document.createElement("button");
       delItem.type = "button";
       delItem.className = "kb-dropdown-item kb-dropdown-item--danger";
@@ -1942,6 +2048,8 @@
         setTimeout(() => setStatus(""), 2000);
       });
       menu.appendChild(renameItem);
+      menu.appendChild(exportMdItem);
+      menu.appendChild(exportJsonItem);
       menu.appendChild(delItem);
       menuBtn.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -1988,16 +2096,128 @@
   }
 
   function chatViewIsOpen() {
-    return !!(
-      viewChat &&
-      !viewChat.hidden &&
-      !viewChat.classList.contains("kb-view--hidden")
+    return !!(viewChat && layoutElRoot && !layoutElRoot.hidden);
+  }
+
+  function isHiddenServiceChatText(text) {
+    const body = String(text || "").replace(/^\s+/, "");
+    return (
+      body.startsWith("[Служебно:") ||
+      body.startsWith("[Инструмент `") ||
+      body.startsWith("[Инструмент '")
+    );
+  }
+
+  function filterExportableMessages(msgs) {
+    const out = [];
+    for (const m of msgs || []) {
+      const text = String(m.content || "");
+      if (isHiddenServiceChatText(text)) {
+        continue;
+      }
+      const role = m.role === "user" ? "user" : "assistant";
+      out.push({ role: role, content: text });
+    }
+    return out;
+  }
+
+  function kbSanitizeFilenamePart(raw) {
+    const s = String(raw || "")
+      .trim()
+      .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, " ")
+      .replace(/\s+/g, " ")
+      .slice(0, 80)
+      .trim();
+    return s || "dialog";
+  }
+
+  function kbExportStamp() {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, "0");
+    return (
+      d.getFullYear() +
+      "-" +
+      p(d.getMonth() + 1) +
+      "-" +
+      p(d.getDate()) +
+      "_" +
+      p(d.getHours()) +
+      p(d.getMinutes())
+    );
+  }
+
+  function kbTriggerDownload(filename, text, mime) {
+    const blob = new Blob([text], { type: mime || "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+  }
+
+  function messagesToMarkdown(title, sessionId, messages) {
+    const lines = [];
+    lines.push("# " + (title || "Диалог крабобота"));
+    lines.push("");
+    lines.push("- Сессия: `" + sessionId + "`");
+    lines.push("- Выгрузка: " + new Date().toLocaleString("ru-RU"));
+    lines.push("");
+    for (const m of messages) {
+      const who = m.role === "user" ? "Вы" : "Ассистент";
+      lines.push("## " + who);
+      lines.push("");
+      lines.push(String(m.content || ""));
+      lines.push("");
+    }
+    return lines.join("\n");
+  }
+
+  async function exportSessionChat(sessionId, row, format) {
+    const id = String(sessionId || "").trim();
+    if (!id) {
+      throw new Error("Нет идентификатора диалога");
+    }
+    const msgs = filterExportableMessages(await fetchSessionMessages(id));
+    if (!msgs.length) {
+      throw new Error("В диалоге нет сообщений для выгрузки");
+    }
+    const title = kbSanitizeFilenamePart(
+      (row && row.title) || kbSessionListLabel(row || { id: id }) || id
+    );
+    const stamp = kbExportStamp();
+    const base = "krabobot-" + title + "-" + stamp;
+    if (format === "json") {
+      const payload = {
+        session_id: id,
+        title: (row && row.title) || title,
+        exported_at: new Date().toISOString(),
+        messages: msgs,
+      };
+      kbTriggerDownload(
+        base + ".json",
+        JSON.stringify(payload, null, 2) + "\n",
+        "application/json;charset=utf-8"
+      );
+      return;
+    }
+    kbTriggerDownload(
+      base + ".md",
+      messagesToMarkdown((row && row.title) || title, id, msgs),
+      "text/markdown;charset=utf-8"
     );
   }
 
   function appendVisibleMessage(m) {
+    const text = String(m.content || "");
+    if (isHiddenServiceChatText(text)) {
+      return;
+    }
     const role = m.role === "user" ? "user" : "assistant";
-    appendMessage(role, String(m.content || ""));
+    appendMessage(role, text);
   }
 
   async function loadHistoryForSession(id) {
@@ -2277,6 +2497,10 @@
 
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
+      if (settingsModalIsOpen()) {
+        closeSettingsModal();
+        return;
+      }
       closeMenu();
       closeCmdMenu();
       closeSessionMenus();
@@ -2288,21 +2512,51 @@
     }
   });
 
-  if (navChat) {
-    navChat.addEventListener("click", () => switchTab("chat"));
-  }
   if (navSettings) {
-    navSettings.addEventListener("click", () => switchTab("settings"));
-  }
-  if (navAdmin) {
-    navAdmin.addEventListener("click", () => switchTab("admin"));
+    const openSettings = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openSettingsModal("settings");
+    };
+    navSettings.addEventListener("mousedown", openSettings);
+    navSettings.addEventListener("click", openSettings);
   }
   if (navLogout) {
     navLogout.addEventListener("click", () => {
       closeMenu();
+      closeSettingsModal();
       kbLogout();
     });
   }
+
+  if (settingsModal) {
+    settingsModal.addEventListener("click", (e) => {
+      const t = e.target;
+      if (t && t.closest && t.closest("[data-kb-modal-close]")) {
+        closeSettingsModal();
+      }
+    });
+  }
+  if (modalTabSettings) {
+    modalTabSettings.addEventListener("click", () => {
+      setSettingsPrimaryTab("settings");
+      refreshSettingsPanel();
+    });
+  }
+  if (modalTabAdmin) {
+    modalTabAdmin.addEventListener("click", () => {
+      if (!kbIsAdmin) {
+        return;
+      }
+      setSettingsPrimaryTab("admin");
+      refreshAdminUsers();
+    });
+  }
+  document.querySelectorAll("[data-kb-settings-sub]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      setSettingsSubTab(btn.getAttribute("data-kb-settings-sub") || "main");
+    });
+  });
 
   function applyLdapLoginFields(enabled) {
     kbLdapEnabled = !!enabled;

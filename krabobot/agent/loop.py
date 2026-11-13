@@ -980,8 +980,17 @@ class AgentLoop:
                 sender_id=msg.sender_id,
             )
 
-            if final_content is None:
+            if not (final_content or "").strip():
                 final_content = "I've completed processing but have no response to give."
+                if (
+                    all_msgs
+                    and all_msgs[-1].get("role") == "assistant"
+                    and not str(all_msgs[-1].get("content") or "").strip()
+                    and not all_msgs[-1].get("tool_calls")
+                ):
+                    all_msgs[-1]["content"] = final_content
+                else:
+                    all_msgs.append({"role": "assistant", "content": final_content})
 
             self._save_turn(session, all_msgs, 1 + len(history))
             self._attach_turn_files(session)
@@ -1131,6 +1140,9 @@ class AgentLoop:
     def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
         """Save new-turn messages into session, truncating large tool results."""
         from datetime import datetime
+
+        from krabobot.agent.runner import is_tool_vision_bridge_content
+
         for m in messages[skip:]:
             entry = dict(m)
             role, content = entry.get("role"), entry.get("content")
@@ -1145,6 +1157,9 @@ class AgentLoop:
                         continue
                     entry["content"] = filtered
             elif role == "user":
+                # Vision bridge packets exist only for the LLM API; never user-visible history.
+                if is_tool_vision_bridge_content(content):
+                    continue
                 if isinstance(content, str):
                     cleaned = self._clean_user_text_for_persist(content)
                     if not cleaned.strip():

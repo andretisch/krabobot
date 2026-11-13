@@ -20,11 +20,31 @@ _DEFAULT_ERROR_MESSAGE = "Sorry, I encountered an error calling the AI model."
 
 # OpenAI Chat Completions tool messages only allow string or *text* parts — not image_url.
 # Tools that return native image blocks (read_file, web_fetch) must attach pixels via a bridge user message.
+TOOL_VISION_BRIDGE_PREFIX = "[Служебно: зрение модели]"
 _TOOL_VISION_BRIDGE_HEAD = (
-    "[Служебно: зрение модели] Сообщения role=tool выше — только подтверждение вызова. "
+    f"{TOOL_VISION_BRIDGE_PREFIX} Сообщения role=tool выше — только подтверждение вызова. "
     "Ниже в этом сообщении переданы реальные пиксели из инструментов (image_url). "
     "Опиши и отвечай по ним напрямую — не утверждай, что ты «не видишь файл на диске»."
 )
+
+
+def is_tool_vision_bridge_content(content: Any) -> bool:
+    """True for synthetic user packets that carry tool image pixels to the LLM.
+
+    These must not appear in the web transcript as human «Вы» bubbles.
+    """
+    if isinstance(content, str):
+        return content.lstrip().startswith(TOOL_VISION_BRIDGE_PREFIX)
+    if isinstance(content, list):
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") not in ("text", "input_text"):
+                continue
+            text = str(block.get("text") or "")
+            if text.strip():
+                return text.lstrip().startswith(TOOL_VISION_BRIDGE_PREFIX)
+    return False
 
 
 def _tool_result_contains_vision_media(result: Any) -> bool:

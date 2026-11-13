@@ -336,6 +336,18 @@ async def test_subagent_max_iterations_announces_existing_fallback(tmp_path, mon
     assert args[5] == "ok"
 
 
+def test_is_tool_vision_bridge_content_detects_prefix():
+    from krabobot.agent.runner import TOOL_VISION_BRIDGE_PREFIX, is_tool_vision_bridge_content
+
+    assert is_tool_vision_bridge_content(f"{TOOL_VISION_BRIDGE_PREFIX} x")
+    assert is_tool_vision_bridge_content([
+        {"type": "text", "text": f"{TOOL_VISION_BRIDGE_PREFIX} x"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,QQ=="}},
+    ])
+    assert not is_tool_vision_bridge_content("обычный вопрос")
+    assert not is_tool_vision_bridge_content([{"type": "text", "text": "hi"}])
+
+
 @pytest.mark.asyncio
 async def test_runner_read_file_image_adds_user_vision_bridge():
     """Tool role cannot carry image_url on OpenAI Chat Completions — bridge user message."""

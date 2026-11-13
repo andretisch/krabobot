@@ -26,6 +26,7 @@ from pydantic import ValidationError
 
 from krabobot.agent.context import ContextBuilder
 from krabobot.agent.loop import AgentLoop
+from krabobot.agent.runner import is_tool_vision_bridge_content
 from krabobot.agent.tools.voice import pop_voice_actions
 from krabobot.api.voice_io import synthesize_speech_wav, transcribe_audio
 from krabobot.api.web_auth import (
@@ -558,11 +559,15 @@ def derive_session_title(
     for msg in messages or []:
         if msg.get("role") != "user":
             continue
-        raw = _ui_text_from_stored_content(msg.get("content")).strip()
+        content = msg.get("content")
+        if is_tool_vision_bridge_content(content):
+            continue
+        raw = _ui_text_from_stored_content(content).strip()
+        if is_tool_vision_bridge_content(raw):
+            continue
         title = _truncate_session_title(raw, max_len=max_len)
         if title:
             return title
-        break
     return ""
 
 
@@ -959,6 +964,11 @@ async def handle_web_session_messages(request: web.Request) -> web.Response:
             continue
         # Exec/subagent notices wake the model. They are not something the user typed.
         if role == "user" and is_background_wakeup(text):
+            continue
+        # Tool→vision bridge packets are role=user for the LLM API only.
+        if role == "user" and (
+            is_tool_vision_bridge_content(content) or is_tool_vision_bridge_content(text)
+        ):
             continue
         out.append({"role": role, "content": text})
     return web.json_response(

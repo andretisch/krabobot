@@ -251,21 +251,12 @@ body {
   z-index: 1;
 }
 
-#kb-view-settings {
-  position: relative;
-  z-index: 1;
-}
-
 /* Watermark: весь kb-panel-stage (не только узкая колонка main); размер от ширины колонки, не 100vw */
 .kb-chat-backdrop {
   position: absolute;
   inset: 0;
   z-index: 0;
   pointer-events: none;
-}
-
-.kb-panel-stage:has(#kb-view-settings:not(.kb-view--hidden)) .kb-chat-backdrop {
-  opacity: 0;
 }
 
 .kb-chat-backdrop::before {
@@ -290,13 +281,6 @@ body {
   display: none !important;
 }
 
-/* Настройки: длинная страница прокручивается внутри колонки, не у body */
-#kb-view-settings:not(.kb-view--hidden) {
-  overflow-y: auto;
-  overflow-x: hidden;
-  -webkit-overflow-scrolling: touch;
-}
-
 .kb-settings {
   padding: 1rem 1.25rem 2rem;
   max-width: 40rem;
@@ -305,6 +289,16 @@ body {
   border-radius: 12px;
   border: 1px solid var(--border-soft);
   box-shadow: 0 4px 24px rgba(0, 51, 102, 0.08);
+}
+
+.kb-settings--modal {
+  max-width: none;
+  margin: 0;
+  padding: 0.25rem 0 1rem;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
 }
 
 .kb-settings-h {
@@ -1430,16 +1424,6 @@ html[data-bs-theme="dark"] .kb-compose-send:hover:not(:disabled) {
 }
 
 /* —— Admin —— */
-#kb-view-admin:not(.kb-view--hidden) {
-  overflow-y: auto;
-  overflow-x: hidden;
-  -webkit-overflow-scrolling: touch;
-}
-
-.kb-panel-stage:has(#kb-view-admin:not(.kb-view--hidden)) .kb-chat-backdrop {
-  opacity: 0;
-}
-
 .kb-admin-tabs {
   display: flex;
   gap: 0.35rem;
@@ -1698,7 +1682,7 @@ html[data-bs-theme="dark"] .kb-compose-send:hover:not(:disabled) {
   right: 0;
   top: calc(100% + 0.25rem);
   z-index: 40;
-  min-width: 11rem;
+  min-width: 13.5rem;
   padding: 0.35rem;
   border-radius: 10px;
   background: var(--surface);
@@ -1916,4 +1900,193 @@ html[data-bs-theme="dark"] .kb-attach-tag {
 html[data-bs-theme="dark"] meta,
 html[data-bs-theme="dark"] {
   color-scheme: dark;
+}
+
+/* —— Settings modal (1CHarness-like) —— */
+body.kb-modal-open {
+  overflow: hidden;
+}
+
+.kb-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1060;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+
+.kb-modal[hidden] {
+  display: none !important;
+}
+
+.kb-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(7, 21, 37, 0.48);
+}
+
+.kb-modal-dialog {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  width: min(52rem, 100%);
+  max-height: min(92dvh, 920px);
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border-soft);
+  border-radius: 14px;
+  box-shadow: 0 18px 48px rgba(0, 26, 51, 0.28);
+  overflow: hidden;
+}
+
+.kb-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.9rem 1.1rem;
+  border-bottom: 1px solid var(--border-soft);
+  flex-shrink: 0;
+}
+
+.kb-modal-title {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--navy);
+}
+
+.kb-modal-close {
+  appearance: none;
+  border: 1px solid var(--border-soft);
+  background: var(--surface);
+  color: var(--muted);
+  width: 2rem;
+  height: 2rem;
+  border-radius: 8px;
+  font-size: 1.35rem;
+  line-height: 1;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.kb-modal-close:hover {
+  color: var(--navy);
+  border-color: var(--accent);
+}
+
+.kb-modal-primary-tabs,
+.kb-modal-subtabs {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.25rem;
+  padding: 0.55rem 1rem 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.kb-modal-subtabs {
+  margin: 0 0 0.75rem;
+  padding-top: 0.35rem;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.kb-modal-tab,
+.kb-modal-subtab {
+  appearance: none;
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 0.55rem 0.85rem;
+  border-radius: 8px 8px 0 0;
+  cursor: pointer;
+  white-space: nowrap;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.kb-modal-tab:hover,
+.kb-modal-subtab:hover {
+  color: var(--navy);
+}
+
+.kb-modal-tab--active,
+.kb-modal-subtab--active {
+  color: var(--navy);
+  border-bottom-color: var(--accent);
+  background: rgba(0, 123, 255, 0.08);
+}
+
+.kb-modal-tab[hidden] {
+  display: none !important;
+}
+
+.kb-modal-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 0.75rem 1.1rem 0.25rem;
+}
+
+.kb-modal-pane[hidden],
+.kb-settings-subpane[hidden] {
+  display: none !important;
+}
+
+.kb-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding: 0.75rem 1.1rem 1rem;
+  border-top: 1px solid var(--border-soft);
+  flex-shrink: 0;
+}
+
+html[data-palette="taxi"] .kb-modal-tab--active,
+html[data-palette="taxi"] .kb-modal-subtab--active {
+  background: rgba(255, 226, 137, 0.35);
+}
+
+html[data-bs-theme="dark"] .kb-modal-backdrop {
+  background: rgba(0, 0, 0, 0.62);
+}
+
+html[data-bs-theme="dark"] .kb-modal-dialog {
+  background: var(--surface);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+}
+
+html[data-bs-theme="dark"] .kb-modal-tab--active,
+html[data-bs-theme="dark"] .kb-modal-subtab--active {
+  background: rgba(77, 163, 255, 0.14);
+}
+
+@media (max-width: 640px) {
+  .kb-modal {
+    padding: 0;
+    align-items: stretch;
+  }
+
+  .kb-modal-dialog {
+    width: 100%;
+    max-height: 100dvh;
+    height: 100dvh;
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+  }
+
+  .kb-cfg-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }

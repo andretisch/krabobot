@@ -1,5 +1,6 @@
 from krabobot.agent.context import ContextBuilder
 from krabobot.agent.loop import AgentLoop
+from krabobot.agent.runner import TOOL_VISION_BRIDGE_PREFIX
 from krabobot.session.manager import Session
 
 
@@ -91,6 +92,43 @@ def test_save_turn_strips_linked_accounts_from_string_user_message() -> None:
         skip=0,
     )
     assert session.messages[0]["content"] == user_text
+
+
+def test_save_turn_skips_tool_vision_bridge_user_message() -> None:
+    """LLM-only vision bridge packets must not pollute the user-visible session log."""
+    loop = _mk_loop()
+    session = Session(key="test:vision-bridge")
+
+    loop._save_turn(
+        session,
+        [
+            {"role": "user", "content": "проверь инструкцию"},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"{TOOL_VISION_BRIDGE_PREFIX} Сообщения role=tool выше — "
+                            "только подтверждение вызова."
+                        ),
+                    },
+                    {"type": "text", "text": "[Инструмент `read_file` вернул изображение ниже.]"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,abc"},
+                        "_meta": {"path": "/tmp/img.png"},
+                    },
+                ],
+            },
+            {"role": "assistant", "content": "Готово."},
+        ],
+        skip=0,
+    )
+
+    assert [m["role"] for m in session.messages] == ["user", "assistant"]
+    assert session.messages[0]["content"] == "проверь инструкцию"
+    assert session.messages[1]["content"] == "Готово."
 
 
 def test_save_turn_strips_linked_accounts_from_multimodal_user_message() -> None:

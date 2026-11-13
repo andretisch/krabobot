@@ -13,7 +13,7 @@
     href="https://fonts.googleapis.com/css2?family=Nunito:wght@500;600;700&display=swap"
     rel="stylesheet"
   />
-  <link rel="stylesheet" href="/static/chat.css?v=ui-1charness" />
+  <link rel="stylesheet" href="/static/chat.css?v=ui-settings-modal" />
   <script>
     (function () {
       try {
@@ -99,27 +99,11 @@
           >
             <button
               type="button"
-              id="kb-nav-chat"
-              class="kb-dropdown-item kb-dropdown-item--active"
-              role="menuitem"
-            >
-              Чат
-            </button>
-            <button
-              type="button"
               id="kb-nav-settings"
               class="kb-dropdown-item"
               role="menuitem"
             >
               Настройки
-            </button>
-            <button
-              type="button"
-              id="kb-nav-admin"
-              class="kb-dropdown-item"
-              role="menuitem"
-            >
-              Администрирование
             </button>
             <button
               type="button"
@@ -274,134 +258,251 @@
           </form>
         </main>
         </div>
+        </div>
+      </div>
+    </div>
+  </div>
 
-        <div
-          id="kb-view-settings"
-          class="kb-view kb-view--hidden"
-          role="region"
-          aria-label="Настройки"
+  <div
+    id="kb-settings-modal"
+    class="kb-modal"
+    hidden
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="kb-settings-modal-title"
+  >
+    <div class="kb-modal-backdrop" data-kb-modal-close="1"></div>
+    <div class="kb-modal-dialog" role="document">
+      <div class="kb-modal-header">
+        <h2 id="kb-settings-modal-title" class="kb-modal-title">Настройки</h2>
+        <button
+          type="button"
+          id="kb-settings-modal-close"
+          class="kb-modal-close"
+          aria-label="Закрыть"
+          data-kb-modal-close="1"
+        >
+          ×
+        </button>
+      </div>
+
+      <div class="kb-modal-primary-tabs" role="tablist" aria-label="Разделы настроек">
+        <button
+          type="button"
+          id="kb-modal-tab-settings"
+          class="kb-modal-tab kb-modal-tab--active"
+          role="tab"
+          aria-selected="true"
+          aria-controls="kb-modal-pane-settings"
+          data-kb-modal-primary="settings"
+        >
+          Настройки
+        </button>
+        <button
+          type="button"
+          id="kb-modal-tab-admin"
+          class="kb-modal-tab"
+          role="tab"
+          aria-selected="false"
+          aria-controls="kb-modal-pane-admin"
+          data-kb-modal-primary="admin"
           hidden
         >
-        <div class="kb-settings kb-settings--wide">
-          <p id="kb-cfg-note" class="kb-settings-p kb-cfg-note">
-            Ниже тот же <code>config.json</code>, который использует запущенный
-            <code>krabobot serve</code> (ключ <code>-c</code>). Нажмите «Сохранить» —
-            перед записью файл автоматически копируется в бэкап; секретные поля пусть
-            остаются пустыми, если не хотите их менять. Доступ к веб-UI защищён
-            паролем или <code>api.auth.adminToken</code> (см. экран входа).
-          </p>
+          Администрирование
+        </button>
+      </div>
 
-          <div class="kb-cfg-toolbar" id="kb-cfg-toolbar">
-            <button type="button" id="kb-cfg-save" class="kb-btn kb-btn-primary">
-              Сохранить в config.json
-            </button>
-            <button type="button" id="kb-cfg-reload" class="kb-btn kb-btn-secondary">
-              Перечитать
+      <div class="kb-modal-body">
+        <div
+          id="kb-modal-pane-settings"
+          class="kb-modal-pane"
+          role="tabpanel"
+          aria-labelledby="kb-modal-tab-settings"
+        >
+          <div
+            class="kb-modal-subtabs"
+            role="tablist"
+            aria-label="Разделы конфигурации"
+          >
+            <button
+              type="button"
+              class="kb-modal-subtab kb-modal-subtab--active"
+              role="tab"
+              aria-selected="true"
+              data-kb-settings-sub="main"
+            >
+              Основные
             </button>
             <button
               type="button"
-              id="kb-cfg-download-backup"
-              class="kb-btn kb-btn-secondary"
-              title="Архив config.json и workspace (без media/models/history)"
+              class="kb-modal-subtab"
+              role="tab"
+              aria-selected="false"
+              data-kb-settings-sub="channels"
             >
-              Скачать бэкап
+              Каналы
             </button>
-            <label class="kb-cfg-toolbar-backup"
-              >Откат:
-              <select id="kb-cfg-backups" class="kb-cfg-select kb-cfg-select--inline">
-                <option value="">— выберите бэкап —</option>
-              </select>
-            </label>
-            <button type="button" id="kb-cfg-restore" class="kb-btn kb-btn-secondary">
-              Восстановить выбранный бэкап
+            <button
+              type="button"
+              class="kb-modal-subtab"
+              role="tab"
+              aria-selected="false"
+              data-kb-settings-sub="other"
+            >
+              Остальное
+            </button>
+            <button
+              type="button"
+              class="kb-modal-subtab"
+              role="tab"
+              aria-selected="false"
+              data-kb-settings-sub="interface"
+            >
+              Интерфейс
             </button>
           </div>
 
-          <div id="kb-cfg-ok" class="kb-cfg-banner kb-cfg-banner--ok" hidden></div>
-          <div id="kb-cfg-error" class="kb-cfg-banner kb-cfg-banner--err" hidden></div>
-          <div id="kb-cfg-root" hidden>
-            <section class="kb-cfg-section" aria-labelledby="kb-cfg-h-main">
-              <h2 id="kb-cfg-h-main" class="kb-cfg-section-h">Основные настройки</h2>
-              <p class="kb-settings-p">
-                Файл:
-                <code id="kb-cfg-path" class="kb-settings-code"></code>
-              </p>
-              <div id="kb-cfg-main" class="kb-cfg-stack"></div>
-            </section>
-
-            <section class="kb-cfg-section" aria-labelledby="kb-cfg-h-ch">
-              <h2 id="kb-cfg-h-ch" class="kb-cfg-section-h">Каналы</h2>
-              <div id="kb-cfg-channels" class="kb-cfg-stack"></div>
-            </section>
-
-            <section class="kb-cfg-section" aria-labelledby="kb-cfg-h-rest">
-              <h2 id="kb-cfg-h-rest" class="kb-cfg-section-h">Остальное</h2>
-              <div id="kb-cfg-other" class="kb-cfg-stack"></div>
-            </section>
-          </div>
-
-          <h2 class="kb-settings-h">Веб-чат</h2>
-          <p class="kb-settings-p">
-            Запросы с этой страницы идут на тот же хост, без CORS (<code>/v1/…</code>).
-          </p>
-          <div class="kb-cfg-section kb-ui-prefs" aria-labelledby="kb-ui-prefs-h">
-            <h3 id="kb-ui-prefs-h" class="kb-cfg-section-h">Интерфейс</h3>
-            <label class="kb-cfg-label"
-              >Цветовая палитра
-              <select id="kb-ui-palette" class="kb-cfg-select">
-                <option value="krabobot">Крабобот (синий)</option>
-                <option value="taxi">1С Такси (шахматка)</option>
-              </select>
-            </label>
-            <p class="kb-settings-p kb-settings-hint">
-              Палитра и яркость хранятся в браузере. Поле ввода — капсула, как в 1СХарнесс.
+          <div class="kb-settings kb-settings--modal" id="kb-view-settings">
+            <p id="kb-cfg-note" class="kb-settings-p kb-cfg-note">
+              Ниже тот же <code>config.json</code>, который использует запущенный
+              <code>krabobot serve</code> (ключ <code>-c</code>). Нажмите «Сохранить» —
+              перед записью файл автоматически копируется в бэкап; секретные поля пусть
+              остаются пустыми, если не хотите их менять. Доступ к веб-UI защищён
+              паролем или <code>api.auth.adminToken</code> (см. экран входа).
             </p>
-            <label class="kb-cfg-label"
-              >Яркость
-              <select id="kb-ui-theme" class="kb-cfg-select">
-                <option value="light">Светлая</option>
-                <option value="dark">Тёмная</option>
-              </select>
-            </label>
-          </div>
-          <dl class="kb-settings-dl">
-            <dt>Модель (сессия API)</dt>
-            <dd id="kb-st-model">—</dd>
-            <dt>Сервер</dt>
-            <dd id="kb-st-health">—</dd>
-            <dt>Сессия в браузере</dt>
-            <dd>
-              <span class="kb-settings-p"
-                >Идентификатор в <code>localStorage</code> —
-                <code>api:&lt;uuid&gt;</code>.</span
+
+            <div class="kb-cfg-toolbar" id="kb-cfg-toolbar">
+              <button type="button" id="kb-cfg-save" class="kb-btn kb-btn-primary">
+                Сохранить в config.json
+              </button>
+              <button type="button" id="kb-cfg-reload" class="kb-btn kb-btn-secondary">
+                Перечитать
+              </button>
+              <button
+                type="button"
+                id="kb-cfg-download-backup"
+                class="kb-btn kb-btn-secondary"
+                title="Архив config.json и workspace (без media/models/history)"
               >
-            </dd>
-          </dl>
-          <div class="kb-settings-row">
-            <code id="kb-st-session" class="kb-settings-code"></code>
-            <button type="button" id="kb-copy-session" class="kb-btn kb-btn-secondary">
-              Копировать
-            </button>
+                Скачать бэкап
+              </button>
+              <label class="kb-cfg-toolbar-backup"
+                >Откат:
+                <select id="kb-cfg-backups" class="kb-cfg-select kb-cfg-select--inline">
+                  <option value="">— выберите бэкап —</option>
+                </select>
+              </label>
+              <button type="button" id="kb-cfg-restore" class="kb-btn kb-btn-secondary">
+                Восстановить выбранный бэкап
+              </button>
+            </div>
+
+            <div id="kb-cfg-ok" class="kb-cfg-banner kb-cfg-banner--ok" hidden></div>
+            <div id="kb-cfg-error" class="kb-cfg-banner kb-cfg-banner--err" hidden></div>
+
+            <div id="kb-cfg-root" hidden>
+              <section
+                class="kb-cfg-section kb-settings-subpane"
+                id="kb-settings-sub-main"
+                aria-labelledby="kb-cfg-h-main"
+              >
+                <h2 id="kb-cfg-h-main" class="kb-cfg-section-h">Основные настройки</h2>
+                <p class="kb-settings-p">
+                  Файл:
+                  <code id="kb-cfg-path" class="kb-settings-code"></code>
+                </p>
+                <div id="kb-cfg-main" class="kb-cfg-stack"></div>
+              </section>
+
+              <section
+                class="kb-cfg-section kb-settings-subpane"
+                id="kb-settings-sub-channels"
+                aria-labelledby="kb-cfg-h-ch"
+                hidden
+              >
+                <h2 id="kb-cfg-h-ch" class="kb-cfg-section-h">Каналы</h2>
+                <div id="kb-cfg-channels" class="kb-cfg-stack"></div>
+              </section>
+
+              <section
+                class="kb-cfg-section kb-settings-subpane"
+                id="kb-settings-sub-other"
+                aria-labelledby="kb-cfg-h-rest"
+                hidden
+              >
+                <h2 id="kb-cfg-h-rest" class="kb-cfg-section-h">Остальное</h2>
+                <div id="kb-cfg-other" class="kb-cfg-stack"></div>
+              </section>
+            </div>
+
+            <section
+              class="kb-settings-subpane"
+              id="kb-settings-sub-interface"
+              hidden
+            >
+              <h2 class="kb-settings-h">Веб-чат</h2>
+              <p class="kb-settings-p">
+                Запросы с этой страницы идут на тот же хост, без CORS (<code>/v1/…</code>).
+              </p>
+              <div class="kb-cfg-section kb-ui-prefs" aria-labelledby="kb-ui-prefs-h">
+                <h3 id="kb-ui-prefs-h" class="kb-cfg-section-h">Интерфейс</h3>
+                <label class="kb-cfg-label"
+                  >Цветовая палитра
+                  <select id="kb-ui-palette" class="kb-cfg-select">
+                    <option value="krabobot">Крабобот (синий)</option>
+                    <option value="taxi">1С Такси (шахматка)</option>
+                  </select>
+                </label>
+                <p class="kb-settings-p kb-settings-hint">
+                  Палитра и яркость хранятся в браузере. Поле ввода — капсула, как в 1СХарнесс.
+                </p>
+                <label class="kb-cfg-label"
+                  >Яркость
+                  <select id="kb-ui-theme" class="kb-cfg-select">
+                    <option value="light">Светлая</option>
+                    <option value="dark">Тёмная</option>
+                  </select>
+                </label>
+              </div>
+              <dl class="kb-settings-dl">
+                <dt>Модель (сессия API)</dt>
+                <dd id="kb-st-model">—</dd>
+                <dt>Сервер</dt>
+                <dd id="kb-st-health">—</dd>
+                <dt>Сессия в браузере</dt>
+                <dd>
+                  <span class="kb-settings-p"
+                    >Идентификатор в <code>localStorage</code> —
+                    <code>api:&lt;uuid&gt;</code>.</span
+                  >
+                </dd>
+              </dl>
+              <div class="kb-settings-row">
+                <code id="kb-st-session" class="kb-settings-code"></code>
+                <button type="button" id="kb-copy-session" class="kb-btn kb-btn-secondary">
+                  Копировать
+                </button>
+              </div>
+              <p class="kb-settings-p">
+                Вложения из чата сохраняются в
+                <code>uploads/web/&lt;session_id&gt;/</code> рабочего каталога агента.
+                До 50&nbsp;МБ — обычная вставка в чат; больше (до
+                <code>api.maxUploadMb</code>, по умолчанию 2048&nbsp;МБ) — потоковая
+                загрузка в эту папку, боту уходит путь к файлу для инструментов
+                (например ffmpeg).
+              </p>
+            </section>
           </div>
-          <p class="kb-settings-p">
-            Вложения из чата сохраняются в
-            <code>uploads/web/&lt;session_id&gt;/</code> рабочего каталога агента.
-            До 50&nbsp;МБ — обычная вставка в чат; больше (до
-            <code>api.maxUploadMb</code>, по умолчанию 2048&nbsp;МБ) — потоковая
-            загрузка в эту папку, боту уходит путь к файлу для инструментов
-            (например ffmpeg).
-          </p>
         </div>
-      </div>
 
         <div
-          id="kb-view-admin"
-          class="kb-view kb-view--hidden"
-          role="region"
-          aria-label="Администрирование"
+          id="kb-modal-pane-admin"
+          class="kb-modal-pane"
+          role="tabpanel"
+          aria-labelledby="kb-modal-tab-admin"
           hidden
         >
-          <div class="kb-settings kb-settings--wide kb-admin">
+          <div class="kb-settings kb-settings--modal kb-admin" id="kb-view-admin">
             <div class="kb-admin-tabs" role="tablist" aria-label="Разделы администрирования">
               <button
                 type="button"
@@ -473,13 +574,18 @@
             </div>
           </div>
         </div>
+      </div>
 
-        </div>
+      <div class="kb-modal-footer">
+        <button type="button" class="kb-btn kb-btn-primary" data-kb-modal-close="1">
+          Готово
+        </button>
       </div>
     </div>
   </div>
+
   <script src="/static/vendor/marked.min.js"></script>
   <script src="/static/vendor/purify.min.js"></script>
-  <script src="/static/app.js?v=ui-1charness" defer></script>
+  <script src="/static/app.js?v=ui-settings-modal" defer></script>
 </body>
 </html>

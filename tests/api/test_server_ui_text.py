@@ -31,6 +31,19 @@ def test_derive_session_title_from_first_user_message() -> None:
     assert len(title) <= 50
 
 
+def test_derive_session_title_skips_vision_bridge() -> None:
+    from krabobot.agent.runner import TOOL_VISION_BRIDGE_PREFIX
+
+    messages = [
+        {
+            "role": "user",
+            "content": f"{TOOL_VISION_BRIDGE_PREFIX} пиксели",
+        },
+        {"role": "user", "content": "Реальный вопрос про смету"},
+    ]
+    assert derive_session_title(messages) == "Реальный вопрос про смету"
+
+
 def test_derive_session_title_prefers_metadata() -> None:
     messages = [{"role": "user", "content": "оригинальный текст"}]
     assert derive_session_title(messages, {"title": "Мой диалог"}) == "Мой диалог"

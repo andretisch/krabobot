@@ -40,6 +40,13 @@ pytest_plugins = ("pytest_asyncio",)
 @pytest.fixture(autouse=True)
 def _bypass_web_auth_for_legacy_api_tests(monkeypatch):
     """Legacy OpenAI API tests predate the auth gate; they exercise chat/upload paths."""
+    from krabobot.api.web_auth import WebPrincipal
+
+    admin = WebPrincipal(is_admin=True, expires_at=1e18)
+    monkeypatch.setattr(
+        "krabobot.api.web_auth.resolve_principal",
+        lambda _request: admin,
+    )
     monkeypatch.setattr(
         "krabobot.api.web_auth.is_authenticated",
         lambda _request: True,
@@ -602,6 +609,44 @@ async def test_web_session_messages_hides_tool_calls(aiohttp_client) -> None:
     assert body["data"] == [
         {"role": "user", "content": "погода?"},
         {"role": "assistant", "content": "В Липецке +15°C."},
+    ]
+
+
+@pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
+@pytest.mark.asyncio
+async def test_web_session_messages_hides_vision_bridge(aiohttp_client) -> None:
+    """Tool vision-bridge user packets must not render as human «Вы» bubbles."""
+    from krabobot.agent.runner import TOOL_VISION_BRIDGE_PREFIX
+
+    bridge = [
+        {
+            "type": "text",
+            "text": f"{TOOL_VISION_BRIDGE_PREFIX} пиксели ниже.",
+        },
+        {"type": "text", "text": "[Инструмент `read_file` вернул изображение ниже.]"},
+        {"type": "text", "text": "[image: /tmp/img.png]"},
+    ]
+    sm = MagicMock()
+    sm.invalidate = MagicMock()
+    sm.get_or_create.return_value = MagicMock(
+        messages=[
+            {"role": "user", "content": "сделай смету"},
+            {"role": "user", "content": bridge},
+            {"role": "assistant", "content": "Смета готова."},
+        ]
+    )
+
+    agent = _make_mock_agent()
+    agent.session_manager_for_api = AsyncMock(return_value=sm)
+
+    app = create_app(agent, model_name="m")
+    client = await aiohttp_client(app)
+    resp = await client.get("/v1/web/sessions/s1/messages")
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["data"] == [
+        {"role": "user", "content": "сделай смету"},
+        {"role": "assistant", "content": "Смета готова."},
     ]
 
 
