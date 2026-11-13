@@ -46,6 +46,9 @@
   const PALETTE_KEY = "krabobot_web_palette";
   let kbIsAdmin = true;
   let kbLdapEnabled = false;
+  /** @type {"ldap" | "admin"} */
+  let kbAuthMode = "admin";
+  let kbAuthSetupMode = false;
 
   function kbSetTheme(theme) {
     const t = theme === "dark" ? "dark" : "light";
@@ -591,6 +594,13 @@
     return kbCfgKeyLooksSecret(seg);
   }
 
+  /** Nullable dict fields edited as JSON when value is null (e.g. extraHeaders). */
+  /** @param {string} path */
+  function kbCfgPathLooksJsonObject(path) {
+    const seg = path.split(".").pop() || "";
+    return seg === "extraHeaders";
+  }
+
   /** @param {string} path */
   function kbCfgPathParts(path) {
     return path.split(".").filter(Boolean);
@@ -660,6 +670,19 @@
       if (!path) {
         return;
       }
+      if (ta.dataset.kbJsonObject === "1") {
+        const raw = ta.value.trim();
+        if (raw === "") {
+          kbCfgSetDeep(snap, kbCfgPathParts(path), null);
+          return;
+        }
+        try {
+          kbCfgSetDeep(snap, kbCfgPathParts(path), JSON.parse(raw));
+        } catch (_e) {
+          kbCfgSetDeep(snap, kbCfgPathParts(path), ta.value);
+        }
+        return;
+      }
       kbCfgSetDeep(snap, kbCfgPathParts(path), ta.value);
     });
     return snap;
@@ -718,8 +741,25 @@
     const tailProp = path.split(".").pop() || path;
 
     if (val === null || val === undefined) {
-      cell.appendChild(document.createTextNode("—"));
-      return;
+      if (kbCfgPathLooksJsonObject(path)) {
+        const ta = document.createElement("textarea");
+        ta.className = "kb-cfg-textarea";
+        ta.rows = 3;
+        ta.dataset.kbPath = path;
+        ta.dataset.kbJsonObject = "1";
+        ta.value = "";
+        ta.placeholder = '{"Header-Name": "value"}';
+        ta.setAttribute("aria-label", kbCfgFmtKey(tailProp));
+        cell.appendChild(ta);
+        const hint = document.createElement("p");
+        hint.className = "kb-cfg-hint-secret";
+        hint.textContent =
+          "JSON-объект заголовков. Пустое поле — оставить null. Пример: {\"X-Api-Code\": \"…\"}.";
+        cell.appendChild(hint);
+        return;
+      }
+      // Scalars/secrets: reuse string path below (empty input / password).
+      val = "";
     }
 
     if (typeof val === "boolean") {
@@ -2558,65 +2598,109 @@
     });
   });
 
-  function applyLdapLoginFields(enabled) {
-    kbLdapEnabled = !!enabled;
-    const userLabel = document.getElementById("kb-auth-user-label");
+  /**
+   * @param {"ldap" | "admin"} mode
+   */
+  function setAuthMode(mode) {
+    kbAuthMode = mode === "ldap" && kbLdapEnabled ? "ldap" : "admin";
+    const tabs = document.getElementById("kb-auth-mode-tabs");
+    const tabLdap = document.getElementById("kb-auth-tab-ldap");
+    const tabAdmin = document.getElementById("kb-auth-tab-admin");
+    const paneLdap = document.getElementById("kb-auth-pane-ldap");
+    const paneAdmin = document.getElementById("kb-auth-pane-admin");
+    const lead = document.getElementById("kb-auth-lead");
+    const submit = document.getElementById("kb-auth-submit");
+    const tokenLabel = document.getElementById("kb-auth-token-label");
+    const tokenInput = document.getElementById("kb-auth-token");
+    const passLabel = document.getElementById("kb-auth-password-label");
+    const passInput = document.getElementById("kb-auth-password");
+    const ldapPass = document.getElementById("kb-auth-ldap-password");
     const userInput = document.getElementById("kb-auth-username");
-    if (userLabel) {
-      userLabel.hidden = !kbLdapEnabled;
+
+    if (tabs) {
+      tabs.hidden = !kbLdapEnabled;
     }
-    if (userInput) {
-      userInput.hidden = !kbLdapEnabled;
-      if (!kbLdapEnabled) {
-        userInput.value = "";
+    if (tabLdap) {
+      const on = kbAuthMode === "ldap";
+      tabLdap.classList.toggle("kb-auth-mode-tab--active", on);
+      tabLdap.setAttribute("aria-selected", on ? "true" : "false");
+    }
+    if (tabAdmin) {
+      const on = kbAuthMode === "admin";
+      tabAdmin.classList.toggle("kb-auth-mode-tab--active", on);
+      tabAdmin.setAttribute("aria-selected", on ? "true" : "false");
+      tabAdmin.textContent = kbAuthSetupMode ? "Пароль админа" : "Администратор";
+    }
+
+    const ldapOn = kbAuthMode === "ldap";
+    if (paneLdap) {
+      paneLdap.hidden = !ldapOn;
+    }
+    if (paneAdmin) {
+      paneAdmin.hidden = ldapOn;
+    }
+    if (!kbLdapEnabled && userInput) {
+      userInput.value = "";
+    }
+
+    if (tokenLabel) {
+      tokenLabel.hidden = kbAuthSetupMode || ldapOn;
+    }
+    if (tokenInput) {
+      tokenInput.hidden = kbAuthSetupMode || ldapOn;
+      if (tokenInput.hidden) {
+        tokenInput.value = "";
+      }
+    }
+    if (passLabel) {
+      passLabel.textContent = kbAuthSetupMode
+        ? "Новый пароль администратора"
+        : "Пароль администратора";
+    }
+    if (passInput) {
+      passInput.placeholder = kbAuthSetupMode ? "Минимум 6 символов" : "Пароль";
+      passInput.autocomplete = kbAuthSetupMode ? "new-password" : "current-password";
+    }
+    if (ldapPass) {
+      ldapPass.autocomplete = "current-password";
+    }
+
+    if (lead) {
+      if (ldapOn) {
+        lead.textContent = kbAuthSetupMode
+          ? "Войдите доменной учётной записью или задайте локальный пароль администратора на соседней вкладке."
+          : "Вход доменной учётной записью Active Directory / LDAP.";
+      } else if (kbAuthSetupMode) {
+        lead.textContent = kbLdapEnabled
+          ? "Задайте пароль администратора (минимум 6 символов). Он сохранится в config.json."
+          : "Первый запуск: задайте пароль администратора (минимум 6 символов). " +
+            "Он сохранится в config.json как api.auth.passwordHash.";
+      } else {
+        lead.textContent = kbLdapEnabled
+          ? "Локальный пароль или API-ключ администратора. Для домена перейдите на вкладку «Домен»."
+          : "Для веб-интерфейса нужен пароль или API-ключ администратора.";
+      }
+    }
+    if (submit) {
+      if (ldapOn) {
+        submit.textContent = "Войти через домен";
+      } else if (kbAuthSetupMode) {
+        submit.textContent = "Задать пароль";
+      } else {
+        submit.textContent = "Войти";
       }
     }
   }
 
   function showAuthGate(setupMode) {
+    kbAuthSetupMode = !!setupMode;
     if (authGate) {
       authGate.hidden = false;
     }
     if (layoutElRoot) {
       layoutElRoot.hidden = true;
     }
-    applyLdapLoginFields(kbLdapEnabled);
-    const lead = document.getElementById("kb-auth-lead");
-    const submit = document.getElementById("kb-auth-submit");
-    const tokenLabel = document.querySelector(".kb-auth-token-label");
-    const tokenInput = document.getElementById("kb-auth-token");
-    if (setupMode) {
-      if (lead) {
-        lead.textContent = kbLdapEnabled
-          ? "Задайте пароль администратора (минимум 6 символов) или войдите доменной учётной записью."
-          : "Первый запуск: задайте пароль администратора (минимум 6 символов). " +
-            "Он сохранится в config.json как api.auth.passwordHash.";
-      }
-      if (submit) {
-        submit.textContent = kbLdapEnabled ? "Продолжить" : "Задать пароль";
-      }
-      if (tokenLabel) {
-        tokenLabel.hidden = true;
-      }
-      if (tokenInput) {
-        tokenInput.hidden = true;
-      }
-    } else {
-      if (lead) {
-        lead.textContent = kbLdapEnabled
-          ? "Доменная учётная запись или пароль / API-ключ администратора."
-          : "Для веб-интерфейса нужен пароль или API-ключ администратора.";
-      }
-      if (submit) {
-        submit.textContent = "Войти";
-      }
-      if (tokenLabel) {
-        tokenLabel.hidden = false;
-      }
-      if (tokenInput) {
-        tokenInput.hidden = false;
-      }
-    }
+    setAuthMode(kbLdapEnabled ? "ldap" : "admin");
   }
 
   function showAppShell(isAdmin) {
@@ -2694,34 +2778,74 @@
     return false;
   }
 
+  document.querySelectorAll("[data-kb-auth-mode]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const mode = btn.getAttribute("data-kb-auth-mode") === "ldap" ? "ldap" : "admin";
+      setAuthMode(mode);
+      setAuthError("");
+      const focusId =
+        mode === "ldap" ? "kb-auth-username" : "kb-auth-password";
+      const focusEl = document.getElementById(focusId);
+      if (focusEl) {
+        focusEl.focus();
+      }
+    });
+  });
+
   const authForm = document.getElementById("kb-auth-form");
   if (authForm) {
     authForm.addEventListener("submit", async (e) => {
       e.preventDefault();
       setAuthError("");
       const passwordEl = document.getElementById("kb-auth-password");
+      const ldapPassEl = document.getElementById("kb-auth-ldap-password");
       const tokenEl = document.getElementById("kb-auth-token");
       const userEl = document.getElementById("kb-auth-username");
-      const password = passwordEl ? passwordEl.value : "";
-      const token = tokenEl && !tokenEl.hidden ? tokenEl.value.trim() : "";
-      const username = userEl && !userEl.hidden ? userEl.value.trim() : "";
       let setupMode = false;
       try {
         const st = await fetch("/v1/web/auth/status", { credentials: "include" });
         const sj = await st.json();
         setupMode = !sj.configured;
         kbLdapEnabled = !!sj.ldap_enabled;
+        kbAuthSetupMode = setupMode;
+        if (!kbLdapEnabled && kbAuthMode === "ldap") {
+          setAuthMode("admin");
+        }
       } catch (_e) {
         /* assume login */
       }
-      if (username) {
-        /* domain login, including before the local admin password exists */
+
+      const useLdap = kbLdapEnabled && kbAuthMode === "ldap";
+      const username = useLdap && userEl ? userEl.value.trim() : "";
+      const password = useLdap
+        ? ldapPassEl
+          ? ldapPassEl.value
+          : ""
+        : passwordEl
+          ? passwordEl.value
+          : "";
+      const token =
+        !useLdap && tokenEl && !tokenEl.hidden ? tokenEl.value.trim() : "";
+
+      if (useLdap) {
+        if (!username) {
+          setAuthError("Укажите доменное имя.");
+          return;
+        }
+        if (!password) {
+          setAuthError("Укажите пароль домена.");
+          return;
+        }
       } else if (setupMode && password.length < 6) {
         setAuthError("Пароль должен быть не короче 6 символов.");
         return;
+      } else if (!setupMode && !password && !token) {
+        setAuthError("Укажите пароль или API-ключ администратора.");
+        return;
       }
-      const url = username || !setupMode ? "/v1/web/auth/login" : "/v1/web/auth/setup";
-      const body = username
+
+      const url = useLdap || !setupMode ? "/v1/web/auth/login" : "/v1/web/auth/setup";
+      const body = useLdap
         ? { username: username, password: password }
         : setupMode
           ? { password: password }

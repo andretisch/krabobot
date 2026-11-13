@@ -1372,22 +1372,37 @@ html[data-bs-theme="dark"] .kb-compose-send:hover:not(:disabled) {
   background:
     radial-gradient(ellipse at 20% 0%, rgba(0, 123, 255, 0.12), transparent 55%),
     radial-gradient(ellipse at 80% 100%, rgba(0, 229, 255, 0.1), transparent 50%),
-    var(--bg, #f0f5fb);
+    var(--bg-page, #f0f5fb);
 }
 
 .kb-auth-card {
   width: 100%;
-  max-width: 22rem;
-  padding: 1.5rem 1.35rem 1.35rem;
+  max-width: 24rem;
+  padding: 1.6rem 1.4rem 1.4rem;
   background: var(--surface);
   border: 1px solid var(--border-soft);
   border-radius: 14px;
   box-shadow: 0 8px 32px rgba(0, 51, 102, 0.12);
 }
 
+.kb-auth-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.45rem;
+  margin-bottom: 0.55rem;
+}
+
+.kb-auth-logo {
+  display: block;
+  width: 48px;
+  height: 48px;
+  border-radius: 10px;
+}
+
 .kb-auth-title {
-  margin: 0 0 0.5rem;
-  font-size: 1.35rem;
+  margin: 0;
+  font-size: 1.4rem;
   font-weight: 700;
   color: var(--navy);
   text-align: center;
@@ -1401,10 +1416,50 @@ html[data-bs-theme="dark"] .kb-compose-send:hover:not(:disabled) {
   text-align: center;
 }
 
+.kb-auth-mode-tabs {
+  display: flex;
+  gap: 0.25rem;
+  margin: 0 0 0.95rem;
+  padding-bottom: 0.15rem;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.kb-auth-mode-tab {
+  appearance: none;
+  flex: 1;
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 0.5rem 0.65rem;
+  border-radius: 8px 8px 0 0;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.kb-auth-mode-tab:hover {
+  color: var(--navy);
+}
+
+.kb-auth-mode-tab--active {
+  color: var(--navy);
+  border-bottom-color: var(--accent);
+  background: rgba(0, 123, 255, 0.08);
+}
+
 .kb-auth-form {
   display: flex;
   flex-direction: column;
   gap: 0.65rem;
+}
+
+.kb-auth-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
 }
 
 .kb-auth-input {
@@ -1412,11 +1467,30 @@ html[data-bs-theme="dark"] .kb-compose-send:hover:not(:disabled) {
   box-sizing: border-box;
 }
 
-.kb-auth-user-label,
+.kb-auth-field-label,
 .kb-auth-token-label {
-  margin-top: 0.35rem;
   font-size: 0.78rem;
+  font-weight: 600;
   color: var(--muted);
+}
+
+.kb-auth-hint {
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.kb-auth-hint code {
+  font-size: 0.72rem;
+}
+
+html[data-palette="taxi"] .kb-auth-mode-tab--active {
+  background: rgba(255, 226, 137, 0.35);
+}
+
+html[data-bs-theme="dark"] .kb-auth-mode-tab--active {
+  background: rgba(77, 163, 255, 0.14);
 }
 
 .kb-dropdown-item[hidden] {

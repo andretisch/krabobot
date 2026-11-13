@@ -13,7 +13,7 @@
     href="https://fonts.googleapis.com/css2?family=Nunito:wght@500;600;700&display=swap"
     rel="stylesheet"
   />
-  <link rel="stylesheet" href="/static/chat.css?v=ui-settings-modal" />
+  <link rel="stylesheet" href="/static/chat.css?v=ui-ldap-login" />
   <script>
     (function () {
       try {
@@ -32,41 +32,109 @@
 <body>
   <div id="kb-auth-gate" class="kb-auth-gate" hidden>
     <div class="kb-auth-card">
-      <h1 class="kb-auth-title">крабобот</h1>
+      <div class="kb-auth-brand">
+        <img
+          class="kb-auth-logo"
+          src="/static/favicon.png"
+          width="48"
+          height="48"
+          alt=""
+          decoding="async"
+        />
+        <h1 class="kb-auth-title">крабобот</h1>
+      </div>
       <p id="kb-auth-lead" class="kb-auth-lead">
         Для веб-интерфейса нужен пароль администратора.
       </p>
-      <form id="kb-auth-form" class="kb-auth-form">
-        <label class="kb-auth-user-label" id="kb-auth-user-label" for="kb-auth-username" hidden>
-          Доменное имя (LDAP / AD)
-        </label>
-        <input
-          type="text"
-          id="kb-auth-username"
-          class="kb-input kb-auth-input"
-          autocomplete="username"
-          placeholder="sAMAccountName"
-          hidden
-        />
-        <label class="kb-sr" for="kb-auth-password">Пароль</label>
-        <input
-          type="password"
-          id="kb-auth-password"
-          class="kb-input kb-auth-input"
-          autocomplete="current-password"
-          placeholder="Пароль"
-          required
-        />
-        <label class="kb-auth-token-label" for="kb-auth-token"
-          >Или API-ключ (<code>api.auth.adminToken</code>)</label
+      <div
+        id="kb-auth-mode-tabs"
+        class="kb-auth-mode-tabs"
+        role="tablist"
+        aria-label="Способ входа"
+        hidden
+      >
+        <button
+          type="button"
+          id="kb-auth-tab-ldap"
+          class="kb-auth-mode-tab kb-auth-mode-tab--active"
+          role="tab"
+          aria-selected="true"
+          aria-controls="kb-auth-pane-ldap"
+          data-kb-auth-mode="ldap"
         >
-        <input
-          type="password"
-          id="kb-auth-token"
-          class="kb-input kb-auth-input"
-          autocomplete="off"
-          placeholder="adminToken (необязательно)"
-        />
+          Домен
+        </button>
+        <button
+          type="button"
+          id="kb-auth-tab-admin"
+          class="kb-auth-mode-tab"
+          role="tab"
+          aria-selected="false"
+          aria-controls="kb-auth-pane-admin"
+          data-kb-auth-mode="admin"
+        >
+          Администратор
+        </button>
+      </div>
+      <form id="kb-auth-form" class="kb-auth-form">
+        <div
+          id="kb-auth-pane-ldap"
+          class="kb-auth-pane"
+          role="tabpanel"
+          aria-labelledby="kb-auth-tab-ldap"
+          hidden
+        >
+          <label class="kb-auth-field-label" id="kb-auth-user-label" for="kb-auth-username">
+            Доменное имя (LDAP / AD)
+          </label>
+          <input
+            type="text"
+            id="kb-auth-username"
+            class="kb-input kb-auth-input"
+            autocomplete="username"
+            placeholder="sAMAccountName"
+            spellcheck="false"
+          />
+          <p class="kb-auth-hint">
+            Учётная запись Active Directory. Можно указать только логин или
+            <code>DOMAIN\user</code> / <code>user@domain</code>.
+          </p>
+          <label class="kb-auth-field-label" for="kb-auth-ldap-password">Пароль домена</label>
+          <input
+            type="password"
+            id="kb-auth-ldap-password"
+            class="kb-input kb-auth-input"
+            autocomplete="current-password"
+            placeholder="Пароль домена"
+          />
+        </div>
+        <div
+          id="kb-auth-pane-admin"
+          class="kb-auth-pane"
+          role="tabpanel"
+          aria-labelledby="kb-auth-tab-admin"
+        >
+          <label class="kb-auth-field-label" id="kb-auth-password-label" for="kb-auth-password"
+            >Пароль администратора</label
+          >
+          <input
+            type="password"
+            id="kb-auth-password"
+            class="kb-input kb-auth-input"
+            autocomplete="current-password"
+            placeholder="Пароль"
+          />
+          <label class="kb-auth-token-label" id="kb-auth-token-label" for="kb-auth-token"
+            >Или API-ключ (<code>api.auth.adminToken</code>)</label
+          >
+          <input
+            type="password"
+            id="kb-auth-token"
+            class="kb-input kb-auth-input"
+            autocomplete="off"
+            placeholder="adminToken (необязательно)"
+          />
+        </div>
         <button type="submit" id="kb-auth-submit" class="kb-btn kb-btn-primary kb-btn-block">
           Войти
         </button>
@@ -586,6 +654,6 @@
 
   <script src="/static/vendor/marked.min.js"></script>
   <script src="/static/vendor/purify.min.js"></script>
-  <script src="/static/app.js?v=ui-settings-modal" defer></script>
+  <script src="/static/app.js?v=ui-ldap-login" defer></script>
 </body>
 </html>
