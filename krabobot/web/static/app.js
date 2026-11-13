@@ -2303,6 +2303,11 @@
       if (turnInFlight || historyLoading || !chatViewIsOpen()) {
         return;
       }
+      // Optimistic HTTP bubbles still on screen — absorbServerTail owns them.
+      // Appending the server tail here would duplicate the same turn.
+      if (pendingTurnNodes().length) {
+        return;
+      }
       const id = getSessionId();
       let msgs;
       try {
@@ -2312,6 +2317,9 @@
         return;
       }
       if (getSessionId() !== id || turnInFlight || historyLoading) {
+        return;
+      }
+      if (pendingTurnNodes().length) {
         return;
       }
       if (msgs.length <= syncedVisibleCount) {
@@ -2346,12 +2354,19 @@
       // Optimistic bubbles are this HTTP turn. A background completion can sit
       // before or after them. Replace the bubbles with the server tail so that
       // message is drawn without a reload.
-      if (unsynced.length >= pending.length) {
+      if (pending.length && unsynced.length >= pending.length) {
         pending.forEach((node) => node.remove());
         for (const m of unsynced) {
           appendVisibleMessage(m);
         }
         syncedVisibleCount = msgs.length;
+        return;
+      }
+      // Server lag or gate reply not persisted: keep optimistic bubbles, but
+      // advance the sync cursor so the poll cannot append the same messages.
+      if (pending.length) {
+        pending.forEach((node) => node.removeAttribute("data-pending-turn"));
+        syncedVisibleCount = Math.max(syncedVisibleCount, msgs.length);
       }
     });
   }

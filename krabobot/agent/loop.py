@@ -474,6 +474,15 @@ class AgentLoop:
             # Web LDAP sessions already name the user. Do not claim ownership.
             if not (msg.metadata or {}).get("_preserve_owner"):
                 await self.user_resolver.ensure_owner(msg.user_id)
+            # LDAP (and other scoped) web chats pass user_id from the cookie session.
+            # Password/adminToken login leaves user_id empty and hits the owner
+            # auto-link below. Without linking api:{session_id} here, is_registered()
+            # stays false and the UI shows «Доступ не активирован» after LDAP login.
+            # Virtual channel ``voice`` must NOT auto-link — admin pre-links device_id.
+            if msg.channel == "api" and msg.sender_id:
+                await self.user_resolver.link_account(
+                    msg.user_id, msg.channel, msg.sender_id
+                )
             return
         existing = await self.user_resolver.lookup(msg.channel, msg.sender_id)
         if existing:
