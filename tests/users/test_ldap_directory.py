@@ -107,3 +107,89 @@ def test_authenticate_fails_when_not_listening(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setitem(sys.modules, "ldap3.core.exceptions", fake_exc)
 
     assert Ldap3Directory(_cfg()).authenticate("alice", "user-pw") is None
+
+
+def _install_search_capture(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    sam: str = "Andrey.Tishkin",
+) -> MagicMock:
+    """Fake ldap3; return the search connection so callers can inspect the filter."""
+    entry = _FakeEntry(
+        f"CN={sam},DC=example,DC=test",
+        {
+            "sAMAccountName": sam,
+            "displayName": sam,
+            "mail": "",
+            "cn": sam,
+        },
+    )
+    search_conn = MagicMock()
+    search_conn.open.return_value = None
+    search_conn.listening = True
+    search_conn.start_tls.return_value = True
+    search_conn.bind.return_value = True
+    search_conn.search.return_value = True
+    search_conn.entries = [entry]
+
+    user_conn = MagicMock()
+    user_conn.open.return_value = None
+    user_conn.listening = True
+    user_conn.start_tls.return_value = True
+    user_conn.bind.return_value = True
+
+    connections = iter([search_conn, user_conn])
+    fake_ldap3 = SimpleNamespace(
+        NONE="NONE",
+        SUBTREE="SUBTREE",
+        Connection=lambda *a, **k: next(connections),
+        Server=MagicMock(),
+        Tls=MagicMock(),
+    )
+    fake_exc = SimpleNamespace(LDAPException=Exception)
+    import sys
+
+    monkeypatch.setitem(sys.modules, "ldap3", fake_ldap3)
+    monkeypatch.setitem(sys.modules, "ldap3.core.exceptions", fake_exc)
+    return search_conn
+
+
+@pytest.mark.parametrize(
+    "typed_login",
+    [
+        "andrey.tishkin@wefry.ru",
+        r"WEFRY\Andrey.Tishkin",
+        r"wefry\andrey.tishkin",
+        "Andrey.Tishkin",
+    ],
+)
+def test_authenticate_normalizes_upn_and_domain_before_filter(
+    monkeypatch: pytest.MonkeyPatch,
+    typed_login: str,
+) -> None:
+    """UPN / DOMAIN\\user must become short name before %{username} substitution."""
+    search_conn = _install_search_capture(monkeypatch)
+    result = Ldap3Directory(_cfg()).authenticate(typed_login, "user-pw")
+    assert result is not None
+    assert result.username == "andrey.tishkin"
+    kwargs = search_conn.search.call_args.kwargs
+    assert kwargs["search_filter"] == "(sAMAccountName=andrey.tishkin)"
+
+
+def test_authenticate_rejects_unusable_login_before_connect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invalid login must fail before ldap3 is imported / connected."""
+    called = {"ldap": False}
+
+    class _Boom:
+        def __getattr__(self, name: str) -> object:
+            called["ldap"] = True
+            raise AssertionError(f"ldap3 should not load for bad login ({name})")
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "ldap3", _Boom())
+    monkeypatch.setitem(sys.modules, "ldap3.core.exceptions", _Boom())
+    assert Ldap3Directory(_cfg()).authenticate("bad*name@wefry.ru", "pw") is None
+    assert called["ldap"] is False

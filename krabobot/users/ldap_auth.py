@@ -24,7 +24,7 @@ class LdapDirectory(Protocol):
 
 
 def normalize_ldap_username(raw: str) -> str:
-    """Stable identity key: sAMAccountName, without DOMAIN\\ or @realm, lowercased."""
+    """Short login for search filter and identity key: strip DOMAIN\\ / @realm, lowercased."""
     text = (raw or "").strip()
     if not text or any(ord(ch) < 32 for ch in text):
         return ""

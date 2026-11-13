@@ -48,6 +48,11 @@ class Ldap3Directory:
         login = (username or "").strip()
         if not login or not password:
             return None
+        # Strip DOMAIN\\ / @realm before filter so default
+        # (sAMAccountName=%{username}) matches AD short name when user types UPN.
+        search_login = normalize_ldap_username(login)
+        if not search_login:
+            return None
         if not cfg.enabled or not cfg.host.strip() or not cfg.base_dn.strip():
             return None
         try:
@@ -64,7 +69,7 @@ class Ldap3Directory:
             logger.warning("LDAP service bindDn set but bindPassword is empty")
             return None
 
-        filt = build_user_filter(cfg.user_filter, cfg.username_attribute, login)
+        filt = build_user_filter(cfg.user_filter, cfg.username_attribute, search_login)
         attrs = [
             a
             for a in {
