@@ -33,9 +33,14 @@ class SpawnTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Spawn a subagent to handle a task in the background. "
-            "Use this for complex or time-consuming tasks that can run independently. "
-            "The subagent will complete the task and report back when done. "
+            "Spawn a background subagent for heavy independent work you should not block on. "
+            "USE spawn when: large read/search across many files; multi-step web research "
+            "(web_search / web_fetch); long exploration where only a summary is needed back. "
+            "Do NOT spawn when: a simple reply, one quick tool call, a single-file edit, "
+            "or anything that needs immediate back-and-forth with the user — do those yourself. "
+            "This tool returns only an ack that the subagent started; when it finishes, "
+            "a compact structured summary (goal / findings / paths / open questions) is "
+            "injected into this dialogue — not the full subagent transcript or tool noise. "
             "For deliverables or existing projects, inspect the workspace first "
             "and use a dedicated subdirectory when helpful."
         )
@@ -47,7 +52,10 @@ class SpawnTool(Tool):
             "properties": {
                 "task": {
                     "type": "string",
-                    "description": "The task for the subagent to complete",
+                    "description": (
+                        "Self-contained task brief for the subagent. Include goal, "
+                        "constraints, and what to return; it has no parent chat history."
+                    ),
                 },
                 "label": {
                     "type": "string",

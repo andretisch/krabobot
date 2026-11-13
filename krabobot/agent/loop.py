@@ -601,6 +601,8 @@ class AgentLoop:
         self._last_usage = result.usage
         if result.stop_reason == "max_iterations":
             logger.warning("Max iterations ({}) reached", self.max_iterations)
+        elif result.stop_reason == "loop_detected":
+            logger.warning("Tool-call loop detected; stopping agent run")
         elif result.stop_reason == "error":
             logger.error("LLM returned error: {}", (result.final_content or "")[:200])
 

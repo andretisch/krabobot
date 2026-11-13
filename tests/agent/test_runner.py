@@ -19,15 +19,15 @@ def _make_loop(tmp_path):
 
     with patch("krabobot.agent.loop.ContextBuilder"), \
          patch("krabobot.agent.loop.SessionManager"), \
-         patch("krabobot.agent.loop.SubagentManager") as MockSubMgr:
-        MockSubMgr.return_value.cancel_by_session = AsyncMock(return_value=0)
+         patch("krabobot.agent.loop.SubagentManager") as mock_sub_mgr:
+        mock_sub_mgr.return_value.cancel_by_session = AsyncMock(return_value=0)
         loop = AgentLoop(bus=bus, provider=provider, workspace=tmp_path, anonymize=False)
     return loop
 
 
 @pytest.mark.asyncio
 async def test_runner_preserves_reasoning_fields_and_tool_results():
-    from krabobot.agent.runner import AgentRunSpec, AgentRunner
+    from krabobot.agent.runner import AgentRunner, AgentRunSpec
 
     provider = MagicMock()
     captured_second_call: list[dict] = []
@@ -84,7 +84,7 @@ async def test_runner_preserves_reasoning_fields_and_tool_results():
 @pytest.mark.asyncio
 async def test_runner_calls_hooks_in_order():
     from krabobot.agent.hook import AgentHook, AgentHookContext
-    from krabobot.agent.runner import AgentRunSpec, AgentRunner
+    from krabobot.agent.runner import AgentRunner, AgentRunSpec
 
     provider = MagicMock()
     call_count = {"n": 0}
@@ -159,7 +159,7 @@ async def test_runner_calls_hooks_in_order():
 @pytest.mark.asyncio
 async def test_runner_streaming_hook_receives_deltas_and_end_signal():
     from krabobot.agent.hook import AgentHook, AgentHookContext
-    from krabobot.agent.runner import AgentRunSpec, AgentRunner
+    from krabobot.agent.runner import AgentRunner, AgentRunSpec
 
     provider = MagicMock()
     streamed: list[str] = []
@@ -202,7 +202,7 @@ async def test_runner_streaming_hook_receives_deltas_and_end_signal():
 
 @pytest.mark.asyncio
 async def test_runner_returns_max_iterations_fallback():
-    from krabobot.agent.runner import AgentRunSpec, AgentRunner
+    from krabobot.agent.runner import AgentRunner, AgentRunSpec
 
     provider = MagicMock()
     provider.chat_with_retry = AsyncMock(return_value=LLMResponse(
@@ -230,7 +230,7 @@ async def test_runner_returns_max_iterations_fallback():
 
 @pytest.mark.asyncio
 async def test_runner_returns_structured_tool_error():
-    from krabobot.agent.runner import AgentRunSpec, AgentRunner
+    from krabobot.agent.runner import AgentRunner, AgentRunSpec
 
     provider = MagicMock()
     provider.chat_with_retry = AsyncMock(return_value=LLMResponse(
@@ -309,7 +309,9 @@ async def test_loop_stream_filter_handles_think_only_prefix_without_crashing(tmp
 
 
 @pytest.mark.asyncio
-async def test_subagent_max_iterations_announces_existing_fallback(tmp_path, monkeypatch):
+async def test_subagent_repeated_tool_trips_loop_guard(tmp_path, monkeypatch):
+    """Identical tool calls hit loop guard before max_iterations (15)."""
+    from krabobot.agent.runner import DEFAULT_LOOP_DETECTED_MESSAGE
     from krabobot.agent.subagent import SubagentManager
     from krabobot.bus.queue import MessageBus
 
@@ -332,8 +334,218 @@ async def test_subagent_max_iterations_announces_existing_fallback(tmp_path, mon
 
     mgr._announce_result.assert_awaited_once()
     args = mgr._announce_result.await_args.args
-    assert args[3] == "Task completed but no final response was generated."
+    assert args[3] == DEFAULT_LOOP_DETECTED_MESSAGE
     assert args[5] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_runner_loop_guard_soft_then_hard_on_repeated_tool():
+    from krabobot.agent.runner import (
+        DEFAULT_LOOP_DETECTED_MESSAGE,
+        LOOP_REPEAT_THRESHOLD,
+        AgentRunner,
+        AgentRunSpec,
+    )
+
+    provider = MagicMock()
+    call_n = {"n": 0}
+    soft_seen = {"v": False}
+
+    async def chat_with_retry(*, messages, **kwargs):
+        call_n["n"] += 1
+        if any(
+            isinstance(m.get("content"), str) and m["content"].startswith("[Loop guard]")
+            for m in messages
+            if m.get("role") == "user"
+        ):
+            soft_seen["v"] = True
+        return LLMResponse(
+            content="working",
+            tool_calls=[
+                ToolCallRequest(
+                    id=f"call_{call_n['n']}",
+                    name="list_dir",
+                    arguments={"path": "."},
+                )
+            ],
+        )
+
+    provider.chat_with_retry = chat_with_retry
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    tools.execute = AsyncMock(return_value="ok")
+
+    runner = AgentRunner(provider)
+    result = await runner.run(AgentRunSpec(
+        initial_messages=[{"role": "user", "content": "go"}],
+        tools=tools,
+        model="test-model",
+        max_iterations=40,
+    ))
+
+    assert soft_seen["v"] is True
+    assert result.stop_reason == "loop_detected"
+    assert result.final_content == DEFAULT_LOOP_DETECTED_MESSAGE
+    # Soft after N identical, hard on the next repeat → N + 1 executions.
+    assert tools.execute.await_count == LOOP_REPEAT_THRESHOLD + 1
+    assert any(
+        m.get("role") == "user"
+        and isinstance(m.get("content"), str)
+        and m["content"].startswith("[Loop guard]")
+        for m in result.messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_runner_loop_guard_allows_distinct_tools():
+    from krabobot.agent.runner import AgentRunner, AgentRunSpec
+
+    provider = MagicMock()
+    call_n = {"n": 0}
+
+    async def chat_with_retry(*, messages, **kwargs):
+        call_n["n"] += 1
+        if call_n["n"] <= 4:
+            return LLMResponse(
+                content="working",
+                tool_calls=[
+                    ToolCallRequest(
+                        id=f"call_{call_n['n']}",
+                        name="list_dir",
+                        arguments={"path": f"dir_{call_n['n']}"},
+                    )
+                ],
+            )
+        return LLMResponse(content="all done", tool_calls=[])
+
+    provider.chat_with_retry = chat_with_retry
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    tools.execute = AsyncMock(return_value="ok")
+
+    runner = AgentRunner(provider)
+    result = await runner.run(AgentRunSpec(
+        initial_messages=[{"role": "user", "content": "go"}],
+        tools=tools,
+        model="test-model",
+        max_iterations=10,
+    ))
+
+    assert result.stop_reason == "completed"
+    assert result.final_content == "all done"
+    assert tools.execute.await_count == 4
+    assert not any(
+        isinstance(m.get("content"), str) and "[Loop guard]" in m["content"]
+        for m in result.messages
+        if m.get("role") == "user"
+    )
+
+
+@pytest.mark.asyncio
+async def test_runner_loop_guard_detects_pingpong():
+    from krabobot.agent.runner import (
+        DEFAULT_LOOP_DETECTED_MESSAGE,
+        LOOP_PINGPONG_PAIRS,
+        AgentRunner,
+        AgentRunSpec,
+    )
+
+    provider = MagicMock()
+    call_n = {"n": 0}
+    names = ["read_file", "list_dir"]
+
+    async def chat_with_retry(*, messages, **kwargs):
+        call_n["n"] += 1
+        name = names[(call_n["n"] - 1) % 2]
+        return LLMResponse(
+            content="working",
+            tool_calls=[
+                ToolCallRequest(
+                    id=f"call_{call_n['n']}",
+                    name=name,
+                    arguments={"path": name},
+                )
+            ],
+        )
+
+    provider.chat_with_retry = chat_with_retry
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    tools.execute = AsyncMock(return_value="ok")
+
+    runner = AgentRunner(provider)
+    result = await runner.run(AgentRunSpec(
+        initial_messages=[{"role": "user", "content": "go"}],
+        tools=tools,
+        model="test-model",
+        max_iterations=40,
+        # Avoid streak/window firing first on this alternating pattern.
+        loop_repeat_threshold=99,
+        loop_window_threshold=99,
+        loop_same_error_threshold=99,
+    ))
+
+    assert result.stop_reason == "loop_detected"
+    assert result.final_content == DEFAULT_LOOP_DETECTED_MESSAGE
+    # Soft after 2*pairs alternating calls, hard on the next → 2*pairs + 1.
+    assert tools.execute.await_count == LOOP_PINGPONG_PAIRS * 2 + 1
+
+
+@pytest.mark.asyncio
+async def test_runner_loop_guard_same_error_streak():
+    from krabobot.agent.runner import (
+        DEFAULT_LOOP_DETECTED_MESSAGE,
+        LOOP_SAME_ERROR_THRESHOLD,
+        AgentRunner,
+        AgentRunSpec,
+    )
+
+    provider = MagicMock()
+    call_n = {"n": 0}
+
+    async def chat_with_retry(*, messages, **kwargs):
+        call_n["n"] += 1
+        # Vary args so identical-call streak does not fire; same Error text does.
+        return LLMResponse(
+            content="working",
+            tool_calls=[
+                ToolCallRequest(
+                    id=f"call_{call_n['n']}",
+                    name="read_file",
+                    arguments={"path": f"missing_{call_n['n']}"},
+                )
+            ],
+        )
+
+    provider.chat_with_retry = chat_with_retry
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    tools.execute = AsyncMock(return_value="Error: FileNotFoundError: missing")
+
+    runner = AgentRunner(provider)
+    result = await runner.run(AgentRunSpec(
+        initial_messages=[{"role": "user", "content": "go"}],
+        tools=tools,
+        model="test-model",
+        max_iterations=40,
+        loop_repeat_threshold=99,
+        loop_window_threshold=99,
+        loop_pingpong_pairs=99,
+    ))
+
+    assert result.stop_reason == "loop_detected"
+    assert result.final_content == DEFAULT_LOOP_DETECTED_MESSAGE
+    assert tools.execute.await_count == LOOP_SAME_ERROR_THRESHOLD + 1
+
+
+def test_tool_call_signature_stable_for_same_args():
+    from krabobot.agent.runner import tool_call_signature
+
+    a = ToolCallRequest(id="1", name="list_dir", arguments={"path": ".", "a": 1})
+    b = ToolCallRequest(id="2", name="list_dir", arguments={"a": 1, "path": "."})
+    c = ToolCallRequest(id="3", name="list_dir", arguments={"path": "other"})
+    assert tool_call_signature(a) == tool_call_signature(b)
+    assert tool_call_signature(a) != tool_call_signature(c)
 
 
 def test_is_tool_vision_bridge_content_detects_prefix():
@@ -351,7 +563,7 @@ def test_is_tool_vision_bridge_content_detects_prefix():
 @pytest.mark.asyncio
 async def test_runner_read_file_image_adds_user_vision_bridge():
     """Tool role cannot carry image_url on OpenAI Chat Completions — bridge user message."""
-    from krabobot.agent.runner import AgentRunSpec, AgentRunner
+    from krabobot.agent.runner import AgentRunner, AgentRunSpec
 
     img_block = {
         "type": "image_url",
