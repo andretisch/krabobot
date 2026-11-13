@@ -57,6 +57,13 @@ class Ldap3Directory:
             logger.error("ldap3 is not installed; LDAP web login is unavailable")
             return None
 
+        bind_dn = cfg.bind_dn.strip()
+        # AD rejects anonymous subtree search; a bind DN without password cannot
+        # complete a simple bind (ldap3 raises LDAPPasswordIsMandatoryError).
+        if bind_dn and not cfg.bind_password:
+            logger.warning("LDAP service bindDn set but bindPassword is empty")
+            return None
+
         filt = build_user_filter(cfg.user_filter, cfg.username_attribute, login)
         attrs = [
             a
@@ -83,8 +90,8 @@ class Ldap3Directory:
         )
         conn = Connection(
             server,
-            user=cfg.bind_dn.strip() or None,
-            password=cfg.bind_password if cfg.bind_dn.strip() else None,
+            user=bind_dn or None,
+            password=cfg.bind_password if bind_dn else None,
             auto_bind=False,
             receive_timeout=8,
             raise_exceptions=False,
@@ -94,13 +101,15 @@ class Ldap3Directory:
         display = ""
         email = ""
         try:
-            if not conn.open():
+            # ldap3 SyncStrategy.open() returns None on success; trust listening.
+            conn.open()
+            if not conn.listening:
                 logger.warning("LDAP connect failed host={}", cfg.host)
                 return None
             if cfg.start_tls and not cfg.use_ssl and not conn.start_tls():
                 logger.warning("LDAP StartTLS failed host={}", cfg.host)
                 return None
-            if cfg.bind_dn.strip() and not conn.bind():
+            if bind_dn and not conn.bind():
                 logger.warning("LDAP service bind failed")
                 return None
             found = conn.search(
@@ -146,7 +155,8 @@ class Ldap3Directory:
             raise_exceptions=False,
         )
         try:
-            if not user_conn.open():
+            user_conn.open()
+            if not user_conn.listening:
                 return None
             if cfg.start_tls and not cfg.use_ssl and not user_conn.start_tls():
                 return None

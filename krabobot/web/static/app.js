@@ -818,10 +818,18 @@
         return;
       }
 
-      if (sval.length > 100 || /\r|\n/.test(sval)) {
+      // DNs and long filters must stay fully visible — single-line inputs clip
+      // visually (looks like truncation / double-escaped DN) even when value is intact.
+      const preferTextarea =
+        sval.length > 80 ||
+        /\r|\n/.test(sval) ||
+        tailProp === "bindDn" ||
+        tailProp === "baseDn" ||
+        tailProp === "userFilter";
+      if (preferTextarea) {
         const ta = document.createElement("textarea");
         ta.className = "kb-cfg-textarea";
-        ta.rows = Math.min(10, Math.max(3, Math.ceil(sval.length / 80)));
+        ta.rows = Math.min(10, Math.max(3, Math.ceil(Math.max(sval.length, 1) / 80)));
         ta.dataset.kbPath = path;
         ta.value = sval;
         ta.setAttribute("aria-label", kbCfgFmtKey(tailProp));
