@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
 from loguru import logger
+
+from krabobot.utils.file_lock import InterProcessLock
 
 if TYPE_CHECKING:
     from krabobot.providers.base import LLMProvider
@@ -37,17 +40,85 @@ _HEARTBEAT_TOOL = [
 ]
 
 
+_COMPLETED_HEADING = re.compile(
+    r"^#{1,6}\s+(completed|done|выполнено|выполненные|готово|сделано)\b",
+    re.IGNORECASE,
+)
+_ACTIVE_HEADING = re.compile(
+    r"^#{1,6}\s+(active|open|todo|tasks?|активн\w*|задач\w*|текущ\w*)\b",
+    re.IGNORECASE,
+)
+_CHECKBOX = re.compile(r"^(?:[-*+]|\d+[.)])\s+\[([ xX])\]\s*(.*)$")
+_BULLET = re.compile(r"^(?:[-*+]|\d+[.)])\s+(.*)$")
+_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+
+# Jobs this overdue have missed the scheduler's own wake window.
+_CRON_OVERDUE_GRACE_MS = 60_000
+
+
+def unfinished_heartbeat_tasks(content: str) -> list[str]:
+    """Return tasks that are still open in ``HEARTBEAT.md``.
+
+    Unchecked boxes and list items count. Plain lines count only under an
+    Active/Tasks heading. A Completed/Done/Выполнено section is ignored, even
+    when its boxes are still unchecked.
+    """
+    text = _HTML_COMMENT.sub("", content)
+    section = "preamble"
+    tasks: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            if _COMPLETED_HEADING.match(line):
+                section = "completed"
+            elif _ACTIVE_HEADING.match(line):
+                section = "active"
+            else:
+                section = "preamble"
+            continue
+        if section == "completed":
+            continue
+        checkbox = _CHECKBOX.match(line)
+        if checkbox:
+            if checkbox.group(1) == " ":
+                task = checkbox.group(2).strip()
+                if task:
+                    tasks.append(task)
+            continue
+        bullet = _BULLET.match(line)
+        if bullet:
+            task = bullet.group(1).strip()
+            if task:
+                tasks.append(task)
+            continue
+        if section == "active":
+            tasks.append(line)
+    return tasks
+
+
+def heartbeat_file_is_boilerplate(content: str) -> bool:
+    """True when the file has no tasks left after headers and comments."""
+    text = _HTML_COMMENT.sub("", content)
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        return False
+    return True
+
+
 class HeartbeatService:
     """
     Periodic heartbeat service that wakes the agent to check for tasks.
 
-    Phase 1 (decision): reads HEARTBEAT.md and asks the LLM — via a virtual
-    tool call — whether there are active tasks.  This avoids free-text parsing
-    and the unreliable HEARTBEAT_OK token.
+    Unfinished tasks in ``HEARTBEAT.md`` are taken from the file itself:
+    unchecked boxes, list items, and lines under Active Tasks. The Completed
+    section is ignored, so a model is not asked whether open work can be skipped.
 
-    Phase 2 (execution): only triggered when Phase 1 returns ``run``.  The
-    ``on_execute`` callback runs the task through the full agent loop and
-    returns the result to deliver.
+    Overdue cron jobs are run here too, when the in-process scheduler missed
+    them. Phase 2 (``on_execute``) runs heartbeat tasks through the agent loop.
     """
 
     def __init__(
@@ -60,6 +131,7 @@ class HeartbeatService:
         interval_s: int = 30 * 60,
         enabled: bool = True,
         timezone: str | None = None,
+        cron_service: Any | None = None,
     ):
         self.workspace = workspace
         self.provider = provider
@@ -69,8 +141,10 @@ class HeartbeatService:
         self.interval_s = interval_s
         self.enabled = enabled
         self.timezone = timezone
+        self.cron_service = cron_service
         self._running = False
         self._task: asyncio.Task | None = None
+        self._file_lock = InterProcessLock(workspace / "runtime" / "heartbeat.lock")
 
     @property
     def heartbeat_file(self) -> Path:
@@ -96,7 +170,11 @@ class HeartbeatService:
                 {"role": "system", "content": "You are a heartbeat agent. Call the heartbeat tool to report your decision."},
                 {"role": "user", "content": (
                     f"Current Time: {current_time_str(self.timezone)}\n\n"
-                    "Review the following HEARTBEAT.md and decide whether there are active tasks.\n\n"
+                    "Review the following HEARTBEAT.md and decide whether there are unfinished tasks.\n"
+                    "Unfinished means unchecked '- [ ]' items, open list items, and lines under "
+                    "Active Tasks. Items under Completed/Done/Выполнено are finished — do not run those.\n"
+                    "If any unfinished task remains, action must be 'run' and tasks must list them.\n"
+                    "Use 'skip' only when every task is done or the file has no tasks.\n\n"
                     f"{content}"
                 )},
             ],
@@ -120,7 +198,7 @@ class HeartbeatService:
             return
 
         self._running = True
-        self._task = asyncio.create_task(self._run_loop())
+        self._task = asyncio.create_task(self._run_loop(), name="krabobot-heartbeat")
         logger.info("Heartbeat started (every {}s)", self.interval_s)
 
     def stop(self) -> None:
@@ -131,10 +209,13 @@ class HeartbeatService:
             self._task = None
 
     async def _run_loop(self) -> None:
-        """Main heartbeat loop."""
+        """Main heartbeat loop. The first pass does not wait a full interval."""
+        first = True
         while self._running:
             try:
-                await asyncio.sleep(self.interval_s)
+                if not first:
+                    await asyncio.sleep(self.interval_s)
+                first = False
                 if self._running:
                     await self._tick()
             except asyncio.CancelledError:
@@ -142,46 +223,91 @@ class HeartbeatService:
             except Exception as e:
                 logger.error("Heartbeat error: {}", e)
 
+    async def _run_overdue_cron_jobs(self) -> None:
+        """Run scheduler jobs that stayed due — the heartbeat backstop."""
+        cron = self.cron_service
+        if cron is None:
+            return
+        try:
+            overdue = cron.overdue_jobs(grace_ms=_CRON_OVERDUE_GRACE_MS)
+        except Exception:
+            logger.exception("Heartbeat: failed to list overdue cron jobs")
+            return
+        for job in overdue:
+            logger.warning(
+                "Heartbeat: cron job '{}' ({}) is overdue; running it",
+                job.name,
+                job.id,
+            )
+            try:
+                ran = await cron.run_job(job.id, force=False, only_if_due=True)
+            except Exception:
+                logger.exception("Heartbeat: failed to run overdue cron job {}", job.id)
+                continue
+            if not ran:
+                logger.info("Heartbeat: overdue cron job '{}' was already handled", job.name)
+
+    async def _tasks_to_run(self, content: str) -> str | None:
+        """Resolve unfinished HEARTBEAT.md work. ``None`` means nothing to run.
+
+        The phase-1 model call used to be allowed to answer ``skip`` for open
+        checklist items. Unfinished tasks are taken from the file directly.
+        """
+        open_tasks = unfinished_heartbeat_tasks(content)
+        if not open_tasks:
+            if heartbeat_file_is_boilerplate(content):
+                logger.debug("Heartbeat: HEARTBEAT.md has no tasks")
+            else:
+                logger.info("Heartbeat: no unfinished tasks")
+            return None
+        return "\n".join(open_tasks)
+
     async def _tick(self) -> None:
         """Execute a single heartbeat tick."""
         from krabobot.utils.evaluator import evaluate_response
 
-        content = self._read_heartbeat_file()
-        if not content:
-            logger.debug("Heartbeat: HEARTBEAT.md missing or empty")
+        if not self._file_lock.try_acquire():
+            logger.debug("Heartbeat: skip tick, another process holds the lock")
             return
-
-        logger.info("Heartbeat: checking for tasks...")
-
         try:
-            action, tasks = await self._decide(content)
+            await self._run_overdue_cron_jobs()
 
-            if action != "run":
-                logger.info("Heartbeat: OK (nothing to report)")
+            content = self._read_heartbeat_file()
+            if not content:
+                logger.debug("Heartbeat: HEARTBEAT.md missing or empty")
                 return
 
-            logger.info("Heartbeat: tasks found, executing...")
-            if self.on_execute:
-                response = await self.on_execute(tasks)
+            logger.info("Heartbeat: checking for unfinished tasks...")
+            try:
+                tasks = await self._tasks_to_run(content)
+                if not tasks:
+                    return
 
-                if response:
-                    should_notify = await evaluate_response(
-                        response, tasks, self.provider, self.model,
-                    )
-                    if should_notify and self.on_notify:
-                        logger.info("Heartbeat: completed, delivering response")
-                        await self.on_notify(response)
-                    else:
-                        logger.info("Heartbeat: silenced by post-run evaluation")
-        except Exception:
-            logger.exception("Heartbeat execution failed")
+                logger.info("Heartbeat: unfinished tasks found, executing...")
+                if self.on_execute:
+                    response = await self.on_execute(tasks)
+
+                    if response:
+                        should_notify = await evaluate_response(
+                            response, tasks, self.provider, self.model,
+                        )
+                        if should_notify and self.on_notify:
+                            logger.info("Heartbeat: completed, delivering response")
+                            await self.on_notify(response)
+                        else:
+                            logger.info("Heartbeat: silenced by post-run evaluation")
+            except Exception:
+                logger.exception("Heartbeat execution failed")
+        finally:
+            self._file_lock.release()
 
     async def trigger_now(self) -> str | None:
         """Manually trigger a heartbeat."""
+        await self._run_overdue_cron_jobs()
         content = self._read_heartbeat_file()
-        if not content:
+        if not content or not self.on_execute:
             return None
-        action, tasks = await self._decide(content)
-        if action != "run" or not self.on_execute:
+        tasks = await self._tasks_to_run(content)
+        if not tasks:
             return None
         return await self.on_execute(tasks)

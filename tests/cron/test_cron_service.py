@@ -1,9 +1,10 @@
 import asyncio
+import contextlib
 import json
 
 import pytest
 
-from krabobot.cron.service import CronService
+from krabobot.cron.service import CronService, _resume_next_run
 from krabobot.cron.types import CronSchedule
 
 
@@ -162,4 +163,159 @@ async def test_running_service_honors_external_disable(tmp_path) -> None:
         await asyncio.sleep(0.35)
         assert called == []
     finally:
+        task = service._timer_task
         service.stop()
+        if task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+
+def test_resume_keeps_pending_every_and_overdue_deadline() -> None:
+    every_ms = 86_400_000
+    schedule = CronSchedule(kind="every", every_ms=every_ms)
+    now = 1_700_000_000_000
+    pending = now + every_ms - 3_600_000
+    assert _resume_next_run(schedule, pending, now + 3_600_000) == pending
+
+    overdue = now - 5_000
+    assert _resume_next_run(schedule, overdue, now) == overdue
+
+
+def test_resume_keeps_missed_one_shot_until_it_runs() -> None:
+    at_ms = 1_700_000_000_000
+    schedule = CronSchedule(kind="at", at_ms=at_ms)
+    assert _resume_next_run(schedule, None, at_ms + 60_000, last_run_at_ms=None) == at_ms
+    assert _resume_next_run(schedule, at_ms, at_ms + 60_000, last_run_at_ms=at_ms + 1) is None
+
+
+@pytest.mark.asyncio
+async def test_restart_does_not_postpone_every_job(tmp_path, monkeypatch) -> None:
+    base = 1_700_000_000_000
+    monkeypatch.setattr("krabobot.cron.service._now_ms", lambda: base)
+    store = tmp_path / "cron" / "jobs.json"
+    service = CronService(store)
+    job = service.add_job(
+        name="daily",
+        schedule=CronSchedule(kind="every", every_ms=86_400_000),
+        message="ping",
+    )
+    assert job.state.next_run_at_ms == base + 86_400_000
+
+    monkeypatch.setattr("krabobot.cron.service._now_ms", lambda: base + 3_600_000)
+    restarted = CronService(store)
+    await restarted.start()
+    task = restarted._timer_task
+    try:
+        loaded = restarted.get_job(job.id)
+        assert loaded is not None
+        assert loaded.state.next_run_at_ms == base + 86_400_000
+    finally:
+        restarted.stop()
+        if task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+
+@pytest.mark.asyncio
+async def test_overdue_one_shot_runs_after_restart(tmp_path, monkeypatch) -> None:
+    base = 1_700_000_000_000
+    monkeypatch.setattr("krabobot.cron.service._now_ms", lambda: base)
+    store = tmp_path / "cron" / "jobs.json"
+    called: list[str] = []
+
+    async def on_job(job) -> None:
+        called.append(job.id)
+
+    service = CronService(store, on_job=on_job)
+    job = service.add_job(
+        name="once",
+        schedule=CronSchedule(kind="at", at_ms=base + 1_000),
+        message="ping",
+    )
+    monkeypatch.setattr("krabobot.cron.service._now_ms", lambda: base + 60_000)
+    await service.start()
+    task = service._timer_task
+    try:
+        for _ in range(50):
+            if called:
+                break
+            await asyncio.sleep(0.02)
+        assert called == [job.id]
+        loaded = service.get_job(job.id)
+        assert loaded is not None
+        assert loaded.enabled is False
+    finally:
+        service.stop()
+        if task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+
+@pytest.mark.asyncio
+async def test_list_during_job_does_not_replay(tmp_path, monkeypatch) -> None:
+    base = 1_700_000_000_000
+    monkeypatch.setattr("krabobot.cron.service._now_ms", lambda: base)
+    store = tmp_path / "cron" / "jobs.json"
+    called: list[str] = []
+    service = CronService(store)
+
+    async def on_job(_job) -> None:
+        service.list_jobs()
+        called.append("ran")
+
+    service.on_job = on_job
+    job = service.add_job(
+        name="replay",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="ping",
+    )
+    job.state.next_run_at_ms = base - 1_000
+    service._save_store()
+
+    await service.start()
+    task = service._timer_task
+    try:
+        await asyncio.sleep(0.2)
+        assert called == ["ran"]
+    finally:
+        service.stop()
+        if task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+
+@pytest.mark.asyncio
+async def test_add_during_job_does_not_cancel_execution(tmp_path, monkeypatch) -> None:
+    base = 1_700_000_000_000
+    monkeypatch.setattr("krabobot.cron.service._now_ms", lambda: base)
+    store = tmp_path / "cron" / "jobs.json"
+    service = CronService(store)
+    finished = asyncio.Event()
+
+    async def on_job(_job) -> None:
+        service.add_job(
+            name="later",
+            schedule=CronSchedule(kind="every", every_ms=3_600_000),
+            message="later",
+        )
+        await asyncio.sleep(0.05)
+        finished.set()
+
+    service.on_job = on_job
+    job = service.add_job(
+        name="due",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="ping",
+    )
+    job.state.next_run_at_ms = base - 1
+    service._save_store()
+
+    await service.start()
+    task = service._timer_task
+    try:
+        await asyncio.wait_for(finished.wait(), timeout=2)
+    finally:
+        service.stop()
+        if task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task

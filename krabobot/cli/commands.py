@@ -5,6 +5,7 @@ import os
 import select
 import signal
 import sys
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -671,43 +672,23 @@ class _GatewayRuntime:
     heartbeat: Any
 
 
-def _build_gateway_runtime(config: Config) -> _GatewayRuntime:
-    """Build the channel/gateway stack used by both ``gateway`` and ``serve``."""
-    from krabobot.agent.loop import AgentLoop
-    from krabobot.bus.queue import MessageBus
-    from krabobot.channels.manager import ChannelManager
-    from krabobot.cron.service import CronService
+def _configured_channel_names(config: Config) -> set[str]:
+    """Channel names enabled in config, without starting channel listeners."""
+    reserved = {"send_progress", "send_tool_hints", "send_max_retries"}
+    channels = config.channels
+    data = channels.model_dump() if hasattr(channels, "model_dump") else {}
+    names: set[str] = set()
+    for key, section in data.items():
+        if key in reserved or not isinstance(section, dict):
+            continue
+        if section.get("enabled"):
+            names.add(key)
+    return names
+
+
+def _install_cron_executor(cron: Any, agent: Any, provider: Any, bus: Any) -> None:
+    """Run due jobs through the agent. Shared by gateway and serve."""
     from krabobot.cron.types import CronJob
-    from krabobot.heartbeat.service import HeartbeatService
-    from krabobot.session.manager import SessionManager
-
-    bus = MessageBus()
-    provider = _make_provider(config)
-    session_manager = SessionManager(config.workspace_path)
-
-    cron_store_path = config.workspace_path / "cron" / "jobs.json"
-    cron = CronService(cron_store_path)
-
-    agent = AgentLoop(
-        bus=bus,
-        provider=provider,
-        workspace=config.workspace_path,
-        model=config.agents.defaults.model,
-        max_iterations=config.agents.defaults.max_tool_iterations,
-        context_window_tokens=config.agents.defaults.context_window_tokens,
-        web_search_config=config.tools.web.search,
-        web_proxy=config.tools.web.proxy or None,
-        exec_config=config.tools.exec,
-        cron_service=cron,
-        restrict_to_workspace=config.tools.restrict_to_workspace,
-        session_manager=session_manager,
-        mcp_servers=config.tools.mcp_servers,
-        channels_config=config.channels,
-        multi_user_config=config.tools.multi_user,
-        short_memory=config.agents.defaults.short_memory,
-        anonymize=config.agents.defaults.anonymize,
-        timezone=config.agents.defaults.timezone,
-    )
 
     async def on_cron_job(job: CronJob) -> str | None:
         """Execute a cron job through the agent."""
@@ -775,11 +756,23 @@ def _build_gateway_runtime(config: Config) -> _GatewayRuntime:
 
     cron.on_job = on_cron_job
 
-    channels = ChannelManager(config, bus)
+
+def _build_heartbeat_service(
+    *,
+    config: Config,
+    agent: Any,
+    provider: Any,
+    bus: Any,
+    session_manager: Any,
+    cron: Any,
+    enabled_channels: Callable[[], set[str]],
+) -> Any:
+    """Heartbeat that runs unfinished tasks and overdue cron jobs."""
+    from krabobot.heartbeat.service import HeartbeatService
 
     def _pick_heartbeat_target() -> tuple[str, str]:
         """Pick a routable channel/chat target for heartbeat-triggered messages."""
-        enabled = set(channels.enabled_channels)
+        enabled = set(enabled_channels())
         for item in session_manager.list_sessions():
             key = item.get("key") or ""
             if ":" not in key:
@@ -807,7 +800,7 @@ def _build_gateway_runtime(config: Config) -> _GatewayRuntime:
         )
 
         session = agent.sessions.get_or_create("heartbeat")
-        session.retain_recent_legal_suffix(hb_cfg.keep_recent_messages)
+        session.retain_recent_legal_suffix(config.gateway.heartbeat.keep_recent_messages)
         agent.sessions.save(session)
 
         return resp.content if resp else ""
@@ -824,15 +817,67 @@ def _build_gateway_runtime(config: Config) -> _GatewayRuntime:
         )
 
     hb_cfg = config.gateway.heartbeat
-    heartbeat = HeartbeatService(
+    model = getattr(agent, "model", None) or config.agents.defaults.model
+    return HeartbeatService(
         workspace=config.workspace_path,
         provider=provider,
-        model=agent.model,
+        model=model,
         on_execute=on_heartbeat_execute,
         on_notify=on_heartbeat_notify,
         interval_s=hb_cfg.interval_s,
         enabled=hb_cfg.enabled,
         timezone=config.agents.defaults.timezone,
+        cron_service=cron,
+    )
+
+
+def _build_gateway_runtime(config: Config) -> _GatewayRuntime:
+    """Build the channel/gateway stack used by both ``gateway`` and ``serve``."""
+    from krabobot.agent.loop import AgentLoop
+    from krabobot.bus.queue import MessageBus
+    from krabobot.channels.manager import ChannelManager
+    from krabobot.cron.service import CronService
+    from krabobot.session.manager import SessionManager
+
+    bus = MessageBus()
+    provider = _make_provider(config)
+    session_manager = SessionManager(config.workspace_path)
+
+    cron_store_path = config.workspace_path / "cron" / "jobs.json"
+    cron = CronService(cron_store_path)
+
+    agent = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=config.workspace_path,
+        model=config.agents.defaults.model,
+        max_iterations=config.agents.defaults.max_tool_iterations,
+        context_window_tokens=config.agents.defaults.context_window_tokens,
+        web_search_config=config.tools.web.search,
+        web_proxy=config.tools.web.proxy or None,
+        exec_config=config.tools.exec,
+        cron_service=cron,
+        restrict_to_workspace=config.tools.restrict_to_workspace,
+        session_manager=session_manager,
+        mcp_servers=config.tools.mcp_servers,
+        channels_config=config.channels,
+        multi_user_config=config.tools.multi_user,
+        short_memory=config.agents.defaults.short_memory,
+        anonymize=config.agents.defaults.anonymize,
+        timezone=config.agents.defaults.timezone,
+    )
+
+    _install_cron_executor(cron, agent, provider, bus)
+
+    channels = ChannelManager(config, bus)
+    heartbeat = _build_heartbeat_service(
+        config=config,
+        agent=agent,
+        provider=provider,
+        bus=bus,
+        session_manager=session_manager,
+        cron=cron,
+        enabled_channels=lambda: set(channels.enabled_channels),
     )
 
     return _GatewayRuntime(
@@ -862,7 +907,10 @@ def _log_gateway_status(runtime: _GatewayRuntime) -> None:
 
     cron_status = runtime.cron.status()
     if cron_status["jobs"] > 0:
-        console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
+        console.print(
+            f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs "
+            "(in-process scheduler, not system crontab)"
+        )
 
     hb_cfg = runtime.config.gateway.heartbeat
     console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
@@ -1049,9 +1097,14 @@ def serve(
         gateway_child = subprocess.Popen(cmd, env=child_env)
         console.print(f"[green]✓[/green] Gateway started (pid {gateway_child.pid})")
 
+    from krabobot.cron.service import CronService
+
     bus = MessageBus()
     provider = _make_provider(runtime_config)
     session_manager = SessionManager(runtime_config.workspace_path)
+    # Same in-process scheduler as gateway. A file lock keeps the two processes
+    # from running one job twice. System crontab is not involved.
+    cron = CronService(runtime_config.workspace_path / "cron" / "jobs.json")
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
@@ -1062,6 +1115,7 @@ def serve(
         web_search_config=runtime_config.tools.web.search,
         web_proxy=runtime_config.tools.web.proxy or None,
         exec_config=runtime_config.tools.exec,
+        cron_service=cron,
         restrict_to_workspace=runtime_config.tools.restrict_to_workspace,
         session_manager=session_manager,
         mcp_servers=runtime_config.tools.mcp_servers,
@@ -1070,6 +1124,20 @@ def serve(
         short_memory=runtime_config.agents.defaults.short_memory,
         anonymize=runtime_config.agents.defaults.anonymize,
         timezone=runtime_config.agents.defaults.timezone,
+    )
+    _install_cron_executor(cron, agent_loop, provider, bus)
+    heartbeat = _build_heartbeat_service(
+        config=runtime_config,
+        agent=agent_loop,
+        provider=provider,
+        bus=bus,
+        session_manager=session_manager,
+        cron=cron,
+        enabled_channels=lambda: _configured_channel_names(runtime_config),
+    )
+    cron_jobs = cron.status().get("jobs", 0)
+    console.print(
+        f"[green]✓[/green] Scheduler: in-process cron ({cron_jobs} jobs) and heartbeat"
     )
 
     model_name = runtime_config.agents.defaults.model
@@ -1097,6 +1165,8 @@ def serve(
         # Consume inbound (background exec / subagent announces). Without this,
         # serve only uses process_direct and completion callbacks sit forever
         # on the in-memory bus (gateway is a separate process with its own bus).
+        await cron.start()
+        await heartbeat.start()
         await agent_loop._connect_mcp()
         _app["agent_loop_task"] = asyncio.create_task(agent_loop.run())
 
@@ -1139,6 +1209,8 @@ def serve(
         _app["outbound_drain_task"] = asyncio.create_task(_drain_local_outbound())
 
     async def on_cleanup(_app):
+        heartbeat.stop()
+        cron.stop()
         agent_loop.stop()
         for key in ("agent_loop_task", "outbound_drain_task"):
             task = _app.get(key)

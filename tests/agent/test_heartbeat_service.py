@@ -1,8 +1,9 @@
 import asyncio
+from pathlib import Path
 
 import pytest
 
-from krabobot.heartbeat.service import HeartbeatService
+from krabobot.heartbeat.service import HeartbeatService, unfinished_heartbeat_tasks
 from krabobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
 
@@ -20,6 +21,22 @@ class DummyProvider(LLMProvider):
 
     def get_default_model(self) -> str:
         return "test-model"
+
+
+def test_template_and_russian_sections() -> None:
+    template = Path("krabobot/templates/HEARTBEAT.md").read_text(encoding="utf-8")
+    assert unfinished_heartbeat_tasks(template) == []
+
+    content = (
+        "## Активные задачи\n"
+        "Проверить бэкапы\n"
+        "- [x] уже сделано\n"
+        "\n"
+        "## Выполнено\n"
+        "Старый отчёт\n"
+        "- [ ] это уже перенесено\n"
+    )
+    assert unfinished_heartbeat_tasks(content) == ["Проверить бэкапы"]
 
 
 @pytest.mark.asyncio
@@ -90,12 +107,15 @@ async def test_trigger_now_executes_when_decision_is_run(tmp_path) -> None:
 
     result = await service.trigger_now()
     assert result == "done"
-    assert called_with == ["check open tasks"]
+    assert called_with == ["do thing"]
 
 
 @pytest.mark.asyncio
 async def test_trigger_now_returns_none_when_decision_is_skip(tmp_path) -> None:
-    (tmp_path / "HEARTBEAT.md").write_text("- [ ] do thing", encoding="utf-8")
+    (tmp_path / "HEARTBEAT.md").write_text(
+        "## Completed\n- [ ] already done\n- finished item\n",
+        encoding="utf-8",
+    )
 
     provider = DummyProvider([
         LLMResponse(
@@ -286,4 +306,77 @@ async def test_decide_prompt_includes_current_time(tmp_path) -> None:
     user_msg = captured_messages[1]
     assert user_msg["role"] == "user"
     assert "Current Time:" in user_msg["content"]
+    assert "unfinished" in user_msg["content"].lower()
+
+
+@pytest.mark.asyncio
+async def test_tick_runs_unchecked_tasks_when_model_would_skip(tmp_path, monkeypatch) -> None:
+    """Open checklist items run even if the phase-1 model is never consulted."""
+    (tmp_path / "HEARTBEAT.md").write_text(
+        "## Active Tasks\n- [ ] write report\n- [x] already sent\n\n"
+        "## Completed\n- [ ] moved here\n",
+        encoding="utf-8",
+    )
+    provider = DummyProvider([])
+    executed: list[str] = []
+    notified: list[str] = []
+
+    async def _on_execute(tasks: str) -> str:
+        executed.append(tasks)
+        return "sent the report"
+
+    async def _on_notify(response: str) -> None:
+        notified.append(response)
+
+    service = HeartbeatService(
+        workspace=tmp_path,
+        provider=provider,
+        model="test-model",
+        on_execute=_on_execute,
+        on_notify=_on_notify,
+    )
+
+    async def _eval_notify(*_a, **_k):
+        return True
+
+    monkeypatch.setattr("krabobot.utils.evaluator.evaluate_response", _eval_notify)
+
+    await service._tick()
+
+    assert provider.calls == 0
+    assert executed == ["write report"]
+    assert notified == ["sent the report"]
+
+
+@pytest.mark.asyncio
+async def test_tick_runs_overdue_cron_job(tmp_path) -> None:
+    class _Job:
+        def __init__(self) -> None:
+            self.id = "job1"
+            self.name = "reminder"
+
+    class _Cron:
+        def __init__(self) -> None:
+            self.ran: list[str] = []
+
+        def overdue_jobs(self, *, grace_ms: int = 0):
+            assert grace_ms > 0
+            return [_Job()]
+
+        async def run_job(self, job_id: str, force: bool = False, *, only_if_due: bool = False) -> bool:
+            assert force is False
+            assert only_if_due is True
+            self.ran.append(job_id)
+            return True
+
+    cron = _Cron()
+    provider = DummyProvider([])
+    service = HeartbeatService(
+        workspace=tmp_path,
+        provider=provider,
+        model="test-model",
+        cron_service=cron,
+    )
+    await service._tick()
+    assert cron.ran == ["job1"]
 

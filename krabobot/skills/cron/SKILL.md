@@ -7,6 +7,8 @@ description: Schedule reminders and recurring tasks.
 
 Use the `cron` tool to schedule reminders or recurring tasks.
 
+Jobs run on krabobot's in-process scheduler while `krabobot gateway` or `krabobot serve` is up. This does not use the system crontab. A restart catches up a missed run once instead of dropping it. Heartbeat also runs jobs that are still overdue.
+
 ## Three Modes
 
 1. **Reminder** - message is sent directly to user
