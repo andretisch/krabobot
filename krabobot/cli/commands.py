@@ -728,13 +728,18 @@ def _install_cron_executor(cron: Any, agent: Any, provider: Any, bus: Any) -> No
             return response
 
         if job.payload.deliver and job.payload.to and response:
-            should_notify = await evaluate_response(
-                response, job.payload.message, provider, agent.model,
-            )
-            if should_notify:
-                from krabobot.bus.events import OutboundMessage
+            from krabobot.bus.events import OutboundMessage
+            from krabobot.bus.spool import is_local_outbound_channel
 
-                notify_ch = (job.payload.channel or "cli").strip().lower()
+            notify_ch = (job.payload.channel or "cli").strip().lower()
+            # Scheduled reminders to web/api must land in session JSONL, not the bus.
+            if is_local_outbound_channel(notify_ch):
+                should_notify = True
+            else:
+                should_notify = await evaluate_response(
+                    response, job.payload.message, provider, agent.model,
+                )
+            if should_notify:
                 notify_meta: dict[str, Any] = {"_tts_enabled_for_user": False}
                 nid = await agent.user_resolver.lookup(notify_ch, str(job.payload.to))
                 if nid:
@@ -746,7 +751,7 @@ def _install_cron_executor(cron: Any, agent: Any, provider: Any, bus: Any) -> No
                     except Exception:
                         notify_meta["_tts_enabled_for_user"] = False
 
-                await bus.publish_outbound(OutboundMessage(
+                await agent.deliver_outbound(OutboundMessage(
                     channel=job.payload.channel or "cli",
                     chat_id=job.payload.to,
                     content=response,
@@ -812,7 +817,7 @@ def _build_task_scheduler(
         channel, chat_id = _pick_heartbeat_target()
         if channel == "cli":
             return
-        await bus.publish_outbound(
+        await agent.deliver_outbound(
             OutboundMessage(channel=channel, chat_id=chat_id, content=response)
         )
 

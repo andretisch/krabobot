@@ -199,6 +199,8 @@ class CronService:
         else:
             self._store = CronStore()
 
+        if self.store_path.exists():
+            self._last_mtime = self.store_path.stat().st_mtime
         return self._store
 
     def _save_store(self) -> None:
