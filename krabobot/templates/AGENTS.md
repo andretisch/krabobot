@@ -12,7 +12,7 @@ Get USER_ID and CHANNEL from the current session (e.g., `8281248569` and `telegr
 
 ## Heartbeat Tasks
 
-`HEARTBEAT.md` is checked on the configured heartbeat interval. Unfinished tasks are always run: unchecked `- [ ]` items, list items, and lines under Active Tasks. Move finished work under `## Completed` (that section is not run again).
+The task scheduler (`gateway.heartbeat`) polls due cron jobs every minute and checks `HEARTBEAT.md` every 30 minutes (`intervalS`). Unfinished tasks are unchecked `- [ ]` items, list items, and lines under Active Tasks. Move finished work under `## Completed` (that section is not run again).
 
 - **Add**: `edit_file` to append new tasks under Active Tasks
 - **Remove**: `edit_file` to delete completed tasks or move them under Completed

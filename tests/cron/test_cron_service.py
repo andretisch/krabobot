@@ -1,5 +1,4 @@
 import asyncio
-import contextlib
 import json
 
 import pytest
@@ -151,23 +150,48 @@ async def test_running_service_honors_external_disable(tmp_path) -> None:
         schedule=CronSchedule(kind="every", every_ms=200),
         message="hello",
     )
-    await service.start()
-    try:
-        # Wait slightly to ensure file mtime is definitively different
-        await asyncio.sleep(0.05)
-        external = CronService(store_path)
-        updated = external.enable_job(job.id, enabled=False)
-        assert updated is not None
-        assert updated.enabled is False
+    job.state.next_run_at_ms = __import__("time").time_ns() // 1_000_000 - 1
+    service._save_store()
+    external = CronService(store_path)
+    updated = external.enable_job(job.id, enabled=False)
+    assert updated is not None
+    assert updated.enabled is False
+    service._store = None
+    await service.run_due_jobs()
+    assert called == []
 
-        await asyncio.sleep(0.35)
-        assert called == []
-    finally:
-        task = service._timer_task
-        service.stop()
-        if task is not None:
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+
+@pytest.mark.asyncio
+async def test_run_due_jobs_runs_only_arrived_deadlines(tmp_path, monkeypatch) -> None:
+    base = 1_700_000_000_000
+    monkeypatch.setattr("krabobot.cron.service._now_ms", lambda: base)
+    store = tmp_path / "cron" / "jobs.json"
+    called: list[str] = []
+
+    async def on_job(job) -> None:
+        called.append(job.name)
+
+    service = CronService(store, on_job=on_job)
+    due = service.add_job(
+        name="due",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="now",
+    )
+    later = service.add_job(
+        name="later",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="later",
+    )
+    due.state.next_run_at_ms = base - 1_000
+    later.state.next_run_at_ms = base + 60_000
+    service._save_store()
+
+    ran = await service.run_due_jobs()
+
+    assert ran == 1
+    assert called == ["due"]
+    assert service.get_job(due.id).state.next_run_at_ms == base + 60_000
+    assert service.get_job(later.id).state.next_run_at_ms == base + 60_000
 
 
 def test_resume_keeps_pending_every_and_overdue_deadline() -> None:
@@ -203,17 +227,10 @@ async def test_restart_does_not_postpone_every_job(tmp_path, monkeypatch) -> Non
 
     monkeypatch.setattr("krabobot.cron.service._now_ms", lambda: base + 3_600_000)
     restarted = CronService(store)
-    await restarted.start()
-    task = restarted._timer_task
-    try:
-        loaded = restarted.get_job(job.id)
-        assert loaded is not None
-        assert loaded.state.next_run_at_ms == base + 86_400_000
-    finally:
-        restarted.stop()
-        if task is not None:
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+    await restarted.bootstrap()
+    loaded = restarted.get_job(job.id)
+    assert loaded is not None
+    assert loaded.state.next_run_at_ms == base + 86_400_000
 
 
 @pytest.mark.asyncio
@@ -233,22 +250,12 @@ async def test_overdue_one_shot_runs_after_restart(tmp_path, monkeypatch) -> Non
         message="ping",
     )
     monkeypatch.setattr("krabobot.cron.service._now_ms", lambda: base + 60_000)
-    await service.start()
-    task = service._timer_task
-    try:
-        for _ in range(50):
-            if called:
-                break
-            await asyncio.sleep(0.02)
-        assert called == [job.id]
-        loaded = service.get_job(job.id)
-        assert loaded is not None
-        assert loaded.enabled is False
-    finally:
-        service.stop()
-        if task is not None:
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+    await service.bootstrap()
+    await service.run_due_jobs()
+    assert called == [job.id]
+    loaded = service.get_job(job.id)
+    assert loaded is not None
+    assert loaded.enabled is False
 
 
 @pytest.mark.asyncio
@@ -272,16 +279,8 @@ async def test_list_during_job_does_not_replay(tmp_path, monkeypatch) -> None:
     job.state.next_run_at_ms = base - 1_000
     service._save_store()
 
-    await service.start()
-    task = service._timer_task
-    try:
-        await asyncio.sleep(0.2)
-        assert called == ["ran"]
-    finally:
-        service.stop()
-        if task is not None:
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+    await service.run_due_jobs()
+    assert called == ["ran"]
 
 
 @pytest.mark.asyncio
@@ -310,12 +309,5 @@ async def test_add_during_job_does_not_cancel_execution(tmp_path, monkeypatch) -
     job.state.next_run_at_ms = base - 1
     service._save_store()
 
-    await service.start()
-    task = service._timer_task
-    try:
-        await asyncio.wait_for(finished.wait(), timeout=2)
-    finally:
-        service.stop()
-        if task is not None:
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+    await service.run_due_jobs()
+    await asyncio.wait_for(finished.wait(), timeout=2)

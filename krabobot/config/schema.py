@@ -70,11 +70,38 @@ class ProvidersConfig(Base):
 
 
 class HeartbeatConfig(Base):
-    """Heartbeat service configuration."""
+    """Task scheduler config (``gateway.heartbeat`` — historical key name).
+
+    ``tick_interval_s``: cron poll from process start (default 1 min).
+    ``interval_s``: built-in ``HEARTBEAT.md`` task (default 30 min).
+    """
 
     enabled: bool = True
-    interval_s: int = 30 * 60  # 30 minutes
+    tick_interval_s: int = 60
+    interval_s: int = 30 * 60
     keep_recent_messages: int = 8
+
+    @field_validator("tick_interval_s", mode="before")
+    @classmethod
+    def _positive_tick(cls, value: object) -> object:
+        try:
+            seconds = int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return value
+        if seconds <= 0:
+            return 60
+        return seconds
+
+    @field_validator("interval_s", mode="before")
+    @classmethod
+    def _positive_heartbeat(cls, value: object) -> object:
+        try:
+            seconds = int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return value
+        if seconds <= 0:
+            return 30 * 60
+        return seconds
 
 
 class ApiAuthConfig(Base):
