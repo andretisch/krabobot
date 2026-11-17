@@ -913,14 +913,25 @@ def _log_gateway_status(runtime: _GatewayRuntime) -> None:
         )
 
     hb_cfg = runtime.config.gateway.heartbeat
-    console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
+    console.print(
+        f"[green]✓[/green] Scheduler: heartbeat every {hb_cfg.interval_s}s "
+        "(checks due jobs and open tasks)"
+    )
+
+
+async def _start_schedulers(cron: Any, heartbeat: Any) -> None:
+    """Heartbeat is the clock. The cron object only stores and executes jobs."""
+    if getattr(heartbeat, "enabled", False):
+        await cron.start(start_loop=False)
+        await heartbeat.start()
+        return
+    await cron.start()
 
 
 async def _run_gateway_stack(runtime: _GatewayRuntime) -> None:
     """Start cron/heartbeat and run agent + channels until cancelled/stopped."""
     try:
-        await runtime.cron.start()
-        await runtime.heartbeat.start()
+        await _start_schedulers(runtime.cron, runtime.heartbeat)
         await asyncio.gather(
             runtime.agent.run(),
             runtime.channels.start_all(),
@@ -1137,7 +1148,8 @@ def serve(
     )
     cron_jobs = cron.status().get("jobs", 0)
     console.print(
-        f"[green]✓[/green] Scheduler: in-process cron ({cron_jobs} jobs) and heartbeat"
+        f"[green]✓[/green] Scheduler: heartbeat every {heartbeat.interval_s}s "
+        f"({cron_jobs} cron jobs)"
     )
 
     model_name = runtime_config.agents.defaults.model
@@ -1165,8 +1177,7 @@ def serve(
         # Consume inbound (background exec / subagent announces). Without this,
         # serve only uses process_direct and completion callbacks sit forever
         # on the in-memory bus (gateway is a separate process with its own bus).
-        await cron.start()
-        await heartbeat.start()
+        await _start_schedulers(cron, heartbeat)
         await agent_loop._connect_mcp()
         _app["agent_loop_task"] = asyncio.create_task(agent_loop.run())
 

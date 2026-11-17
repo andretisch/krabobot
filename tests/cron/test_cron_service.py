@@ -170,6 +170,39 @@ async def test_running_service_honors_external_disable(tmp_path) -> None:
                 await task
 
 
+@pytest.mark.asyncio
+async def test_run_due_jobs_runs_only_arrived_deadlines(tmp_path, monkeypatch) -> None:
+    base = 1_700_000_000_000
+    monkeypatch.setattr("krabobot.cron.service._now_ms", lambda: base)
+    store = tmp_path / "cron" / "jobs.json"
+    called: list[str] = []
+
+    async def on_job(job) -> None:
+        called.append(job.name)
+
+    service = CronService(store, on_job=on_job)
+    due = service.add_job(
+        name="due",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="now",
+    )
+    later = service.add_job(
+        name="later",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="later",
+    )
+    due.state.next_run_at_ms = base - 1_000
+    later.state.next_run_at_ms = base + 60_000
+    service._save_store()
+
+    ran = await service.run_due_jobs()
+
+    assert ran == 1
+    assert called == ["due"]
+    assert service.get_job(due.id).state.next_run_at_ms == base + 60_000
+    assert service.get_job(later.id).state.next_run_at_ms == base + 60_000
+
+
 def test_resume_keeps_pending_every_and_overdue_deadline() -> None:
     every_ms = 86_400_000
     schedule = CronSchedule(kind="every", every_ms=every_ms)

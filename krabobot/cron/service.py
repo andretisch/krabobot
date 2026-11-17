@@ -267,11 +267,15 @@ class CronService:
         self.store_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         self._last_mtime = self.store_path.stat().st_mtime
 
-    async def start(self) -> None:
-        """Start the in-process scheduler."""
+    async def start(self, *, start_loop: bool = True) -> None:
+        """Load the store and, unless heartbeat owns the clock, arm the timer.
+
+        Heartbeat polls every minute and calls :meth:`run_due_jobs`. Passing
+        ``start_loop=False`` keeps this object as the job store without a
+        second loop that would run the same job twice.
+        """
         if self._running:
             return
-        self._running = True
         if self._file_lock.try_acquire():
             try:
                 self._load_store()
@@ -281,6 +285,13 @@ class CronService:
                 self._file_lock.release()
         else:
             self._load_store()
+        if not start_loop:
+            logger.info(
+                "Cron store ready ({} jobs); heartbeat runs due jobs every minute",
+                len(self._store.jobs if self._store else []),
+            )
+            return
+        self._running = True
         self._timer_task = asyncio.create_task(self._scheduler_loop(), name="krabobot-cron")
         logger.info(
             "In-process cron scheduler started with {} jobs",
@@ -536,6 +547,61 @@ class CronService:
                 self._arm_timer()
                 return job
         return None
+
+    async def run_due_jobs(self) -> int:
+        """Run every enabled job whose deadline has arrived.
+
+        This is the minute-scheduler entry point. A job is due when
+        ``next_run_at_ms`` is now or earlier; there is no extra grace period.
+        """
+        async with self._run_lock:
+            if not self._file_lock.try_acquire():
+                logger.debug("Cron: run_due_jobs skipped, another process holds the lock")
+                return 0
+            try:
+                self._load_store()
+                if not self._store:
+                    return 0
+                now = _now_ms()
+                due_ids = [
+                    job.id
+                    for job in self._store.jobs
+                    if job.enabled and job.state.next_run_at_ms and now >= job.state.next_run_at_ms
+                ]
+                missed_at = [
+                    job.id
+                    for job in self._store.jobs
+                    if job.enabled
+                    and job.state.next_run_at_ms is None
+                    and job.schedule.kind == "at"
+                    and job.schedule.at_ms
+                    and job.schedule.at_ms <= now
+                    and job.state.last_run_at_ms is None
+                ]
+                due_ids.extend(job_id for job_id in missed_at if job_id not in due_ids)
+                if not due_ids:
+                    return 0
+
+                ran = 0
+                self._executing = True
+                try:
+                    for job_id in due_ids:
+                        job = next((item for item in self._store.jobs if item.id == job_id), None)
+                        if job is None or not job.enabled:
+                            continue
+                        due_at = job.state.next_run_at_ms
+                        if due_at is not None and due_at > _now_ms():
+                            continue
+                        logger.info("Cron: running due job '{}' ({})", job.name, job.id)
+                        await self._execute_job(job)
+                        ran += 1
+                    if ran:
+                        self._save_store()
+                finally:
+                    self._executing = False
+                return ran
+            finally:
+                self._file_lock.release()
 
     def overdue_jobs(self, *, grace_ms: int = 60_000) -> list[CronJob]:
         """Enabled jobs whose deadline passed and the scheduler has not run them.

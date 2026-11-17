@@ -3,7 +3,11 @@ from pathlib import Path
 
 import pytest
 
-from krabobot.heartbeat.service import HeartbeatService, unfinished_heartbeat_tasks
+from krabobot.heartbeat.service import (
+    HeartbeatService,
+    scheduler_interval,
+    unfinished_heartbeat_tasks,
+)
 from krabobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
 
@@ -21,6 +25,13 @@ class DummyProvider(LLMProvider):
 
     def get_default_model(self) -> str:
         return "test-model"
+
+
+def test_scheduler_interval_is_one_minute() -> None:
+    assert scheduler_interval(60) == 60
+    assert scheduler_interval(30) == 30
+    assert scheduler_interval(1800) == 60
+    assert scheduler_interval(0) == 60
 
 
 def test_template_and_russian_sections() -> None:
@@ -349,25 +360,14 @@ async def test_tick_runs_unchecked_tasks_when_model_would_skip(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_tick_runs_overdue_cron_job(tmp_path) -> None:
-    class _Job:
-        def __init__(self) -> None:
-            self.id = "job1"
-            self.name = "reminder"
-
+async def test_tick_runs_due_cron_jobs(tmp_path) -> None:
     class _Cron:
         def __init__(self) -> None:
-            self.ran: list[str] = []
+            self.calls = 0
 
-        def overdue_jobs(self, *, grace_ms: int = 0):
-            assert grace_ms > 0
-            return [_Job()]
-
-        async def run_job(self, job_id: str, force: bool = False, *, only_if_due: bool = False) -> bool:
-            assert force is False
-            assert only_if_due is True
-            self.ran.append(job_id)
-            return True
+        async def run_due_jobs(self) -> int:
+            self.calls += 1
+            return 2
 
     cron = _Cron()
     provider = DummyProvider([])
@@ -375,8 +375,10 @@ async def test_tick_runs_overdue_cron_job(tmp_path) -> None:
         workspace=tmp_path,
         provider=provider,
         model="test-model",
+        interval_s=1800,
         cron_service=cron,
     )
+    assert service.interval_s == 60
     await service._tick()
-    assert cron.ran == ["job1"]
+    assert cron.calls == 1
 

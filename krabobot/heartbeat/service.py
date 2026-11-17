@@ -52,8 +52,9 @@ _CHECKBOX = re.compile(r"^(?:[-*+]|\d+[.)])\s+\[([ xX])\]\s*(.*)$")
 _BULLET = re.compile(r"^(?:[-*+]|\d+[.)])\s+(.*)$")
 _HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 
-# Jobs this overdue have missed the scheduler's own wake window.
-_CRON_OVERDUE_GRACE_MS = 60_000
+# The scheduler polls once a minute. Slower settings (the old 30-minute
+# default) left due jobs sitting until the next rare wake.
+SCHEDULER_INTERVAL_S = 60
 
 
 def unfinished_heartbeat_tasks(content: str) -> list[str]:
@@ -109,16 +110,20 @@ def heartbeat_file_is_boilerplate(content: str) -> bool:
     return True
 
 
+def scheduler_interval(interval_s: int) -> int:
+    """Return the poll period. Anything slower than a minute becomes one minute."""
+    if interval_s <= 0 or interval_s > SCHEDULER_INTERVAL_S:
+        return SCHEDULER_INTERVAL_S
+    return interval_s
+
+
 class HeartbeatService:
     """
-    Periodic heartbeat service that wakes the agent to check for tasks.
+    In-process scheduler. Once a minute it runs due cron jobs and any
+    unfinished tasks in ``HEARTBEAT.md``.
 
-    Unfinished tasks in ``HEARTBEAT.md`` are taken from the file itself:
-    unchecked boxes, list items, and lines under Active Tasks. The Completed
-    section is ignored, so a model is not asked whether open work can be skipped.
-
-    Overdue cron jobs are run here too, when the in-process scheduler missed
-    them. Phase 2 (``on_execute``) runs heartbeat tasks through the agent loop.
+    Unfinished file tasks are unchecked boxes, list items, and lines under
+    Active Tasks. The Completed section is ignored.
     """
 
     def __init__(
@@ -128,7 +133,7 @@ class HeartbeatService:
         model: str,
         on_execute: Callable[[str], Coroutine[Any, Any, str]] | None = None,
         on_notify: Callable[[str], Coroutine[Any, Any, None]] | None = None,
-        interval_s: int = 30 * 60,
+        interval_s: int = SCHEDULER_INTERVAL_S,
         enabled: bool = True,
         timezone: str | None = None,
         cron_service: Any | None = None,
@@ -138,7 +143,7 @@ class HeartbeatService:
         self.model = model
         self.on_execute = on_execute
         self.on_notify = on_notify
-        self.interval_s = interval_s
+        self.interval_s = scheduler_interval(interval_s)
         self.enabled = enabled
         self.timezone = timezone
         self.cron_service = cron_service
@@ -199,7 +204,7 @@ class HeartbeatService:
 
         self._running = True
         self._task = asyncio.create_task(self._run_loop(), name="krabobot-heartbeat")
-        logger.info("Heartbeat started (every {}s)", self.interval_s)
+        logger.info("Heartbeat scheduler started (every {}s)", self.interval_s)
 
     def stop(self) -> None:
         """Stop the heartbeat service."""
@@ -223,29 +228,18 @@ class HeartbeatService:
             except Exception as e:
                 logger.error("Heartbeat error: {}", e)
 
-    async def _run_overdue_cron_jobs(self) -> None:
-        """Run scheduler jobs that stayed due — the heartbeat backstop."""
+    async def _run_due_cron_jobs(self) -> None:
+        """Run cron jobs whose deadline has arrived. This is the scheduler."""
         cron = self.cron_service
         if cron is None:
             return
         try:
-            overdue = cron.overdue_jobs(grace_ms=_CRON_OVERDUE_GRACE_MS)
+            ran = await cron.run_due_jobs()
         except Exception:
-            logger.exception("Heartbeat: failed to list overdue cron jobs")
+            logger.exception("Heartbeat: failed to run due cron jobs")
             return
-        for job in overdue:
-            logger.warning(
-                "Heartbeat: cron job '{}' ({}) is overdue; running it",
-                job.name,
-                job.id,
-            )
-            try:
-                ran = await cron.run_job(job.id, force=False, only_if_due=True)
-            except Exception:
-                logger.exception("Heartbeat: failed to run overdue cron job {}", job.id)
-                continue
-            if not ran:
-                logger.info("Heartbeat: overdue cron job '{}' was already handled", job.name)
+        if ran:
+            logger.info("Heartbeat: ran {} due cron job(s)", ran)
 
     async def _tasks_to_run(self, content: str) -> str | None:
         """Resolve unfinished HEARTBEAT.md work. ``None`` means nothing to run.
@@ -258,7 +252,7 @@ class HeartbeatService:
             if heartbeat_file_is_boilerplate(content):
                 logger.debug("Heartbeat: HEARTBEAT.md has no tasks")
             else:
-                logger.info("Heartbeat: no unfinished tasks")
+                logger.debug("Heartbeat: no unfinished tasks")
             return None
         return "\n".join(open_tasks)
 
@@ -270,7 +264,7 @@ class HeartbeatService:
             logger.debug("Heartbeat: skip tick, another process holds the lock")
             return
         try:
-            await self._run_overdue_cron_jobs()
+            await self._run_due_cron_jobs()
 
             content = self._read_heartbeat_file()
             if not content:
@@ -303,7 +297,7 @@ class HeartbeatService:
 
     async def trigger_now(self) -> str | None:
         """Manually trigger a heartbeat."""
-        await self._run_overdue_cron_jobs()
+        await self._run_due_cron_jobs()
         content = self._read_heartbeat_file()
         if not content or not self.on_execute:
             return None

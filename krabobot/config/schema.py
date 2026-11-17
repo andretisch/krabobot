@@ -70,11 +70,27 @@ class ProvidersConfig(Base):
 
 
 class HeartbeatConfig(Base):
-    """Heartbeat service configuration."""
+    """Heartbeat service configuration.
+
+    Heartbeat is the in-process scheduler: it checks due jobs and open
+    ``HEARTBEAT.md`` tasks once a minute. Older configs stored the previous
+    30-minute default; those are pulled back to one minute.
+    """
 
     enabled: bool = True
-    interval_s: int = 30 * 60  # 30 minutes
+    interval_s: int = 60
     keep_recent_messages: int = 8
+
+    @field_validator("interval_s", mode="before")
+    @classmethod
+    def _minute_scheduler(cls, value: object) -> object:
+        try:
+            seconds = int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return value
+        if seconds <= 0 or seconds > 60:
+            return 60
+        return seconds
 
 
 class ApiAuthConfig(Base):
