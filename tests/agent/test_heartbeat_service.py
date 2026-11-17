@@ -1,11 +1,13 @@
 import asyncio
+import time
 from pathlib import Path
 
 import pytest
 
 from krabobot.heartbeat.service import (
     HeartbeatService,
-    scheduler_interval,
+    heartbeat_check_interval,
+    scheduler_tick_interval,
     unfinished_heartbeat_tasks,
 )
 from krabobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
@@ -27,10 +29,11 @@ class DummyProvider(LLMProvider):
         return "test-model"
 
 
-def test_scheduler_interval_defaults_to_half_hour() -> None:
-    assert scheduler_interval(1800) == 1800
-    assert scheduler_interval(60) == 60
-    assert scheduler_interval(0) == 30 * 60
+def test_scheduler_intervals() -> None:
+    assert scheduler_tick_interval(60) == 60
+    assert scheduler_tick_interval(0) == 60
+    assert heartbeat_check_interval(1800) == 1800
+    assert heartbeat_check_interval(0) == 30 * 60
 
 
 def test_template_and_russian_sections() -> None:
@@ -57,7 +60,8 @@ async def test_start_is_idempotent(tmp_path) -> None:
         workspace=tmp_path,
         provider=provider,
         model="openai/gpt-4o-mini",
-        interval_s=9999,
+        tick_interval_s=9999,
+        interval_s=1800,
         enabled=True,
     )
 
@@ -374,10 +378,48 @@ async def test_tick_runs_due_cron_jobs(tmp_path) -> None:
         workspace=tmp_path,
         provider=provider,
         model="test-model",
+        tick_interval_s=60,
         interval_s=42,
         cron_service=cron,
     )
-    assert service.interval_s == 42
+    assert service.heartbeat_interval_s == 42
     await service._tick()
     assert cron.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_file_not_checked_every_cron_tick(tmp_path, monkeypatch) -> None:
+  checks = 0
+
+  class _Cron:
+      async def run_due_jobs(self) -> int:
+          return 0
+
+  async def _fake_heartbeat(self) -> None:
+      nonlocal checks
+      checks += 1
+
+  monkeypatch.setattr(HeartbeatService, "_run_heartbeat_file_task", _fake_heartbeat)
+
+  service = HeartbeatService(
+      workspace=tmp_path,
+      provider=DummyProvider([]),
+      model="test-model",
+      tick_interval_s=1,
+      interval_s=30,
+      cron_service=_Cron(),
+  )
+  t = 1_000.0
+  monkeypatch.setattr(time, "monotonic", lambda: t)
+
+  await service._tick()
+  assert checks == 1
+
+  t += 1
+  await service._tick()
+  assert checks == 1
+
+  t += 30
+  await service._tick()
+  assert checks == 2
 

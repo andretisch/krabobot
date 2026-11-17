@@ -824,6 +824,7 @@ def _build_heartbeat_service(
         model=model,
         on_execute=on_heartbeat_execute,
         on_notify=on_heartbeat_notify,
+        tick_interval_s=hb_cfg.tick_interval_s,
         interval_s=hb_cfg.interval_s,
         enabled=hb_cfg.enabled,
         timezone=config.agents.defaults.timezone,
@@ -914,8 +915,8 @@ def _log_gateway_status(runtime: _GatewayRuntime) -> None:
 
     hb_cfg = runtime.config.gateway.heartbeat
     console.print(
-        f"[green]✓[/green] In-process scheduler: every {hb_cfg.interval_s}s "
-        "(cron jobs + HEARTBEAT.md)"
+        f"[green]✓[/green] Task scheduler: cron every {hb_cfg.tick_interval_s}s, "
+        f"HEARTBEAT.md every {hb_cfg.interval_s}s"
     )
 
 
@@ -1148,8 +1149,8 @@ def serve(
     )
     cron_jobs = cron.status().get("jobs", 0)
     console.print(
-        f"[green]✓[/green] In-process scheduler: every {heartbeat.interval_s}s "
-        f"({cron_jobs} cron jobs + HEARTBEAT.md)"
+        f"[green]✓[/green] Task scheduler: cron every {heartbeat.tick_interval_s}s, "
+        f"HEARTBEAT.md every {heartbeat.heartbeat_interval_s}s ({cron_jobs} jobs)"
     )
 
     model_name = runtime_config.agents.defaults.model

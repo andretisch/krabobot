@@ -1,9 +1,10 @@
-"""Heartbeat service - periodic agent wake-up to check for tasks."""
+"""In-process task scheduler (cron due jobs + HEARTBEAT.md)."""
 
 from __future__ import annotations
 
 import asyncio
 import re
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
@@ -52,7 +53,8 @@ _CHECKBOX = re.compile(r"^(?:[-*+]|\d+[.)])\s+\[([ xX])\]\s*(.*)$")
 _BULLET = re.compile(r"^(?:[-*+]|\d+[.)])\s+(.*)$")
 _HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 
-DEFAULT_SCHEDULER_INTERVAL_S = 30 * 60
+DEFAULT_TICK_INTERVAL_S = 60
+DEFAULT_HEARTBEAT_INTERVAL_S = 30 * 60
 
 
 def unfinished_heartbeat_tasks(content: str) -> list[str]:
@@ -108,20 +110,22 @@ def heartbeat_file_is_boilerplate(content: str) -> bool:
     return True
 
 
-def scheduler_interval(interval_s: int) -> int:
-    """Return the poll period. Non-positive values fall back to 30 minutes."""
+def scheduler_tick_interval(interval_s: int) -> int:
+    """Cron poll period. Non-positive values fall back to one minute."""
     if interval_s <= 0:
-        return DEFAULT_SCHEDULER_INTERVAL_S
+        return DEFAULT_TICK_INTERVAL_S
+    return interval_s
+
+
+def heartbeat_check_interval(interval_s: int) -> int:
+    """Built-in HEARTBEAT.md task period. Non-positive → 30 minutes."""
+    if interval_s <= 0:
+        return DEFAULT_HEARTBEAT_INTERVAL_S
     return interval_s
 
 
 class HeartbeatService:
-    """In-process scheduler (config key ``gateway.heartbeat``).
-
-    On each tick it runs due cron jobs, then checks ``HEARTBEAT.md`` for open
-    recurring tasks. Unfinished items are unchecked boxes, list items, and lines
-    under Active Tasks; the Completed section is ignored.
-    """
+    """Task scheduler: cron jobs every tick; ``HEARTBEAT.md`` on its own interval."""
 
     def __init__(
         self,
@@ -130,7 +134,8 @@ class HeartbeatService:
         model: str,
         on_execute: Callable[[str], Coroutine[Any, Any, str]] | None = None,
         on_notify: Callable[[str], Coroutine[Any, Any, None]] | None = None,
-        interval_s: int = DEFAULT_SCHEDULER_INTERVAL_S,
+        tick_interval_s: int = DEFAULT_TICK_INTERVAL_S,
+        interval_s: int = DEFAULT_HEARTBEAT_INTERVAL_S,
         enabled: bool = True,
         timezone: str | None = None,
         cron_service: Any | None = None,
@@ -140,17 +145,24 @@ class HeartbeatService:
         self.model = model
         self.on_execute = on_execute
         self.on_notify = on_notify
-        self.interval_s = scheduler_interval(interval_s)
+        self.tick_interval_s = scheduler_tick_interval(tick_interval_s)
+        self.heartbeat_interval_s = heartbeat_check_interval(interval_s)
         self.enabled = enabled
         self.timezone = timezone
         self.cron_service = cron_service
         self._running = False
         self._task: asyncio.Task | None = None
+        self._last_heartbeat_check: float | None = None
         self._file_lock = InterProcessLock(workspace / "runtime" / "heartbeat.lock")
 
     @property
     def heartbeat_file(self) -> Path:
         return self.workspace / "HEARTBEAT.md"
+
+    def _heartbeat_due(self) -> bool:
+        if self._last_heartbeat_check is None:
+            return True
+        return (time.monotonic() - self._last_heartbeat_check) >= self.heartbeat_interval_s
 
     def _read_heartbeat_file(self) -> str | None:
         if self.heartbeat_file.exists():
@@ -191,42 +203,43 @@ class HeartbeatService:
         return args.get("action", "skip"), args.get("tasks", "")
 
     async def start(self) -> None:
-        """Start the heartbeat service."""
+        """Start the scheduler."""
         if not self.enabled:
-            logger.info("Heartbeat disabled")
+            logger.info("Scheduler disabled (gateway.heartbeat.enabled=false)")
             return
         if self._running:
-            logger.warning("Heartbeat already running")
+            logger.warning("Scheduler already running")
             return
 
         self._running = True
-        self._task = asyncio.create_task(self._run_loop(), name="krabobot-heartbeat")
+        self._task = asyncio.create_task(self._run_loop(), name="krabobot-scheduler")
         logger.info(
-            "In-process scheduler started (every {}s: cron jobs + HEARTBEAT.md)",
-            self.interval_s,
+            "Task scheduler started (cron every {}s, HEARTBEAT.md every {}s)",
+            self.tick_interval_s,
+            self.heartbeat_interval_s,
         )
 
     def stop(self) -> None:
-        """Stop the heartbeat service."""
+        """Stop the scheduler."""
         self._running = False
         if self._task:
             self._task.cancel()
             self._task = None
 
     async def _run_loop(self) -> None:
-        """Main heartbeat loop. The first pass does not wait a full interval."""
+        """Poll cron every tick; HEARTBEAT.md only when its interval elapsed."""
         first = True
         while self._running:
             try:
                 if not first:
-                    await asyncio.sleep(self.interval_s)
+                    await asyncio.sleep(self.tick_interval_s)
                 first = False
                 if self._running:
                     await self._tick()
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error("Heartbeat error: {}", e)
+                logger.error("Scheduler error: {}", e)
 
     async def _run_due_cron_jobs(self) -> None:
         """Run cron jobs whose deadline has arrived."""
@@ -242,61 +255,65 @@ class HeartbeatService:
             logger.info("Scheduler: ran {} due cron job(s)", ran)
 
     async def _tasks_to_run(self, content: str) -> str | None:
-        """Resolve unfinished HEARTBEAT.md work. ``None`` means nothing to run.
-
-        The phase-1 model call used to be allowed to answer ``skip`` for open
-        checklist items. Unfinished tasks are taken from the file directly.
-        """
+        """Resolve unfinished HEARTBEAT.md work. ``None`` means nothing to run."""
         open_tasks = unfinished_heartbeat_tasks(content)
         if not open_tasks:
             if heartbeat_file_is_boilerplate(content):
-                logger.debug("Heartbeat: HEARTBEAT.md has no tasks")
+                logger.debug("Scheduler: HEARTBEAT.md has no tasks")
             else:
-                logger.debug("Heartbeat: no unfinished tasks")
+                logger.debug("Scheduler: no unfinished HEARTBEAT.md tasks")
             return None
         return "\n".join(open_tasks)
 
-    async def _tick(self) -> None:
-        """Execute a single heartbeat tick."""
+    async def _run_heartbeat_file_task(self) -> None:
+        """Built-in task: check ``HEARTBEAT.md`` for open recurring work."""
         from krabobot.utils.evaluator import evaluate_response
 
+        content = self._read_heartbeat_file()
+        if not content:
+            logger.debug("Scheduler: HEARTBEAT.md missing or empty")
+            return
+
+        logger.info("Scheduler: HEARTBEAT.md check...")
+        try:
+            tasks = await self._tasks_to_run(content)
+            if not tasks:
+                return
+
+            logger.info("Scheduler: unfinished HEARTBEAT.md tasks, executing...")
+            if self.on_execute:
+                response = await self.on_execute(tasks)
+
+                if response:
+                    should_notify = await evaluate_response(
+                        response, tasks, self.provider, self.model,
+                    )
+                    if should_notify and self.on_notify:
+                        logger.info("Scheduler: HEARTBEAT.md work done, delivering")
+                        await self.on_notify(response)
+                    else:
+                        logger.info("Scheduler: HEARTBEAT.md response silenced by evaluation")
+        except Exception:
+            logger.exception("Scheduler: HEARTBEAT.md task failed")
+
+    async def _tick(self) -> None:
+        """One scheduler tick: cron always; HEARTBEAT.md when due."""
         if not self._file_lock.try_acquire():
-            logger.debug("Heartbeat: skip tick, another process holds the lock")
+            logger.debug("Scheduler: skip tick, another process holds the lock")
             return
         try:
             await self._run_due_cron_jobs()
 
-            content = self._read_heartbeat_file()
-            if not content:
-                logger.debug("Heartbeat: HEARTBEAT.md missing or empty")
+            if not self._heartbeat_due():
                 return
 
-            logger.info("Heartbeat: checking for unfinished tasks...")
-            try:
-                tasks = await self._tasks_to_run(content)
-                if not tasks:
-                    return
-
-                logger.info("Heartbeat: unfinished tasks found, executing...")
-                if self.on_execute:
-                    response = await self.on_execute(tasks)
-
-                    if response:
-                        should_notify = await evaluate_response(
-                            response, tasks, self.provider, self.model,
-                        )
-                        if should_notify and self.on_notify:
-                            logger.info("Heartbeat: completed, delivering response")
-                            await self.on_notify(response)
-                        else:
-                            logger.info("Heartbeat: silenced by post-run evaluation")
-            except Exception:
-                logger.exception("Heartbeat execution failed")
+            self._last_heartbeat_check = time.monotonic()
+            await self._run_heartbeat_file_task()
         finally:
             self._file_lock.release()
 
     async def trigger_now(self) -> str | None:
-        """Manually trigger a heartbeat."""
+        """Manual run: due cron jobs + immediate HEARTBEAT.md check."""
         await self._run_due_cron_jobs()
         content = self._read_heartbeat_file()
         if not content or not self.on_execute:
@@ -304,4 +321,5 @@ class HeartbeatService:
         tasks = await self._tasks_to_run(content)
         if not tasks:
             return None
+        self._last_heartbeat_check = time.monotonic()
         return await self.on_execute(tasks)

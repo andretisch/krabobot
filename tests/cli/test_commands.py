@@ -578,12 +578,16 @@ def test_heartbeat_retains_recent_messages_by_default():
     config = Config()
 
     assert config.gateway.heartbeat.keep_recent_messages == 8
+    assert config.gateway.heartbeat.tick_interval_s == 60
     assert config.gateway.heartbeat.interval_s == 30 * 60
 
 
-def test_invalid_scheduler_interval_becomes_half_hour():
-    config = Config.model_validate({"gateway": {"heartbeat": {"interval_s": 0}}})
+def test_invalid_scheduler_intervals_use_defaults():
+    config = Config.model_validate(
+        {"gateway": {"heartbeat": {"tickIntervalS": 0, "intervalS": 0}}},
+    )
 
+    assert config.gateway.heartbeat.tick_interval_s == 60
     assert config.gateway.heartbeat.interval_s == 30 * 60
 
 

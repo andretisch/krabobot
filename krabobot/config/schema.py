@@ -70,19 +70,32 @@ class ProvidersConfig(Base):
 
 
 class HeartbeatConfig(Base):
-    """In-process scheduler (``gateway.heartbeat`` in config).
+    """In-process task scheduler (``gateway.heartbeat`` in config).
 
-    Every ``interval_s`` it runs due cron jobs from ``jobs.json`` (not system
-    crontab) and checks ``HEARTBEAT.md`` for open recurring tasks.
+    ``tick_interval_s`` — how often due cron jobs in ``jobs.json`` are checked
+    (default one minute). ``interval_s`` — how often the built-in
+    ``HEARTBEAT.md`` task runs (default 30 minutes).
     """
 
     enabled: bool = True
+    tick_interval_s: int = 60
     interval_s: int = 30 * 60
     keep_recent_messages: int = 8
 
+    @field_validator("tick_interval_s", mode="before")
+    @classmethod
+    def _positive_tick(cls, value: object) -> object:
+        try:
+            seconds = int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return value
+        if seconds <= 0:
+            return 60
+        return seconds
+
     @field_validator("interval_s", mode="before")
     @classmethod
-    def _positive_interval(cls, value: object) -> object:
+    def _positive_heartbeat(cls, value: object) -> object:
         try:
             seconds = int(value)  # type: ignore[arg-type]
         except (TypeError, ValueError):
