@@ -7,6 +7,22 @@ from krabobot.cron.service import CronService, _resume_next_run
 from krabobot.cron.types import CronSchedule
 
 
+def test_load_store_records_mtime_without_spurious_reload(tmp_path) -> None:
+    store_path = tmp_path / "cron" / "jobs.json"
+    service = CronService(store_path)
+    service.add_job(
+        name="ping",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="hello",
+    )
+    service._load_store()
+    assert service._last_mtime > 0
+    assert service._store is not None
+    before_id = id(service._store)
+    service._load_store()
+    assert id(service._store) == before_id
+
+
 def test_add_job_rejects_unknown_timezone(tmp_path) -> None:
     service = CronService(tmp_path / "cron" / "jobs.json")
 
