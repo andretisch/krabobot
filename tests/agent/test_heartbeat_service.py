@@ -27,11 +27,10 @@ class DummyProvider(LLMProvider):
         return "test-model"
 
 
-def test_scheduler_interval_is_one_minute() -> None:
+def test_scheduler_interval_defaults_to_half_hour() -> None:
+    assert scheduler_interval(1800) == 1800
     assert scheduler_interval(60) == 60
-    assert scheduler_interval(30) == 30
-    assert scheduler_interval(1800) == 60
-    assert scheduler_interval(0) == 60
+    assert scheduler_interval(0) == 30 * 60
 
 
 def test_template_and_russian_sections() -> None:
@@ -375,10 +374,10 @@ async def test_tick_runs_due_cron_jobs(tmp_path) -> None:
         workspace=tmp_path,
         provider=provider,
         model="test-model",
-        interval_s=1800,
+        interval_s=42,
         cron_service=cron,
     )
-    assert service.interval_s == 60
+    assert service.interval_s == 42
     await service._tick()
     assert cron.calls == 1
 

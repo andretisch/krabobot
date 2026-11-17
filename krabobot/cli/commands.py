@@ -767,7 +767,7 @@ def _build_heartbeat_service(
     cron: Any,
     enabled_channels: Callable[[], set[str]],
 ) -> Any:
-    """Heartbeat that runs unfinished tasks and overdue cron jobs."""
+    """Build the in-process scheduler (cron due jobs + HEARTBEAT.md)."""
     from krabobot.heartbeat.service import HeartbeatService
 
     def _pick_heartbeat_target() -> tuple[str, str]:
@@ -914,13 +914,13 @@ def _log_gateway_status(runtime: _GatewayRuntime) -> None:
 
     hb_cfg = runtime.config.gateway.heartbeat
     console.print(
-        f"[green]✓[/green] Scheduler: heartbeat every {hb_cfg.interval_s}s "
-        "(checks due jobs and open tasks)"
+        f"[green]✓[/green] In-process scheduler: every {hb_cfg.interval_s}s "
+        "(cron jobs + HEARTBEAT.md)"
     )
 
 
 async def _start_schedulers(cron: Any, heartbeat: Any) -> None:
-    """Heartbeat is the clock. The cron object only stores and executes jobs."""
+    """Scheduler owns the clock; cron only stores jobs when heartbeat is enabled."""
     if getattr(heartbeat, "enabled", False):
         await cron.start(start_loop=False)
         await heartbeat.start()
@@ -1148,8 +1148,8 @@ def serve(
     )
     cron_jobs = cron.status().get("jobs", 0)
     console.print(
-        f"[green]✓[/green] Scheduler: heartbeat every {heartbeat.interval_s}s "
-        f"({cron_jobs} cron jobs)"
+        f"[green]✓[/green] In-process scheduler: every {heartbeat.interval_s}s "
+        f"({cron_jobs} cron jobs + HEARTBEAT.md)"
     )
 
     model_name = runtime_config.agents.defaults.model

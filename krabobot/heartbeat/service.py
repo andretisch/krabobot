@@ -52,9 +52,7 @@ _CHECKBOX = re.compile(r"^(?:[-*+]|\d+[.)])\s+\[([ xX])\]\s*(.*)$")
 _BULLET = re.compile(r"^(?:[-*+]|\d+[.)])\s+(.*)$")
 _HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 
-# The scheduler polls once a minute. Slower settings (the old 30-minute
-# default) left due jobs sitting until the next rare wake.
-SCHEDULER_INTERVAL_S = 60
+DEFAULT_SCHEDULER_INTERVAL_S = 30 * 60
 
 
 def unfinished_heartbeat_tasks(content: str) -> list[str]:
@@ -111,19 +109,18 @@ def heartbeat_file_is_boilerplate(content: str) -> bool:
 
 
 def scheduler_interval(interval_s: int) -> int:
-    """Return the poll period. Anything slower than a minute becomes one minute."""
-    if interval_s <= 0 or interval_s > SCHEDULER_INTERVAL_S:
-        return SCHEDULER_INTERVAL_S
+    """Return the poll period. Non-positive values fall back to 30 minutes."""
+    if interval_s <= 0:
+        return DEFAULT_SCHEDULER_INTERVAL_S
     return interval_s
 
 
 class HeartbeatService:
-    """
-    In-process scheduler. Once a minute it runs due cron jobs and any
-    unfinished tasks in ``HEARTBEAT.md``.
+    """In-process scheduler (config key ``gateway.heartbeat``).
 
-    Unfinished file tasks are unchecked boxes, list items, and lines under
-    Active Tasks. The Completed section is ignored.
+    On each tick it runs due cron jobs, then checks ``HEARTBEAT.md`` for open
+    recurring tasks. Unfinished items are unchecked boxes, list items, and lines
+    under Active Tasks; the Completed section is ignored.
     """
 
     def __init__(
@@ -133,7 +130,7 @@ class HeartbeatService:
         model: str,
         on_execute: Callable[[str], Coroutine[Any, Any, str]] | None = None,
         on_notify: Callable[[str], Coroutine[Any, Any, None]] | None = None,
-        interval_s: int = SCHEDULER_INTERVAL_S,
+        interval_s: int = DEFAULT_SCHEDULER_INTERVAL_S,
         enabled: bool = True,
         timezone: str | None = None,
         cron_service: Any | None = None,
@@ -204,7 +201,10 @@ class HeartbeatService:
 
         self._running = True
         self._task = asyncio.create_task(self._run_loop(), name="krabobot-heartbeat")
-        logger.info("Heartbeat scheduler started (every {}s)", self.interval_s)
+        logger.info(
+            "In-process scheduler started (every {}s: cron jobs + HEARTBEAT.md)",
+            self.interval_s,
+        )
 
     def stop(self) -> None:
         """Stop the heartbeat service."""
@@ -229,17 +229,17 @@ class HeartbeatService:
                 logger.error("Heartbeat error: {}", e)
 
     async def _run_due_cron_jobs(self) -> None:
-        """Run cron jobs whose deadline has arrived. This is the scheduler."""
+        """Run cron jobs whose deadline has arrived."""
         cron = self.cron_service
         if cron is None:
             return
         try:
             ran = await cron.run_due_jobs()
         except Exception:
-            logger.exception("Heartbeat: failed to run due cron jobs")
+            logger.exception("Scheduler: failed to run due cron jobs")
             return
         if ran:
-            logger.info("Heartbeat: ran {} due cron job(s)", ran)
+            logger.info("Scheduler: ran {} due cron job(s)", ran)
 
     async def _tasks_to_run(self, content: str) -> str | None:
         """Resolve unfinished HEARTBEAT.md work. ``None`` means nothing to run.

@@ -268,11 +268,11 @@ class CronService:
         self._last_mtime = self.store_path.stat().st_mtime
 
     async def start(self, *, start_loop: bool = True) -> None:
-        """Load the store and, unless heartbeat owns the clock, arm the timer.
+        """Load the store and, unless the scheduler owns the clock, arm the timer.
 
-        Heartbeat polls every minute and calls :meth:`run_due_jobs`. Passing
-        ``start_loop=False`` keeps this object as the job store without a
-        second loop that would run the same job twice.
+        The in-process scheduler calls :meth:`run_due_jobs` on its interval.
+        ``start_loop=False`` keeps this object as the job store without a second
+        loop that would run the same job twice.
         """
         if self._running:
             return
@@ -287,7 +287,7 @@ class CronService:
             self._load_store()
         if not start_loop:
             logger.info(
-                "Cron store ready ({} jobs); heartbeat runs due jobs every minute",
+                "Cron store ready ({} jobs); in-process scheduler runs due jobs",
                 len(self._store.jobs if self._store else []),
             )
             return
@@ -551,7 +551,7 @@ class CronService:
     async def run_due_jobs(self) -> int:
         """Run every enabled job whose deadline has arrived.
 
-        This is the minute-scheduler entry point. A job is due when
+        Called by the in-process scheduler. A job is due when
         ``next_run_at_ms`` is now or earlier; there is no extra grace period.
         """
         async with self._run_lock:

@@ -1,6 +1,6 @@
 # Heartbeat Tasks
 
-This file is checked every minute by the heartbeat scheduler.
+This file is checked on the in-process scheduler interval (default every 30 minutes).
 Add tasks below that you want the agent to work on periodically.
 
 If this file has no unfinished tasks (only headers and comments), the heartbeat skips the turn.

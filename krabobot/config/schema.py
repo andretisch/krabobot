@@ -70,26 +70,25 @@ class ProvidersConfig(Base):
 
 
 class HeartbeatConfig(Base):
-    """Heartbeat service configuration.
+    """In-process scheduler (``gateway.heartbeat`` in config).
 
-    Heartbeat is the in-process scheduler: it checks due jobs and open
-    ``HEARTBEAT.md`` tasks once a minute. Older configs stored the previous
-    30-minute default; those are pulled back to one minute.
+    Every ``interval_s`` it runs due cron jobs from ``jobs.json`` (not system
+    crontab) and checks ``HEARTBEAT.md`` for open recurring tasks.
     """
 
     enabled: bool = True
-    interval_s: int = 60
+    interval_s: int = 30 * 60
     keep_recent_messages: int = 8
 
     @field_validator("interval_s", mode="before")
     @classmethod
-    def _minute_scheduler(cls, value: object) -> object:
+    def _positive_interval(cls, value: object) -> object:
         try:
             seconds = int(value)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             return value
-        if seconds <= 0 or seconds > 60:
-            return 60
+        if seconds <= 0:
+            return 30 * 60
         return seconds
 
 
