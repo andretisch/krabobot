@@ -5,28 +5,35 @@ from pathlib import Path
 import pytest
 
 from krabobot.heartbeat.service import (
-    HeartbeatService,
     heartbeat_check_interval,
     scheduler_tick_interval,
     unfinished_heartbeat_tasks,
 )
-from krabobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from krabobot.providers.base import LLMProvider, LLMResponse
+from krabobot.scheduler.service import TaskScheduler
 
 
 class DummyProvider(LLMProvider):
-    def __init__(self, responses: list[LLMResponse]):
+    def __init__(self) -> None:
         super().__init__()
-        self._responses = list(responses)
-        self.calls = 0
 
     async def chat(self, *args, **kwargs) -> LLMResponse:
-        self.calls += 1
-        if self._responses:
-            return self._responses.pop(0)
         return LLMResponse(content="", tool_calls=[])
 
     def get_default_model(self) -> str:
         return "test-model"
+
+
+class FakeCron:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def bootstrap(self) -> None:
+        pass
+
+    async def run_due_jobs(self) -> int:
+        self.calls += 1
+        return 0
 
 
 def test_scheduler_intervals() -> None:
@@ -54,127 +61,66 @@ def test_template_and_russian_sections() -> None:
 
 @pytest.mark.asyncio
 async def test_start_is_idempotent(tmp_path) -> None:
-    provider = DummyProvider([])
-
-    service = HeartbeatService(
+    cron = FakeCron()
+    scheduler = TaskScheduler(
+        cron,  # type: ignore[arg-type]
         workspace=tmp_path,
-        provider=provider,
-        model="openai/gpt-4o-mini",
+        provider=DummyProvider(),
+        model="test",
         tick_interval_s=9999,
-        interval_s=1800,
         enabled=True,
     )
-
-    await service.start()
-    first_task = service._task
-    await service.start()
-
-    assert service._task is first_task
-
-    service.stop()
+    await scheduler.start()
+    first_task = scheduler._task
+    await scheduler.start()
+    assert scheduler._task is first_task
+    scheduler.stop()
     await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio
-async def test_decide_returns_skip_when_no_tool_call(tmp_path) -> None:
-    provider = DummyProvider([LLMResponse(content="no tool call", tool_calls=[])])
-    service = HeartbeatService(
-        workspace=tmp_path,
-        provider=provider,
-        model="openai/gpt-4o-mini",
-    )
-
-    action, tasks = await service._decide("heartbeat content")
-    assert action == "skip"
-    assert tasks == ""
-
-
-@pytest.mark.asyncio
-async def test_trigger_now_executes_when_decision_is_run(tmp_path) -> None:
+async def test_trigger_now_executes_open_tasks(tmp_path) -> None:
     (tmp_path / "HEARTBEAT.md").write_text("- [ ] do thing", encoding="utf-8")
-
-    provider = DummyProvider([
-        LLMResponse(
-            content="",
-            tool_calls=[
-                ToolCallRequest(
-                    id="hb_1",
-                    name="heartbeat",
-                    arguments={"action": "run", "tasks": "check open tasks"},
-                )
-            ],
-        )
-    ])
-
     called_with: list[str] = []
 
     async def _on_execute(tasks: str) -> str:
         called_with.append(tasks)
         return "done"
 
-    service = HeartbeatService(
+    scheduler = TaskScheduler(
+        FakeCron(),  # type: ignore[arg-type]
         workspace=tmp_path,
-        provider=provider,
-        model="openai/gpt-4o-mini",
-        on_execute=_on_execute,
+        provider=DummyProvider(),
+        model="test",
+        on_heartbeat_execute=_on_execute,
     )
-
-    result = await service.trigger_now()
+    result = await scheduler.trigger_now()
     assert result == "done"
     assert called_with == ["do thing"]
 
 
 @pytest.mark.asyncio
-async def test_trigger_now_returns_none_when_decision_is_skip(tmp_path) -> None:
+async def test_trigger_now_skips_completed_section(tmp_path) -> None:
     (tmp_path / "HEARTBEAT.md").write_text(
-        "## Completed\n- [ ] already done\n- finished item\n",
+        "## Completed\n- [ ] already done\n",
         encoding="utf-8",
     )
-
-    provider = DummyProvider([
-        LLMResponse(
-            content="",
-            tool_calls=[
-                ToolCallRequest(
-                    id="hb_1",
-                    name="heartbeat",
-                    arguments={"action": "skip"},
-                )
-            ],
-        )
-    ])
-
-    async def _on_execute(tasks: str) -> str:
+    async def _never(tasks: str) -> str:
         return tasks
 
-    service = HeartbeatService(
+    scheduler = TaskScheduler(
+        FakeCron(),  # type: ignore[arg-type]
         workspace=tmp_path,
-        provider=provider,
-        model="openai/gpt-4o-mini",
-        on_execute=_on_execute,
+        provider=DummyProvider(),
+        model="test",
+        on_heartbeat_execute=_never,
     )
-
-    assert await service.trigger_now() is None
+    assert await scheduler.trigger_now() is None
 
 
 @pytest.mark.asyncio
 async def test_tick_notifies_when_evaluator_says_yes(tmp_path, monkeypatch) -> None:
-    """Phase 1 run -> Phase 2 execute -> Phase 3 evaluate=notify -> on_notify called."""
     (tmp_path / "HEARTBEAT.md").write_text("- [ ] check deployments", encoding="utf-8")
-
-    provider = DummyProvider([
-        LLMResponse(
-            content="",
-            tool_calls=[
-                ToolCallRequest(
-                    id="hb_1",
-                    name="heartbeat",
-                    arguments={"action": "run", "tasks": "check deployments"},
-                )
-            ],
-        ),
-    ])
-
     executed: list[str] = []
     notified: list[str] = []
 
@@ -185,241 +131,130 @@ async def test_tick_notifies_when_evaluator_says_yes(tmp_path, monkeypatch) -> N
     async def _on_notify(response: str) -> None:
         notified.append(response)
 
-    service = HeartbeatService(
+    scheduler = TaskScheduler(
+        FakeCron(),  # type: ignore[arg-type]
         workspace=tmp_path,
-        provider=provider,
-        model="openai/gpt-4o-mini",
-        on_execute=_on_execute,
-        on_notify=_on_notify,
-    )
-
-    async def _eval_notify(*a, **kw):
-        return True
-
-    monkeypatch.setattr("krabobot.utils.evaluator.evaluate_response", _eval_notify)
-
-    await service._tick()
-    assert executed == ["check deployments"]
-    assert notified == ["deployment failed on staging"]
-
-
-@pytest.mark.asyncio
-async def test_tick_suppresses_when_evaluator_says_no(tmp_path, monkeypatch) -> None:
-    """Phase 1 run -> Phase 2 execute -> Phase 3 evaluate=silent -> on_notify NOT called."""
-    (tmp_path / "HEARTBEAT.md").write_text("- [ ] check status", encoding="utf-8")
-
-    provider = DummyProvider([
-        LLMResponse(
-            content="",
-            tool_calls=[
-                ToolCallRequest(
-                    id="hb_1",
-                    name="heartbeat",
-                    arguments={"action": "run", "tasks": "check status"},
-                )
-            ],
-        ),
-    ])
-
-    executed: list[str] = []
-    notified: list[str] = []
-
-    async def _on_execute(tasks: str) -> str:
-        executed.append(tasks)
-        return "everything is fine, no issues"
-
-    async def _on_notify(response: str) -> None:
-        notified.append(response)
-
-    service = HeartbeatService(
-        workspace=tmp_path,
-        provider=provider,
-        model="openai/gpt-4o-mini",
-        on_execute=_on_execute,
-        on_notify=_on_notify,
-    )
-
-    async def _eval_silent(*a, **kw):
-        return False
-
-    monkeypatch.setattr("krabobot.utils.evaluator.evaluate_response", _eval_silent)
-
-    await service._tick()
-    assert executed == ["check status"]
-    assert notified == []
-
-
-@pytest.mark.asyncio
-async def test_decide_retries_transient_error_then_succeeds(tmp_path, monkeypatch) -> None:
-    provider = DummyProvider([
-        LLMResponse(content="429 rate limit", finish_reason="error"),
-        LLMResponse(
-            content="",
-            tool_calls=[
-                ToolCallRequest(
-                    id="hb_1",
-                    name="heartbeat",
-                    arguments={"action": "run", "tasks": "check open tasks"},
-                )
-            ],
-        ),
-    ])
-
-    delays: list[int] = []
-
-    async def _fake_sleep(delay: int) -> None:
-        delays.append(delay)
-
-    monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
-
-    service = HeartbeatService(
-        workspace=tmp_path,
-        provider=provider,
-        model="openai/gpt-4o-mini",
-    )
-
-    action, tasks = await service._decide("heartbeat content")
-
-    assert action == "run"
-    assert tasks == "check open tasks"
-    assert provider.calls == 2
-    assert delays == [1]
-
-
-@pytest.mark.asyncio
-async def test_decide_prompt_includes_current_time(tmp_path) -> None:
-    """Phase 1 user prompt must contain current time so the LLM can judge task urgency."""
-
-    captured_messages: list[dict] = []
-
-    class CapturingProvider(LLMProvider):
-        async def chat(self, *, messages=None, **kwargs) -> LLMResponse:
-            if messages:
-                captured_messages.extend(messages)
-            return LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCallRequest(
-                        id="hb_1", name="heartbeat",
-                        arguments={"action": "skip"},
-                    )
-                ],
-            )
-
-        def get_default_model(self) -> str:
-            return "test-model"
-
-    service = HeartbeatService(
-        workspace=tmp_path,
-        provider=CapturingProvider(),
-        model="test-model",
-    )
-
-    await service._decide("- [ ] check servers at 10:00 UTC")
-
-    user_msg = captured_messages[1]
-    assert user_msg["role"] == "user"
-    assert "Current Time:" in user_msg["content"]
-    assert "unfinished" in user_msg["content"].lower()
-
-
-@pytest.mark.asyncio
-async def test_tick_runs_unchecked_tasks_when_model_would_skip(tmp_path, monkeypatch) -> None:
-    """Open checklist items run even if the phase-1 model is never consulted."""
-    (tmp_path / "HEARTBEAT.md").write_text(
-        "## Active Tasks\n- [ ] write report\n- [x] already sent\n\n"
-        "## Completed\n- [ ] moved here\n",
-        encoding="utf-8",
-    )
-    provider = DummyProvider([])
-    executed: list[str] = []
-    notified: list[str] = []
-
-    async def _on_execute(tasks: str) -> str:
-        executed.append(tasks)
-        return "sent the report"
-
-    async def _on_notify(response: str) -> None:
-        notified.append(response)
-
-    service = HeartbeatService(
-        workspace=tmp_path,
-        provider=provider,
-        model="test-model",
-        on_execute=_on_execute,
-        on_notify=_on_notify,
+        provider=DummyProvider(),
+        model="test",
+        on_heartbeat_execute=_on_execute,
+        on_heartbeat_notify=_on_notify,
     )
 
     async def _eval_notify(*_a, **_k):
         return True
 
     monkeypatch.setattr("krabobot.utils.evaluator.evaluate_response", _eval_notify)
+    await scheduler._tick()
+    assert executed == ["check deployments"]
+    assert notified == ["deployment failed on staging"]
 
-    await service._tick()
 
-    assert provider.calls == 0
+@pytest.mark.asyncio
+async def test_tick_suppresses_when_evaluator_says_no(tmp_path, monkeypatch) -> None:
+    (tmp_path / "HEARTBEAT.md").write_text("- [ ] check status", encoding="utf-8")
+    executed: list[str] = []
+    notified: list[str] = []
+
+    async def _on_execute(tasks: str) -> str:
+        executed.append(tasks)
+        return "everything is fine"
+
+    async def _on_notify(response: str) -> None:
+        notified.append(response)
+
+    scheduler = TaskScheduler(
+        FakeCron(),  # type: ignore[arg-type]
+        workspace=tmp_path,
+        provider=DummyProvider(),
+        model="test",
+        on_heartbeat_execute=_on_execute,
+        on_heartbeat_notify=_on_notify,
+    )
+
+    monkeypatch.setattr(
+        "krabobot.utils.evaluator.evaluate_response",
+        lambda *_a, **_k: asyncio.sleep(0, result=False),  # type: ignore[misc]
+    )
+    await scheduler._tick()
+    assert executed == ["check status"]
+    assert notified == []
+
+
+@pytest.mark.asyncio
+async def test_tick_runs_unchecked_tasks_from_file(tmp_path, monkeypatch) -> None:
+    (tmp_path / "HEARTBEAT.md").write_text(
+        "## Active Tasks\n- [ ] write report\n",
+        encoding="utf-8",
+    )
+    executed: list[str] = []
+
+    async def _on_execute(tasks: str) -> str:
+        executed.append(tasks)
+        return "ok"
+
+    scheduler = TaskScheduler(
+        FakeCron(),  # type: ignore[arg-type]
+        workspace=tmp_path,
+        provider=DummyProvider(),
+        model="test",
+        on_heartbeat_execute=_on_execute,
+    )
+    monkeypatch.setattr(
+        "krabobot.utils.evaluator.evaluate_response",
+        lambda *_a, **_k: asyncio.sleep(0, result=False),  # type: ignore[misc]
+    )
+    await scheduler._tick()
     assert executed == ["write report"]
-    assert notified == ["sent the report"]
 
 
 @pytest.mark.asyncio
 async def test_tick_runs_due_cron_jobs(tmp_path) -> None:
-    class _Cron:
-        def __init__(self) -> None:
-            self.calls = 0
-
+    class CountingCron(FakeCron):
         async def run_due_jobs(self) -> int:
             self.calls += 1
             return 2
 
-    cron = _Cron()
-    provider = DummyProvider([])
-    service = HeartbeatService(
+    cron = CountingCron()
+    scheduler = TaskScheduler(
+        cron,  # type: ignore[arg-type]
         workspace=tmp_path,
-        provider=provider,
-        model="test-model",
-        tick_interval_s=60,
-        interval_s=42,
-        cron_service=cron,
+        provider=DummyProvider(),
+        model="test",
+        heartbeat_interval_s=42,
     )
-    assert service.heartbeat_interval_s == 42
-    await service._tick()
+    assert scheduler.heartbeat_interval_s == 42
+    await scheduler._tick()
     assert cron.calls == 1
 
 
 @pytest.mark.asyncio
 async def test_heartbeat_file_not_checked_every_cron_tick(tmp_path, monkeypatch) -> None:
-  checks = 0
+    checks = 0
+    cron = FakeCron()
 
-  class _Cron:
-      async def run_due_jobs(self) -> int:
-          return 0
+    async def _fake_heartbeat(self) -> None:
+        nonlocal checks
+        checks += 1
 
-  async def _fake_heartbeat(self) -> None:
-      nonlocal checks
-      checks += 1
+    monkeypatch.setattr(TaskScheduler, "_run_heartbeat_builtin", _fake_heartbeat)
 
-  monkeypatch.setattr(HeartbeatService, "_run_heartbeat_file_task", _fake_heartbeat)
+    scheduler = TaskScheduler(
+        cron,  # type: ignore[arg-type]
+        workspace=tmp_path,
+        provider=DummyProvider(),
+        model="test",
+        heartbeat_interval_s=30,
+    )
+    t = 1_000.0
+    monkeypatch.setattr(time, "monotonic", lambda: t)
 
-  service = HeartbeatService(
-      workspace=tmp_path,
-      provider=DummyProvider([]),
-      model="test-model",
-      tick_interval_s=1,
-      interval_s=30,
-      cron_service=_Cron(),
-  )
-  t = 1_000.0
-  monkeypatch.setattr(time, "monotonic", lambda: t)
+    await scheduler._tick()
+    assert checks == 1
 
-  await service._tick()
-  assert checks == 1
+    t += 1
+    await scheduler._tick()
+    assert checks == 1
 
-  t += 1
-  await service._tick()
-  assert checks == 1
-
-  t += 30
-  await service._tick()
-  assert checks == 2
-
+    t += 30
+    await scheduler._tick()
+    assert checks == 2

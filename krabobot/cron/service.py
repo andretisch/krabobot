@@ -1,13 +1,10 @@
-"""In-process scheduler for agent tasks.
+"""Cron job store and execution (`workspace/cron/jobs.json`).
 
-This is not the system crontab. ``gateway`` and ``serve`` each run a scheduler
-loop against ``jobs.json``. A file lock makes sure only one process executes
-a due job. Missed deadlines are caught up once after downtime or a restart
-instead of being pushed a full interval into the future.
+Not system crontab. The :class:`~krabobot.scheduler.service.TaskScheduler`
+owns the timer and calls :meth:`CronService.run_due_jobs` each minute.
 """
 
 import asyncio
-import contextlib
 import json
 import time
 import uuid
@@ -118,7 +115,7 @@ def _validate_schedule_for_add(schedule: CronSchedule) -> None:
 
 
 class CronService:
-    """Service for managing and executing scheduled jobs."""
+    """JSON job store; execution is driven by :class:`TaskScheduler`."""
 
     _MAX_RUN_HISTORY = 20
 
@@ -126,21 +123,13 @@ class CronService:
         self,
         store_path: Path,
         on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = None,
-        *,
-        max_sleep_ms: int = 30_000,
     ):
         self.store_path = store_path
         self.on_job = on_job
         self._store: CronStore | None = None
         self._last_mtime: float = 0.0
-        self._timer_task: asyncio.Task | None = None
-        self._running = False
-        # Wake the loop early when a job is added or removed. Never cancel the
-        # running tick: that task is also the one executing the job.
-        self._wake = asyncio.Event()
         self._run_lock = asyncio.Lock()
         self._executing = False
-        self._max_sleep_ms = max(1_000, max_sleep_ms)
         self._file_lock = InterProcessLock(store_path.parent / f"{store_path.name}.lock")
 
     def _load_store(self) -> CronStore:
@@ -267,15 +256,8 @@ class CronService:
         self.store_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         self._last_mtime = self.store_path.stat().st_mtime
 
-    async def start(self, *, start_loop: bool = True) -> None:
-        """Load the store and, unless the scheduler owns the clock, arm the timer.
-
-        The in-process scheduler calls :meth:`run_due_jobs` on its interval.
-        ``start_loop=False`` keeps this object as the job store without a second
-        loop that would run the same job twice.
-        """
-        if self._running:
-            return
+    async def bootstrap(self) -> None:
+        """Load ``jobs.json`` and restore deadlines (no timer)."""
         if self._file_lock.try_acquire():
             try:
                 self._load_store()
@@ -285,27 +267,11 @@ class CronService:
                 self._file_lock.release()
         else:
             self._load_store()
-        if not start_loop:
-            logger.info(
-                "Cron store ready ({} jobs); in-process scheduler runs due jobs",
-                len(self._store.jobs if self._store else []),
-            )
-            return
-        self._running = True
-        self._timer_task = asyncio.create_task(self._scheduler_loop(), name="krabobot-cron")
-        logger.info(
-            "In-process cron scheduler started with {} jobs",
-            len(self._store.jobs if self._store else []),
-        )
+        count = len(self._store.jobs) if self._store else 0
+        logger.info("Cron store ready ({} jobs)", count)
 
     def stop(self) -> None:
-        """Stop the cron service."""
-        self._running = False
-        self._wake.set()
-        task = self._timer_task
-        self._timer_task = None
-        if task and not task.done():
-            task.cancel()
+        """No-op; kept for symmetry with gateway shutdown."""
 
     def _recompute_next_runs(self) -> None:
         """Fill deadlines on startup without postponing pending or overdue jobs."""
@@ -322,110 +288,15 @@ class CronService:
                 job.state.last_run_at_ms,
             )
 
-    def _get_next_wake_ms(self) -> int | None:
-        """Get the earliest next run time across all jobs."""
+    def _next_due_at_ms(self) -> int | None:
         if not self._store:
             return None
-        times = [j.state.next_run_at_ms for j in self._store.jobs
-                 if j.enabled and j.state.next_run_at_ms]
+        times = [
+            j.state.next_run_at_ms
+            for j in self._store.jobs
+            if j.enabled and j.state.next_run_at_ms
+        ]
         return min(times) if times else None
-
-    def _sleep_seconds(self) -> float:
-        """How long to idle before the next check.
-
-        The cap re-reads ``jobs.json`` and the wall clock so an NTP step or an
-        edit from another process is noticed even when the next deadline is far
-        away. A single long ``asyncio.sleep`` until that deadline is not.
-        """
-        nxt = self._get_next_wake_ms()
-        if nxt is None:
-            return self._max_sleep_ms / 1000
-        delay_ms = min(self._max_sleep_ms, max(0, nxt - _now_ms()))
-        return delay_ms / 1000
-
-    def _arm_timer(self) -> None:
-        """Ask the scheduler loop to wake up. Does not cancel a running job."""
-        self._wake.set()
-
-    async def _wait(self, delay_s: float) -> None:
-        if delay_s <= 0 or not self._running:
-            return
-        sleep_task = asyncio.create_task(asyncio.sleep(delay_s))
-        wake_task = asyncio.create_task(self._wake.wait())
-        try:
-            done, pending = await asyncio.wait(
-                {sleep_task, wake_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-        except asyncio.CancelledError:
-            sleep_task.cancel()
-            wake_task.cancel()
-            await asyncio.gather(sleep_task, wake_task, return_exceptions=True)
-            raise
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        if wake_task in done:
-            self._wake.clear()
-
-    async def _scheduler_loop(self) -> None:
-        """Keep scheduling until stopped. One failed tick does not kill the loop."""
-        while self._running:
-            try:
-                delay = self._sleep_seconds()
-                if delay > 0:
-                    await self._wait(delay)
-                if not self._running:
-                    break
-                acquired = await self._on_timer()
-                if not acquired and self._running:
-                    await self._wait(1.0)
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                logger.exception("Cron: scheduler tick failed; retrying")
-                if self._running:
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await self._wait(1.0)
-
-    async def _on_timer(self) -> bool:
-        """Run due jobs. Return False when another process holds the lock."""
-        async with self._run_lock:
-            if not self._file_lock.try_acquire():
-                logger.debug("Cron: tick skipped, another process holds the scheduler lock")
-                return False
-            try:
-                self._load_store()
-                if not self._store:
-                    return True
-
-                now = _now_ms()
-                due_ids = [
-                    j.id for j in self._store.jobs
-                    if j.enabled and j.state.next_run_at_ms and now >= j.state.next_run_at_ms
-                ]
-                if not due_ids:
-                    return True
-
-                self._executing = True
-                try:
-                    for job_id in due_ids:
-                        job = next((j for j in self._store.jobs if j.id == job_id), None)
-                        if job is None or not job.enabled:
-                            continue
-                        due_at = job.state.next_run_at_ms
-                        if not due_at or due_at > _now_ms():
-                            continue
-                        if due_at < _now_ms() - 1000:
-                            logger.info("Cron: running overdue job '{}' ({})", job.name, job.id)
-                        await self._execute_job(job)
-                    self._save_store()
-                finally:
-                    self._executing = False
-                return True
-            finally:
-                self._file_lock.release()
 
     async def _execute_job(self, job: CronJob) -> None:
         """Execute a single job."""
@@ -513,7 +384,6 @@ class CronService:
 
         store.jobs.append(job)
         self._save_store()
-        self._arm_timer()
 
         logger.info("Cron: added job '{}' ({})", name, job.id)
         return job
@@ -527,7 +397,6 @@ class CronService:
 
         if removed:
             self._save_store()
-            self._arm_timer()
             logger.info("Cron: removed job {}", job_id)
 
         return removed
@@ -544,14 +413,13 @@ class CronService:
                 else:
                     job.state.next_run_at_ms = None
                 self._save_store()
-                self._arm_timer()
                 return job
         return None
 
     async def run_due_jobs(self) -> int:
         """Run every enabled job whose deadline has arrived.
 
-        Called by the in-process scheduler. A job is due when
+        Called each scheduler tick. A job is due when
         ``next_run_at_ms`` is now or earlier; there is no extra grace period.
         """
         async with self._run_lock:
@@ -604,11 +472,7 @@ class CronService:
                 self._file_lock.release()
 
     def overdue_jobs(self, *, grace_ms: int = 60_000) -> list[CronJob]:
-        """Enabled jobs whose deadline passed and the scheduler has not run them.
-
-        ``grace_ms`` leaves a window for the scheduler loop so heartbeat does
-        not execute a job that is about to fire on its own.
-        """
+        """Enabled jobs still past deadline (diagnostics)."""
         now = _now_ms()
         cutoff = now - max(0, grace_ms)
         overdue: list[CronJob] = []
@@ -636,9 +500,7 @@ class CronService:
     ) -> bool:
         """Run a job now.
 
-        ``force`` runs a disabled job. ``only_if_due`` is the heartbeat
-        backstop: skip the job when the scheduler has already moved its
-        deadline forward.
+        ``only_if_due`` skips when the deadline is still in the future.
         """
         async with self._run_lock:
             if not self._file_lock.try_acquire():
@@ -662,7 +524,6 @@ class CronService:
                         self._save_store()
                     finally:
                         self._executing = False
-                    self._arm_timer()
                     return True
                 return False
             finally:
@@ -674,10 +535,8 @@ class CronService:
         return next((j for j in store.jobs if j.id == job_id), None)
 
     def status(self) -> dict:
-        """Get service status."""
         store = self._load_store()
         return {
-            "enabled": self._running,
             "jobs": len(store.jobs),
-            "next_wake_at_ms": self._get_next_wake_ms(),
+            "next_due_at_ms": self._next_due_at_ms(),
         }

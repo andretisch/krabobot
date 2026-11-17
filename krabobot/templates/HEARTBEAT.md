@@ -1,6 +1,6 @@
 # Heartbeat Tasks
 
-This file is a built-in scheduler task (default: checked every 30 minutes). Cron jobs in `cron/jobs.json` are polled every minute.
+Built-in scheduler task (default every 30 min via `gateway.heartbeat.intervalS`). User cron jobs in `cron/jobs.json` are checked every minute (`tickIntervalS`).
 Add tasks below that you want the agent to work on periodically.
 
 If this file has no unfinished tasks (only headers and comments), the heartbeat skips the turn.

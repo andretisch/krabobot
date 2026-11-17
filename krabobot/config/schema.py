@@ -70,11 +70,10 @@ class ProvidersConfig(Base):
 
 
 class HeartbeatConfig(Base):
-    """In-process task scheduler (``gateway.heartbeat`` in config).
+    """Task scheduler config (``gateway.heartbeat`` — historical key name).
 
-    ``tick_interval_s`` — how often due cron jobs in ``jobs.json`` are checked
-    (default one minute). ``interval_s`` — how often the built-in
-    ``HEARTBEAT.md`` task runs (default 30 minutes).
+    ``tick_interval_s``: cron poll from process start (default 1 min).
+    ``interval_s``: built-in ``HEARTBEAT.md`` task (default 30 min).
     """
 
     enabled: bool = True

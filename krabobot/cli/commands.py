@@ -660,7 +660,7 @@ def _warn_deprecated_config_keys(config_path: Path | None) -> None:
 
 @dataclass
 class _GatewayRuntime:
-    """Provider, agent, channels, cron, and heartbeat sharing one AgentLoop."""
+    """Provider, agent, channels, cron store, and task scheduler."""
 
     config: Config
     bus: Any
@@ -669,7 +669,7 @@ class _GatewayRuntime:
     agent: Any
     cron: Any
     channels: Any
-    heartbeat: Any
+    scheduler: Any
 
 
 def _configured_channel_names(config: Config) -> set[str]:
@@ -757,7 +757,7 @@ def _install_cron_executor(cron: Any, agent: Any, provider: Any, bus: Any) -> No
     cron.on_job = on_cron_job
 
 
-def _build_heartbeat_service(
+def _build_task_scheduler(
     *,
     config: Config,
     agent: Any,
@@ -767,8 +767,8 @@ def _build_heartbeat_service(
     cron: Any,
     enabled_channels: Callable[[], set[str]],
 ) -> Any:
-    """Build the in-process scheduler (cron due jobs + HEARTBEAT.md)."""
-    from krabobot.heartbeat.service import HeartbeatService
+    """Build the task scheduler (cron + built-in HEARTBEAT.md)."""
+    from krabobot.scheduler.service import TaskScheduler
 
     def _pick_heartbeat_target() -> tuple[str, str]:
         """Pick a routable channel/chat target for heartbeat-triggered messages."""
@@ -818,17 +818,16 @@ def _build_heartbeat_service(
 
     hb_cfg = config.gateway.heartbeat
     model = getattr(agent, "model", None) or config.agents.defaults.model
-    return HeartbeatService(
+    return TaskScheduler(
+        cron,
         workspace=config.workspace_path,
         provider=provider,
         model=model,
-        on_execute=on_heartbeat_execute,
-        on_notify=on_heartbeat_notify,
+        on_heartbeat_execute=on_heartbeat_execute,
+        on_heartbeat_notify=on_heartbeat_notify,
         tick_interval_s=hb_cfg.tick_interval_s,
-        interval_s=hb_cfg.interval_s,
+        heartbeat_interval_s=hb_cfg.interval_s,
         enabled=hb_cfg.enabled,
-        timezone=config.agents.defaults.timezone,
-        cron_service=cron,
     )
 
 
@@ -871,7 +870,7 @@ def _build_gateway_runtime(config: Config) -> _GatewayRuntime:
     _install_cron_executor(cron, agent, provider, bus)
 
     channels = ChannelManager(config, bus)
-    heartbeat = _build_heartbeat_service(
+    scheduler = _build_task_scheduler(
         config=config,
         agent=agent,
         provider=provider,
@@ -889,7 +888,7 @@ def _build_gateway_runtime(config: Config) -> _GatewayRuntime:
         agent=agent,
         cron=cron,
         channels=channels,
-        heartbeat=heartbeat,
+        scheduler=scheduler,
     )
 
 
@@ -920,26 +919,17 @@ def _log_gateway_status(runtime: _GatewayRuntime) -> None:
     )
 
 
-async def _start_schedulers(cron: Any, heartbeat: Any) -> None:
-    """Scheduler owns the clock; cron only stores jobs when heartbeat is enabled."""
-    if getattr(heartbeat, "enabled", False):
-        await cron.start(start_loop=False)
-        await heartbeat.start()
-        return
-    await cron.start()
-
-
 async def _run_gateway_stack(runtime: _GatewayRuntime) -> None:
-    """Start cron/heartbeat and run agent + channels until cancelled/stopped."""
+    """Start the task scheduler and run agent + channels until cancelled/stopped."""
     try:
-        await _start_schedulers(runtime.cron, runtime.heartbeat)
+        await runtime.scheduler.start()
         await asyncio.gather(
             runtime.agent.run(),
             runtime.channels.start_all(),
         )
     finally:
         await runtime.agent.close_mcp()
-        runtime.heartbeat.stop()
+        runtime.scheduler.stop()
         runtime.cron.stop()
         runtime.agent.stop()
         await runtime.channels.stop_all()
@@ -1138,7 +1128,7 @@ def serve(
         timezone=runtime_config.agents.defaults.timezone,
     )
     _install_cron_executor(cron, agent_loop, provider, bus)
-    heartbeat = _build_heartbeat_service(
+    scheduler = _build_task_scheduler(
         config=runtime_config,
         agent=agent_loop,
         provider=provider,
@@ -1149,8 +1139,8 @@ def serve(
     )
     cron_jobs = cron.status().get("jobs", 0)
     console.print(
-        f"[green]✓[/green] Task scheduler: cron every {heartbeat.tick_interval_s}s, "
-        f"HEARTBEAT.md every {heartbeat.heartbeat_interval_s}s ({cron_jobs} jobs)"
+        f"[green]✓[/green] Task scheduler: cron every {scheduler.tick_interval_s}s, "
+        f"HEARTBEAT.md every {scheduler.heartbeat_interval_s}s ({cron_jobs} jobs)"
     )
 
     model_name = runtime_config.agents.defaults.model
@@ -1178,7 +1168,7 @@ def serve(
         # Consume inbound (background exec / subagent announces). Without this,
         # serve only uses process_direct and completion callbacks sit forever
         # on the in-memory bus (gateway is a separate process with its own bus).
-        await _start_schedulers(cron, heartbeat)
+        await scheduler.start()
         await agent_loop._connect_mcp()
         _app["agent_loop_task"] = asyncio.create_task(agent_loop.run())
 
@@ -1221,7 +1211,7 @@ def serve(
         _app["outbound_drain_task"] = asyncio.create_task(_drain_local_outbound())
 
     async def on_cleanup(_app):
-        heartbeat.stop()
+        scheduler.stop()
         cron.stop()
         agent_loop.stop()
         for key in ("agent_loop_task", "outbound_drain_task"):

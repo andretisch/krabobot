@@ -7,7 +7,7 @@ description: Schedule reminders and recurring tasks.
 
 Use the `cron` tool to schedule reminders or recurring tasks.
 
-Jobs are stored by the `cron` tool and executed by the task scheduler while `krabobot gateway` or `krabobot serve` is up. The scheduler polls due jobs every minute (`gateway.heartbeat.tickIntervalS`). `HEARTBEAT.md` is a separate built-in task every 30 minutes (`intervalS`). Not system crontab.
+Jobs are stored in `workspace/cron/jobs.json` via the `cron` tool. **TaskScheduler** (config `gateway.heartbeat`) is the only timer: polls due jobs every minute (`tickIntervalS`), runs `HEARTBEAT.md` every 30 minutes (`intervalS`). Not system crontab. `CronService` has no timer of its own.
 
 ## Three Modes
 
